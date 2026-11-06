@@ -94,6 +94,7 @@ StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, con
     for (int r = 0; r < R; ++r)
         readers.emplace_back([&] {
             for (;;) {
+                if (opt.cancel && opt.cancel->load()) break;
                 int k = next++;
                 if (k >= N) break;
                 if (!infos[k].ok()) continue;

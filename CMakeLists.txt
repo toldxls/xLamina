@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 project(xLamina LANGUAGES CXX CUDA)
 
-# static C runtime: the executables depend on nothing but the NVIDIA driver
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+# dynamic C runtime (Qt's prebuilt libraries use it); the release ships the two VC++ runtime DLLs
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -29,6 +29,14 @@ endif()
 add_subdirectory(core)
 add_subdirectory(cli)
 add_subdirectory(tools/m0)
+
+# the GUI needs Qt 6 (Widgets); set CMAKE_PREFIX_PATH to its install, e.g. C:/Qt/6.8.3/msvc2022_64
+find_package(Qt6 COMPONENTS Widgets QUIET)
+if(Qt6_FOUND)
+  add_subdirectory(gui)
+else()
+  message(STATUS "Qt 6 not found: building without the GUI")
+endif()
 
 install(TARGETS stackcli RUNTIME DESTINATION .)
 install(FILES README.md LICENSE DESTINATION .)

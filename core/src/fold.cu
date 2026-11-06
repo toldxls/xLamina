@@ -4,6 +4,7 @@
 #include <thrust/execution_policy.h>
 #include <thrust/sort.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -79,6 +80,15 @@ __global__ void k_fold_c(float* __restrict__ c_sal, float* __restrict__ c_coef, 
 __global__ void k_add_base(double* __restrict__ base, const float* __restrict__ top, size_t n3) {
     size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n3) base[i] += (double)top[i];
+}
+
+__global__ void k_preview(const double* __restrict__ num, const double* __restrict__ den, int w, int h, int down,
+                          float* __restrict__ out, int pw, int ph) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= pw || y >= ph) return;
+    size_t i = (size_t)min(y * down + down / 2, h - 1) * w + min(x * down + down / 2, w - 1);
+    double d = den[i];
+    for (int c = 0; c < 3; ++c) out[((size_t)y * pw + x) * 3 + c] = d > 0 ? (float)(num[i * 3 + c] / d) : 0.f;
 }
 
 __global__ void k_fill_f32(float* p, size_t n, float v) {
@@ -239,6 +249,19 @@ void fold_accumulate(FoldState& st, int k, const float* d_img, const FoldParams&
         CK(cudaMemcpyAsync(st.d_noise_tmp, sc.fm, n * sizeof(float), cudaMemcpyDeviceToDevice, s));
         st.noise_fm = median_sorted(st.d_noise_tmp, n, s);
     }
+}
+
+void fold_preview(const FoldState& st, int down, std::vector<float>& rgb, int& pw, int& ph, cudaStream_t s) {
+    down = std::max(1, down);
+    pw = std::max(1, st.w / down);
+    ph = std::max(1, st.h / down);
+    float* d;
+    CK(cudaMallocAsync(&d, (size_t)pw * ph * 3 * sizeof(float), s));
+    k_preview<<<dim3((pw + 31) / 32, (ph + 7) / 8), dim3(32, 8), 0, s>>>(st.a_num, st.a_den, st.w, st.h, down, d, pw, ph);
+    rgb.resize((size_t)pw * ph * 3);
+    CK(cudaMemcpyAsync(rgb.data(), d, rgb.size() * sizeof(float), cudaMemcpyDeviceToHost, s));
+    CK(cudaFreeAsync(d, s));
+    CK(cudaStreamSynchronize(s));
 }
 
 // ----------------------------------------------------------------------------- host side

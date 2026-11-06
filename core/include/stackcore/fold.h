@@ -90,6 +90,9 @@ void fold_measure(const float* d_img, const FoldParams& p, FoldScratch& sc, cuda
 // Stage 2 (the device's single fold stream): fold frame k's measures into st.
 void fold_accumulate(FoldState& st, int k, const float* d_img, const FoldParams& p, FoldScratch& sc, cudaStream_t s);
 
+// Live preview of the running A (a_num / a_den) at 1/down of the grid, float RGB on the host (syncs the stream).
+void fold_preview(const FoldState& st, int down, std::vector<float>& rgb, int& pw, int& ph, cudaStream_t s);
+
 // Host copy of a state, for merging and for writing out.
 struct HostFoldState {
     int w = 0, h = 0, levels = 0;

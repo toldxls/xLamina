@@ -6,6 +6,7 @@
 
 #include <cuda_runtime.h>
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -35,6 +36,7 @@ struct StreamerOptions {
     std::vector<int> streams_by_device;   // optional, parallel to `devices`: per-GPU stream count (memory)
     int readers = 16;
     int pool = 0;                  // pinned buffers; 0 = readers + 2 * streams * gpus
+    std::atomic<bool>* cancel = nullptr;   // when set, readers stop taking frames and the pass ends early
 };
 
 struct StreamerStats {

@@ -9,7 +9,8 @@ add_library(stackcore STATIC
     src/volume.cu
     src/depth.cu
     src/compose.cu
-    src/align.cu)
+    src/align.cu
+    src/pipeline.cpp)
 target_include_directories(stackcore PUBLIC include)
 # static CUDA runtime: the executables need only the NVIDIA driver, no CUDA DLLs beside them
 # (no cuFFT: Windows ships it only as a DLL; the alignment's small DFT is done by twiddle matmuls)
