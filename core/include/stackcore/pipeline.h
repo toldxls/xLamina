@@ -105,6 +105,7 @@ int run_stack(StackOptions& so);
 
 struct AlignOptions {
     std::filesystem::path dir;
+    std::vector<std::filesystem::path> paths;   // the frames; empty = every TIFF in dir starting with prefix
     std::string out, prefix, ref_rule = "middle", pairs_sel;
     double align_scale = 0.25;
     std::vector<int> baselines = {1, 2, 4, 8}, devs;

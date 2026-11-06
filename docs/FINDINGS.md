@@ -801,3 +801,6 @@ off" colour. The remaining difference to Helicon is its tone curve (§10).
   than Helicon B at 1:1 (see 9).
 - Optional output tone stage (black point / contrast) to match Helicon's look,
   and optional highlight/sparkle suppression (see 10).
+- **AutoFOV link**: bring AutoFOV's per-frame blur values (and focus position)
+  into the frame list next to the alignment wobble, from a capture-side
+  sidecar, so frames can be culled or weighted from capture data too.

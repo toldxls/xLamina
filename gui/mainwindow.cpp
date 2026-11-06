@@ -27,6 +27,7 @@
 
 using namespace stackcore;
 
+static const double kDeg = 180.0 / 3.14159265358979323846;
 static const char* kOutputs[] = {"B", "C", "Cn", "A", "B0", "CB", "CBn", "Cd", "Cg", "Cg2", "H"};
 static const char* kOutputHelp[] = {
     "B: depth map. Each pixel from the frame where it is sharpest (regularised, refined, soft edges). Cleanest tones.",
@@ -81,6 +82,10 @@ void MainWindow::buildUi() {
     tb->addSeparator();
     tb->addAction("Fit", [this] { view_->fit(); });
     tb->addAction("1:1", [this] { view_->actualSize(); });
+    tb->addSeparator();
+    dropFlagged_ = tb->addAction("Drop flagged", this, &MainWindow::dropFlagged);
+    dropFlagged_->setEnabled(false);
+    dropFlagged_->setToolTip("Untick the frames whose wobble (shift from the previous frame) is an outlier; then Render again.");
     connect(renderBtn_, &QPushButton::clicked, this, &MainWindow::render);
     connect(cancelBtn_, &QPushButton::clicked, this, &MainWindow::cancel);
     connect(saveBtn_, &QPushButton::clicked, this, &MainWindow::saveCurrent);
@@ -223,6 +228,9 @@ void MainWindow::openFolder(const QString& dir) {
     folder_ = dir;
     frames_.clear();
     frameRows_.clear();
+    jobFrames_.clear();
+    flagged_.clear();
+    dropFlagged_->setEnabled(false);
     frameList_->clear();
     frameView_->clear();
     colorSpace_ = QColorSpace();
@@ -243,6 +251,9 @@ void MainWindow::openFolder(const QString& dir) {
         if (ok) {
             frames_ << d.filePath(files[i]);
             frameRows_ << i;
+            it->setFlags(it->flags() | Qt::ItemIsUserCheckable);
+            it->setCheckState(Qt::Checked);
+            it->setToolTip("Untick to leave this frame out of the render. Wobble numbers appear here after a render.");
             if (!colorSpace_.isValid() && !infos[i].icc.empty())
                 colorSpace_ = QColorSpace::fromIccProfile(QByteArray((const char*)infos[i].icc.data(), (int)infos[i].icc.size()));
         } else {
@@ -277,7 +288,8 @@ void MainWindow::onThumbnail(int index, QImage image) {
 // the output grid) and the small pane shows the result building; from the depth
 // map on, the main view shows the result and the small pane the frame.
 void MainWindow::onFrame(int k, QImage image) {
-    if (k < 0 || k >= frameRows_.size()) return;
+    if (k < 0 || k >= jobFrames_.size()) return;
+    k = jobFrames_[k];   // the job's frame -> the folder's frame
     selecting_ = true;
     frameList_->setCurrentRow(frameRows_[k]);
     selecting_ = false;
@@ -333,6 +345,14 @@ void MainWindow::render() {
     if (worker_.running()) return;
     JobOptions jo;
     jo.align.dir = folder_.toStdWString();
+    // the ticked frames only
+    jobFrames_.clear();
+    for (int i = 0; i < frames_.size(); ++i)
+        if (frameList_->item(frameRows_[i])->checkState() == Qt::Checked) {
+            jobFrames_ << i;
+            jo.align.paths.push_back(frames_[i].toStdWString());
+        }
+    if (jobFrames_.size() < 3) { QMessageBox::information(this, "xLamina", "A stack needs at least 3 ticked frames."); return; }
     jo.align.ref_rule = ref_->currentIndex() == 0 ? "middle" : ref_->currentIndex() == 1 ? "first" : "last";
     jo.align.lock_scale = lockScale_->isChecked();
     if (fov_->value() > 0) jo.align.um_per_px = -fov_->value();
@@ -397,13 +417,71 @@ void MainWindow::setStatusGeometry(const JobResultData& d) {
                  .arg(upp, 0, 'f', 5).arg(upp * A.smin, 0, 'f', 5).arg(upp * A.smax, 0, 'f', 5)
                  .arg(cw * upp / 1000, 0, 'f', 4).arg(ch * upp / 1000, 0, 'f', 4);
     }
+    if (!wobble_.isEmpty()) g += "\n" + wobble_;
     g += QString("\nfusion %1 s; report.json and the TIFFs in %2").arg(d.result.seconds, 0, 'f', 1).arg(QDir::toNativeSeparators(d.outDir));
     geometry_->setText(g);
+}
+
+// Per-frame wobble: each frame's shift (and scale, rotation) relative to the previous
+// frame, from the alignment. Steps far from the median are flagged as outliers.
+void MainWindow::labelWobble(const stackcore::AlignOut& A) {
+    flagged_.clear();
+    int n = (int)A.T.size();
+    if (n != jobFrames_.size() || n < 2) return;
+    QVector<double> step(n, 0.0), sstep(n, 0.0), rstep(n, 0.0);
+    for (int k = 1; k < n; ++k) {
+        const Similarity &a = A.T[k - 1], &b = A.T[k];
+        step[k] = std::hypot(b.tx - a.tx, b.ty - a.ty);
+        double sa = std::hypot(a.zr, a.zi), sb = std::hypot(b.zr, b.zi);
+        sstep[k] = 100.0 * (sb / sa - 1);
+        rstep[k] = (std::atan2(b.zi, b.zr) - std::atan2(a.zi, a.zr)) * kDeg;
+    }
+    // robust threshold on the shift step: median + 4 x 1.4826 MAD, at least 0.5 px above the median
+    QVector<double> v(step.begin() + 1, step.end());
+    std::sort(v.begin(), v.end());
+    double med = v[v.size() / 2];
+    QVector<double> dev;
+    for (double x : v) dev << std::abs(x - med);
+    std::sort(dev.begin(), dev.end());
+    double mad = 1.4826 * dev[dev.size() / 2];
+    double thr = med + std::max(4 * mad, 0.5);
+    double worst = 0;
+    int worstk = -1;
+    for (int k = 0; k < n; ++k) {
+        QListWidgetItem* it = frameList_->item(frameRows_[jobFrames_[k]]);
+        QString name = QFileInfo(frames_[jobFrames_[k]]).fileName();
+        if (k == 0) {
+            it->setText(name + "\nfirst frame");
+        } else {
+            it->setText(QString("%1\nΔ %2 px  %3 %").arg(name).arg(step[k], 0, 'f', 2).arg(sstep[k], 0, 'f', 3));
+        }
+        bool flag = k > 0 && step[k] > thr;
+        it->setForeground(flag ? QBrush(QColor(230, 80, 80)) : QBrush());
+        it->setToolTip(QString("To the reference: shift (%1, %2) px, scale %3, rotation %4°\n"
+                               "From the previous frame: %5 px, %6 %, %7°%8")
+                           .arg(A.T[k].tx, 0, 'f', 2).arg(A.T[k].ty, 0, 'f', 2).arg(std::hypot(A.T[k].zr, A.T[k].zi), 0, 'f', 5)
+                           .arg(std::atan2(A.T[k].zi, A.T[k].zr) * kDeg, 0, 'f', 4)
+                           .arg(step[k], 0, 'f', 3).arg(sstep[k], 0, 'f', 4).arg(rstep[k], 0, 'f', 4)
+                           .arg(flag ? QString("\nFLAGGED: above %1 px (median %2 px)").arg(thr, 0, 'f', 2).arg(med, 0, 'f', 2) : ""));
+        if (flag) flagged_ << jobFrames_[k];
+        if (step[k] > worst) { worst = step[k]; worstk = jobFrames_[k]; }
+    }
+    wobble_ = QString("wobble: median step %1 px, largest %2 px (%3), %4 flagged")
+                  .arg(med, 0, 'f', 2).arg(worst, 0, 'f', 2).arg(worstk >= 0 ? QFileInfo(frames_[worstk]).fileName() : "-").arg(flagged_.size());
+    dropFlagged_->setEnabled(!flagged_.isEmpty());
+}
+
+void MainWindow::dropFlagged() {
+    for (int i : flagged_) frameList_->item(frameRows_[i])->setCheckState(Qt::Unchecked);
+    statusBar()->showMessage(QString("%1 frame%2 unticked; press Render to stack without them.").arg(flagged_.size()).arg(flagged_.size() == 1 ? "" : "s"));
+    flagged_.clear();
+    dropFlagged_->setEnabled(false);
 }
 
 void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
     result_ = data;
     setBusy(false);
+    labelWobble(data->align);
     if (data->rc == 3) { stage_->setText("Cancelled."); return; }
     if (data->rc != 0) { stage_->setText("Failed; see the log."); QMessageBox::warning(this, "xLamina", "The render failed. The log has the details."); return; }
     stage_->setText(QString("Done in %1 s.").arg(data->result.seconds, 0, 'f', 1));

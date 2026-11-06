@@ -45,9 +45,11 @@ private slots:
     void onThumbnail(int index, QImage image);
     void onLog(QString line);
     void onFinished(std::shared_ptr<JobResultData> data);
+    void dropFlagged();
 
 private:
     void buildUi();
+    void labelWobble(const stackcore::AlignOut& A);
     void setBusy(bool busy);
     void setStatusGeometry(const JobResultData& d);
     QImage outputImage(const QString& name);
@@ -56,6 +58,10 @@ private:
     QString folder_;
     QStringList frames_;
     QList<int> frameRows_;                 // list row of each frame
+    QList<int> jobFrames_;                 // the frames (indices into frames_) of the current / last render
+    QList<int> flagged_;                   // frames whose wobble is an outlier
+    QString wobble_;                       // the wobble summary line
+    QAction* dropFlagged_ = nullptr;
     QColorSpace colorSpace_;               // the frames' ICC profile (invalid = assume sRGB)
     bool selecting_ = false;
     QLabel* frameView_ = nullptr;

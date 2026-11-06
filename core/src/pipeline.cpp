@@ -766,13 +766,17 @@ int run_align(AlignOptions& ao, AlignOut& A) {
     const Hooks& hooks = ao.hooks;
     std::vector<fs::path>& paths = A.paths;
     paths.clear();
-    for (auto& e : fs::directory_iterator(dir)) {
-        auto name = e.path().filename().string();
-        auto ext = e.path().extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-        if (e.is_regular_file() && (ext == ".tif" || ext == ".tiff") && name.rfind(prefix, 0) == 0) paths.push_back(e.path());
+    if (!ao.paths.empty()) {
+        paths = ao.paths;
+    } else {
+        for (auto& e : fs::directory_iterator(dir)) {
+            auto name = e.path().filename().string();
+            auto ext = e.path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            if (e.is_regular_file() && (ext == ".tif" || ext == ".tiff") && name.rfind(prefix, 0) == 0) paths.push_back(e.path());
+        }
+        std::sort(paths.begin(), paths.end());
     }
-    std::sort(paths.begin(), paths.end());
     // frames are the TIFFs of the most common size; anything else in the folder (a previous stack's
     // outputs, say) is left out and reported
     {

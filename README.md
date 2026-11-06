@@ -29,6 +29,11 @@ current one as a 16-bit TIFF, JPEG or PNG; the full set plus `report.json` is al
 written to `<folder>_stacker`. The frames' ICC profile is kept in the outputs and used
 for display.
 
+After a render each frame in the list shows its wobble: the shift (px) and scale change
+(%) from the previous frame, from the alignment. Frames whose shift is an outlier are
+shown in red; Drop flagged unticks them, and unticked frames are left out of the next
+render.
+
 Smoothing (C) sets how much of C's weak detail is taken from B rather than from the
 sharpest frame: 0 is the raw selection (in flat areas it picks the noisiest frame),
 2 is about Helicon's Smoothing 1, 3 is Cn.
