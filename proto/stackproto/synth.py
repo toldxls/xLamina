@@ -48,7 +48,7 @@ class SynthParams:
     periodic_period_um: float = 500.0
     flicker: float = 0.0             # RMS exposure gain error
     noise: float = 0.003             # sensor noise sigma at mid grey (fraction of full scale)
-    relief: str = "dome"             # dome | flat | tilt (specimen height map shape)
+    relief: str = "dome"             # dome | flat | tilt | steps (specimen height map)
     layers: int = 28
     seed: int = 1
 
@@ -115,6 +115,15 @@ def make_height(rng, H, W, zmin, zmax, relief="dome") -> np.ndarray:
         return np.full((H, W), 0.5 * (zmin + zmax), np.float32)
     if relief == "tilt":                       # tilted flat target
         return (zmin + (zmax - zmin) * xx / (W - 1)).astype(np.float32)
+    if relief == "steps":                      # crystal-like plateaus with abrupt depth jumps
+        from scipy.spatial import cKDTree
+        npts = 30
+        pts = rng.uniform(0, 1, (npts, 2)) * [W, H]
+        _, lab = cKDTree(pts).query(np.stack([xx.ravel(), yy.ravel()], 1))
+        lvl = rng.uniform(0, 1, npts)
+        h = lvl[lab].reshape(H, W) + 0.08 * (xx / W)
+        h = (h - h.min()) / (h.max() - h.min())
+        return (zmin + (zmax - zmin) * h).astype(np.float32)
     h = 0.15 * (xx / W) + 0.1 * (yy / H)
     for _ in range(5):
         cx, cy = rng.uniform(0.1, 0.9) * W, rng.uniform(0.1, 0.9) * H

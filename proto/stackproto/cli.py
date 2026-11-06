@@ -115,6 +115,18 @@ def main(argv=None):
     c.add_argument("analysis_dir", help="the <stack>_stacker folder from analyze")
     c.add_argument("outputs", nargs="+", help="external stacked TIFF/JPEG files")
 
+    fu = sub.add_parser("fuse", help="fuse a stack with methods A/B/C + variants using an "
+                                     "'analyze' run's transforms")
+    fu.add_argument("analysis_dir")
+    fu.add_argument("frames_dir")
+    fu.add_argument("--scale", type=float, default=0.5)
+    fu.add_argument("--lock-scale", action="store_true")
+    fu.add_argument("--policy", default="native-crop", choices=["native-crop", "native-full"])
+    fu.add_argument("--roi", default=None, help="x0,y0,x1,y1 in reference full-res px")
+    fu.add_argument("--workers", type=int, default=6)
+    fu.add_argument("--smoothing", type=int, default=8, help="depth smoothing radius, full-res px")
+    fu.add_argument("--radius", type=float, default=6.0, help="focus window, full-res px")
+
     a = ap.parse_args(argv)
     if a.cmd == "synth":
         params = SynthParams(**{**PRESETS[a.preset], **_parse_set(a.set)})
@@ -136,6 +148,38 @@ def main(argv=None):
             res.append(out)
             print(json.dumps(out, indent=1))
         (Path(a.analysis_dir) / "compare.json").write_text(json.dumps(res, indent=1))
+    elif a.cmd == "fuse":
+        import time
+        import numpy as np
+        from . import fusion
+        from .frames import write_rgb16
+        rep = json.loads((Path(a.analysis_dir) / "report.json").read_text())
+        pf = rep["per_frame"]
+        W, H = rep["geometry"]["input"]["width"], rep["geometry"]["input"]["height"]
+        z = np.array([p["s"] * np.exp(1j * np.deg2rad(p["theta_deg"])) for p in pf])
+        if a.lock_scale:
+            z = z / np.abs(z)
+        t = np.array([complex(p["tx"], p["ty"]) for p in pf])
+        if a.roi:
+            rect = tuple(int(v) for v in a.roi.split(","))
+        elif a.policy == "native-crop":
+            cp = rep["geometry"]["policies"]["native-crop"]["crop_px"]
+            rect = (cp["left"], cp["top"], W - 1 - cp["right"], H - 1 - cp["bottom"])
+        else:
+            rect = (0, 0, W - 1, H - 1)
+        grid = fusion.Grid(W, H, rect, a.scale)
+        paths = [Path(a.frames_dir) / p["file"] for p in pf]
+        tag = f"fusion_{a.scale:g}" + ("_locked" if a.lock_scale else "") + ("_roi" if a.roi else "")
+        od = Path(a.analysis_dir) / tag
+        od.mkdir(exist_ok=True)
+        t0 = time.time()
+        out, info = fusion.run(paths, z, t, grid, workers=a.workers, smoothing_px=a.smoothing,
+                               radius_px=a.radius)
+        for k, img in out.items():
+            write_rgb16(od / f"{k}.tif", img)
+        np.save(od / "depth.npy", info["depth"])
+        print(f"fused {len(paths)} frames onto {grid.size[0]}x{grid.size[1]} in "
+              f"{time.time() - t0:.0f}s -> {od}")
     elif a.cmd == "validate":
         truth = json.loads((Path(a.folder) / "truth.json").read_text())
         p = truth["params"]

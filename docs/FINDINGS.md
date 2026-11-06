@@ -134,6 +134,51 @@ not the optical axis. The two coincide only if the rail is parallel to the axis.
 - Our native-crop with the middle reference: 6840 × 4429 (L29 R91 T88 B123).
 - Command: `stackproto compare <analysis_dir> <helicon.tif> ...`.
 
+## 7. Fusion prototypes (A8), 2026-11-05
+
+All folds are order-independent. 1 worker vs 3 workers with a scrambled merge
+order gives bit-identical B / C / variants (`test_fusion.py`): the multi-GPU
+invariant holds.
+
+**Synthetic "steps" stack** (crystal-like plateaus; PSNR vs ground truth, higher = better):
+
+| Method | All | Halo zone | Plateaus |
+|---|---|---|---|
+| A weighted avg | 34.9 | 31.1 | 39.6 |
+| B depth map | 33.5 | 29.0 | 44.3 |
+| C pyramid | 37.4 | **34.0** | 41.2 |
+| **Cn** noise-aware pyramid | **37.6** | 33.5 | **44.3** |
+| CB depth-guided | 37.5 | 33.3 | 44.2 |
+| H luma CBn / chroma B | 36.8 | 32.5 | 44.3 |
+
+**Real stack** (163 frames, compared at half and full res against Helicon B, C
+and the user's B+C composite; montages: `~/Desktop/stacker_vs_helicon*.jpg`):
+- **C ≈ Helicon C** in detail. It is noisier in dark low-signal gaps and shows
+  seams there; Helicon evidently suppresses that.
+- **Cn is the best of ours**: clean at half res, needles intact, close to the
+  user's composite. At full res it picks up some of B's glow in dark gaps.
+- **B is NOT at Helicon-B quality.** The depth-map confidence is the open
+  problem; each fix helped one scale/region and hurt another:
+  1. relative peak (best−mean)/best → blotchy patchworks in defocused background;
+  2. guided by the B0 argmax colour → kept those patch outlines (fixed: guide with A);
+  3. global noise-floor test → clean background at half res, but at full res
+     fine low-contrast detail sits near the per-pixel noise floor, so the fan
+     centre lost its needles;
+  4. per-pixel peak/mean ratio (current) → full-res fan fixed, half-res
+     background patch outlines are back, and dark gaps glow at full res.
+
+  Needs a real depth estimator: multi-scale focus measure, regularised
+  (MRF/graph-cut style) labelling with occlusion awareness, not thresholds.
+- Rejected: **Cs** (global soft-threshold shrinkage + selected base). Fine detail
+  at full res is noise-sized, so it erased the needles. Synthetic 34.5 vs C 37.4.
+- Noise per pyramid level is now estimated from two ADJACENT frames' coefficient
+  difference (MAD/√2). Frame 0's own MAD includes real detail.
+- Window sizes are in full-res sensor px and scaled to the working grid, so
+  half- and full-res runs use the same physical windows.
+- Speed (CPU, Mac, 6 workers): all methods in ONE shared read pass (broadcast
+  mode), 163 frames → 3420 × 2214 in ~95 s. Helicon on a 3080 Ti: B ~20 s,
+  C ~9–10 s at full res.
+
 ## Open items
 
 - **Residual flat-target roll bias**: a smooth hump of ±17 mdeg RMS per frame on far-defocused frames, antisymmetric about focus (the fitted rate is fine: 52 vs 50 mdeg/mm). Also ε reads −2.4 % (≈ 6σ). Cause unknown.
@@ -142,3 +187,4 @@ not the optical axis. The two coincide only if the rail is parallel to the axis.
   2. a specimen stack (how big is the relief bias in reality?);
   3. the same specimen with scale locked vs free.
 - Test the reversal protocol.
+- **B depth-map estimator** (see 7). Cn depends on B in low-contrast areas.

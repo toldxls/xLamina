@@ -106,3 +106,45 @@ def register_external(ext_path, stack, report, factors):
             "min": upp * float(s_frames.min()) / s_ext, "max": upp * float(s_frames.max()) / s_ext}
         out["fov_mm_external"] = [EW * upp / s_ext / 1000, EH * upp / s_ext / 1000]
     return out, fused, idx
+
+
+def warp_external_onto(ext_path, target_rgb, ext_scale):
+    """Warp an external output (full-res file) onto ``target_rgb``'s grid.
+
+    ``ext_scale``: factor taking the external file to the target's resolution
+    (e.g. 0.5). Registration: similarity on luma (coarse offset by phase
+    correlation, then the exact Gauss-Newton pair aligner).
+    Returns (warped_rgb, info).
+    """
+    ext = ext_path if isinstance(ext_path, np.ndarray) else read_rgb(ext_path)
+    EH, EW = ext.shape[:2]
+    ew, eh = int(round(EW * ext_scale)), int(round(EH * ext_scale))
+    ext_s = ext if ext_scale == 1.0 else cv2.resize(ext, (ew, eh), interpolation=cv2.INTER_AREA)
+    tgt_y = luma(target_rgb)
+    ext_y = luma(ext_s)
+    h, w = tgt_y.shape
+    # common size for the coarse search
+    ch, cw = max(h, eh), max(w, ew)
+    A = np.full((ch, cw), float(tgt_y.mean()), np.float32); A[:h, :w] = tgt_y
+    B = np.full((ch, cw), float(ext_y.mean()), np.float32); B[:eh, :ew] = ext_y
+    win = cv2.createHanningWindow((cw, ch), cv2.CV_32F)
+    (dx, dy), _ = cv2.phaseCorrelate(A, B, win)
+    ox, oy = int(round(-dx)), int(round(-dy))
+    # overlapping window: target [oy:oy+hh, ox:ox+ww] <-> ext [0:hh, 0:ww] (shifted if negative)
+    ex0, ey0 = max(0, -ox), max(0, -oy)
+    tx0, ty0 = max(0, ox), max(0, oy)
+    ww = min(w - tx0, ew - ex0)
+    hh = min(h - ty0, eh - ey0)
+    tc = np.ascontiguousarray(tgt_y[ty0:ty0 + hh, tx0:tx0 + ww])
+    ec = np.ascontiguousarray(ext_y[ey0:ey0 + hh, ex0:ex0 + ww])
+    pa, f = align.pyramid(tc, 150)
+    pb, _ = align.pyramid(ec, 150)
+    r = align.align_pair(pa, pb, f)
+    # target plain (x) -> window-centred p -> ext-window-centred q -> ext plain
+    c = sim.centre(ww, hh)
+    M = sim.to_affine(r.z, r.t, ww, hh)              # window plain -> ext-window plain
+    M[:, 2] += M[:, :2] @ np.array([-tx0, -ty0]) + np.array([ex0, ey0])
+    warped = cv2.warpAffine(ext_s, M, (w, h), flags=cv2.INTER_CUBIC | cv2.WARP_INVERSE_MAP,
+                            borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
+    return warped, {"scale": abs(r.z), "rot_mdeg": 1e3 * float(np.degrees(np.angle(r.z))),
+                    "ncc": r.ncc, "offset": (ox, oy)}
