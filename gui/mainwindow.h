@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QCheckBox>
+#include <QColorSpace>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QLabel>
@@ -40,6 +41,8 @@ private slots:
     void showOutput(int tab);
     void onProgress(QString stage, double fraction);
     void onPreview(QString name, QImage image);
+    void onFrame(int k, QImage image);
+    void onThumbnail(int index, QImage image);
     void onLog(QString line);
     void onFinished(std::shared_ptr<JobResultData> data);
 
@@ -48,9 +51,15 @@ private:
     void setBusy(bool busy);
     void setStatusGeometry(const JobResultData& d);
     QImage outputImage(const QString& name);
+    QImage forDisplay(QImage img) const;   // the frames' colour space -> sRGB
 
     QString folder_;
     QStringList frames_;
+    QList<int> frameRows_;                 // list row of each frame
+    QColorSpace colorSpace_;               // the frames' ICC profile (invalid = assume sRGB)
+    bool selecting_ = false;
+    QLabel* frameView_ = nullptr;
+    ThumbLoader thumbs_;
     std::shared_ptr<JobResultData> result_;
     QMap<QString, QImage> cache_;        // 8-bit versions of outputs and previews
     QString current_;                    // name of the image on screen
@@ -70,6 +79,7 @@ private:
     QComboBox* ref_ = nullptr;
     QCheckBox* lockScale_ = nullptr;
     QDoubleSpinBox* fov_ = nullptr;
+    QDoubleSpinBox* smoothing_ = nullptr;
     QLineEdit* outDir_ = nullptr;
     QMap<QString, QCheckBox*> outputs_;
     Worker worker_;

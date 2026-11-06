@@ -109,6 +109,16 @@ TiffInfo tiff_probe(const std::filesystem::path& path) {
         const uint8_t* e = ent.data() + i * esz;
         uint16_t tag = (uint16_t)P.num(e, 2), type = (uint16_t)P.num(e + 2, 2);
         uint64_t count = P.num(e + 4, P.big ? 8 : 4);
+        if (tag == 34675 && count > 0 && count < (1u << 24)) {   // ICC profile: raw bytes
+            size_t inl = P.big ? 8 : 4;
+            const uint8_t* src = e + (P.big ? 12 : 8);
+            t.icc.resize(count);
+            if (count > inl) {
+                uint64_t off = P.num(src, (int)inl);
+                if (f.read_at(off, t.icc.data(), count) < count) t.icc.clear();
+            } else std::memcpy(t.icc.data(), src, count);
+            continue;
+        }
         switch (tag) {
             case 256: case 257: case 258: case 259: case 262: case 273: case 277: case 278: case 279:
             case 284: case 322: case 323: case 324: case 325: case 339:

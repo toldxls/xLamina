@@ -26,6 +26,7 @@ struct TiffInfo {
     bool contiguous = false;      // strips follow each other with no gaps
     uint64_t data_offset = 0;     // first strip
     uint64_t data_bytes = 0;      // sum of strip bytes
+    std::vector<uint8_t> icc;     // embedded ICC profile (tag 34675), if any
     std::string error;            // non-empty: unusable for the fast path, says why
 
     bool ok() const { return error.empty(); }

@@ -1,4 +1,4 @@
-// The pipeline as a library: alignment, pass 1 (+ depth volume), the fusion
+﻿// The pipeline as a library: alignment, pass 1 (+ depth volume), the fusion
 // and the folder-level job. The CLI and the GUI both call this. Progress and
 // preview callbacks let a GUI show the stack building (DESIGN.md: progressive
 // preview); a cancel flag stops a job between frames.
@@ -25,16 +25,20 @@ using LogFn = std::function<void(const std::string&)>;
 void set_log(LogFn fn);
 void logf(const char* fmt, ...);
 
-// progress(stage, fraction 0..1); preview(name, rgb float interleaved, w, h)
+// progress(stage, fraction 0..1); preview(name, rgb float interleaved, w, h);
+// frame(k, rgb, w, h): the frame just processed (warped onto the output grid, small)
 using ProgressFn = std::function<void(const std::string& stage, double fraction)>;
 using PreviewFn = std::function<void(const std::string& name, const std::vector<float>& rgb, int w, int h)>;
+using FrameViewFn = std::function<void(int k, const std::vector<float>& rgb, int w, int h)>;
 
 struct Hooks {
     ProgressFn progress;
     PreviewFn preview;
+    FrameViewFn frame;
     std::atomic<bool>* cancel = nullptr;
     int preview_down = 8;        // preview images are 1/preview_down of the output grid
     int preview_every = 8;       // frames between pass-1 previews
+    int frame_down = 16;         // per-frame views are 1/frame_down of the output grid
     bool cancelled() const { return cancel && cancel->load(); }
 };
 
@@ -79,6 +83,7 @@ struct StackOptions {
     std::string out;                   // output folder; empty = write nothing
     int streams = 2, refine_r = 12;
     double refine_fm_px = 9.0, soft_px = 3.0;
+    double c_smoothing = 0.0;          // C's smoothing (FinalParams::c_smoothing); 0 = the raw selection
     std::vector<std::string> outputs;  // which images to write / keep; empty = all
     Hooks hooks;
     // results, filled when `result` is set
@@ -88,6 +93,7 @@ struct StackOptions {
         std::vector<std::vector<float>> images;   // float RGB, output grid, only the requested outputs
         std::vector<float> depth, conf;
         std::vector<float> noise_mad;
+        std::vector<uint8_t> icc;                 // the frames' ICC profile, embedded in the outputs
         double seconds = 0;
     };
     Result* result = nullptr;

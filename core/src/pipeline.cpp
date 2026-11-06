@@ -245,6 +245,12 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         S.used = true;
         int done = ++frames_done;
         if (hooks.progress) hooks.progress("pass 1: fold", (double)done / (double)run_paths.size());
+        if (hooks.frame) {   // the frame just aligned, small, for the GUI's frame view
+            std::vector<float> img;
+            int pw, ph;
+            image_preview(S.d_warp, ow, oh, hooks.frame_down, img, pw, ph, f.stream);
+            hooks.frame(k, img, pw, ph);
+        }
         // live preview: this GPU's running A (sum / weight) at a fraction of the output grid
         if (hooks.preview && f.dev == devs[0] && (done % hooks.preview_every == 0)) {
             std::vector<float> img;
@@ -432,6 +438,12 @@ static StreamerStats run_pass(const std::vector<fs::path>& run_paths, const std:
         cudaEventRecord(S.done, D.fold_s);
         S.used = true;
         if (hooks.progress) hooks.progress(what, (double)(++done) / (double)run_paths.size());
+        if (hooks.frame) {
+            std::vector<float> img;
+            int pw, ph;
+            image_preview(S.d_warp, g.out_w(), g.out_h(), hooks.frame_down, img, pw, ph, f.stream);
+            hooks.frame(k, img, pw, ph);
+        }
     };
     StreamerStats st = stream_frames(run_paths, opt, on_frame);
     for (auto& e : st.errors) logf("  error: %s\n", e.c_str());
@@ -465,6 +477,7 @@ bool parse_stack_option(const std::string& a, const std::string& v, StackOptions
     else if (a == "--refine-r") so.refine_r = atoi(v.c_str());
     else if (a == "--refine-fm-px") so.refine_fm_px = atof(v.c_str());
     else if (a == "--soft-px") so.soft_px = atof(v.c_str());
+    else if (a == "--smoothing") so.c_smoothing = atof(v.c_str());
     else if (a == "--outputs") {
         so.outputs.clear();
         size_t i = 0;
@@ -665,6 +678,7 @@ int run_stack(StackOptions& so) {
         cudaFree(d_pair[0]); cudaFree(d_pair[1]);
     }
     FinalParams fpar;
+    fpar.c_smoothing = (float)so.c_smoothing;
     FinalOutputs F = finalize(P.merged, noise_mad, R.depth_s, b_img, fpar, s);
     {
         std::string sig;
@@ -676,13 +690,14 @@ int run_stack(StackOptions& so) {
     if (hooks.preview)
         for (size_t i = 0; i < F.names.size(); ++i)
             if (wanted(F.names[i])) { std::vector<float> small; int pw, ph; downsample_preview(F.images[i], ow, oh, hooks.preview_down, small, pw, ph); hooks.preview(F.names[i], small, pw, ph); }
+    std::vector<uint8_t> icc = tiff_probe(P.paths[0]).icc;   // the frames' colour profile goes into every output
     if (so.result) {
         auto& Rr = *so.result;
         Rr.w = ow; Rr.h = oh;
         Rr.names.clear(); Rr.images.clear();
         for (size_t i = 0; i < F.names.size(); ++i)
             if (wanted(F.names[i])) { Rr.names.push_back(F.names[i]); Rr.images.push_back(std::move(F.images[i])); }
-        Rr.depth = R.depth_s; Rr.conf = R.conf; Rr.noise_mad = noise_mad;
+        Rr.depth = R.depth_s; Rr.conf = R.conf; Rr.noise_mad = noise_mad; Rr.icc = icc;
     }
 
     // ---- write
@@ -698,7 +713,7 @@ int run_stack(StackOptions& so) {
             size_t j = std::find(so.result->names.begin(), so.result->names.end(), F.names[i]) - so.result->names.begin();
             img = &so.result->images[j];
         }
-        if (!write_tiff_rgb16((od / (F.names[i] + ".tif")).string(), *img, ow, oh)) { logf("cannot write %s\n", F.names[i].c_str()); return 1; }
+        if (!write_tiff_rgb16((od / (F.names[i] + ".tif")).string(), *img, ow, oh, icc)) { logf("cannot write %s\n", F.names[i].c_str()); return 1; }
         ++written;
     }
     write_raw(od / "depth.f32", R.depth_s.data(), R.depth_s.size());
@@ -819,6 +834,12 @@ int run_align(AlignOptions& ao, AlignOut& A) {
             S.rz.run(S.d_y, S.d_small, 1, f.stream);
             cudaMemcpyAsync(luma_stack.data() + (size_t)f.k * w * h, S.d_small, (size_t)w * h * sizeof(float), cudaMemcpyDeviceToHost, f.stream);
             if (hooks.progress) hooks.progress("reading frames", (double)(++done) / N);
+            if (hooks.frame) {   // the frame as read (unaligned), small
+                std::vector<float> img;
+                int pw, ph;
+                image_preview(S.d_rgb, W, H, hooks.frame_down, img, pw, ph, f.stream);
+                hooks.frame(f.k, img, pw, ph);
+            }
         };
         StreamerStats st = stream_frames(paths, opt, on_frame);
         for (auto& e : st.errors) logf("  error: %s\n", e.c_str());

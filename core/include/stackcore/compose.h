@@ -92,6 +92,10 @@ std::vector<float> compose_mix(const HostCompose& c, const std::vector<float>& c
 struct FinalParams {
     float agree = 3.f, dominance = 4.f, noise_k = 3.f, glint_agree = 6.f;
     int coarse_b_level = 3;
+    // C's smoothing: pyramid detail below c_smoothing x the noise sigma of its level is taken
+    // from B instead of the argmax frame (which in flat areas picks the noisiest frame).
+    // 0 = the raw selection; 3 = the same gate as Cn.
+    float c_smoothing = 0.f;
 };
 
 // Outputs by name (A, B, B0, C, CB, Cn, CBn, Cd, Cg, Cg2, H), float RGB on the host.
@@ -105,7 +109,9 @@ FinalOutputs finalize(const HostFoldState& st, const std::vector<float>& noise_m
 // noise per level from two adjacent frames' Laplacian pyramids: 1.4826 median(|(pa - pb) @ LUMA|) / sqrt 2
 std::vector<float> noise_from_pair(const float* d_img_a, const float* d_img_b, int w, int h, int levels, cudaStream_t s);
 
-// 16-bit RGB TIFF (uncompressed, one strip), values clipped to [0, 1] like frames.write_rgb16
-bool write_tiff_rgb16(const std::string& path, const std::vector<float>& rgb, int w, int h);
+// 16-bit RGB TIFF (uncompressed, one strip), values clipped to [0, 1] like frames.write_rgb16;
+// `icc` (may be empty) is embedded as the ICC profile so the colours keep their meaning
+bool write_tiff_rgb16(const std::string& path, const std::vector<float>& rgb, int w, int h,
+                      const std::vector<uint8_t>& icc = {});
 
 }  // namespace stackcore

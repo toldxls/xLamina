@@ -59,8 +59,9 @@ static int usage() {
             "usage:\n"
             "  stackcli run DIR [--out DIR] [--prefix IMG_] [--scale 1|0.5] [--outputs B,C,Cn] [--ref middle] [--lock-scale 1]\n"
             "               [--fov-mm X | --um-per-px X] [--gpus 0,1] [--streams 2] [--align-scale 0.25] [--baselines 1,2,4,8]\n"
-            "               align the TIFF frames in DIR (all of them, or those starting with --prefix) and fuse them:\n"
+            "               [--smoothing 0]   align the TIFF frames in DIR (all of them, or those starting with --prefix) and fuse them:\n"
             "               report.json + 16-bit TIFFs in DIR_stacker (or --out). Outputs: A B B0 C CB Cn CBn Cd Cg Cg2 H\n"
+            "               --smoothing S: C takes detail weaker than S x the noise from B (0 = raw selection, 2 ~ Helicon's 1, 3 = Cn)\n"
             "  developer commands:\n"
             "  stackcli probe FILE.tif\n"
             "  stackcli dump FILE.tif OUT.f32 [--gpu N]\n"
@@ -70,7 +71,7 @@ static int usage() {
             "                [--frames 0,5,9] [--gpus 0,1] [--streams 2] [--readers 16] [--volume]\n"
             "  stackcli depth VOLDIR --out DIR [--crop X0,Y0,W,H] [--gpu N] [--dirs 8]\n"
             "  stackcli stack LIST.txt --rect X0,Y0,X1,Y1 --out DIR [--scale 1|0.5] [--gpus 0,1] [--streams 2]\n"
-            "                 [--refine-r 12] [--refine-fm-px 9] [--soft-px 3]      the whole fusion -> 16-bit TIFFs\n"
+            "                 [--refine-r 12] [--refine-fm-px 9] [--soft-px 3] [--smoothing 0]   the whole fusion -> 16-bit TIFFs\n"
             "  stackcli align DIR --out DIR [--prefix IMG_] [--align-scale 0.25] [--baselines 1,2,4,8] [--ref middle]\n"
             "                 [--gpus 0,1] [--pairs i:j,...]      alignment -> report.json + list.txt (+ per-pair dump)\n");
     return 2;

@@ -22,13 +22,20 @@ current driver. Nothing else.
 Open a folder (or drop one onto the window). Every TIFF of the stack's image size is a
 frame; other TIFFs in the folder are listed greyed out and left alone. Tick the outputs
 you want, set the field of view if you know it (it gives the report its µm/px), press
-Render. The viewer shows the stack building, then the depth map, then the result; the
-tabs under it switch between the outputs. Save as… writes the current one as a 16-bit
-TIFF, JPEG or PNG; the full set plus `report.json` is also written to `<folder>_stacker`.
+Render. The viewer shows each frame as it is read (so the stack's wobble is visible) and
+aligned, with the stack building in the pane under the frame list, then the depth map,
+then the result; the tabs under it switch between the outputs. Save as… writes the
+current one as a 16-bit TIFF, JPEG or PNG; the full set plus `report.json` is also
+written to `<folder>_stacker`. The frames' ICC profile is kept in the outputs and used
+for display.
+
+Smoothing (C) sets how much of C's weak detail is taken from B rather than from the
+sharpest frame: 0 is the raw selection (in flat areas it picks the noisiest frame),
+2 is about Helicon's Smoothing 1, 3 is Cn.
 
 The same engine runs from the command line:
 
-    stackcli run <folder> [--out DIR] [--outputs B,C,Cn] [--fov-mm X] [--scale 0.5] ...
+    stackcli run <folder> [--out DIR] [--outputs B,C,Cn] [--fov-mm X] [--scale 0.5] [--smoothing 2] ...
 
 ## Build
 

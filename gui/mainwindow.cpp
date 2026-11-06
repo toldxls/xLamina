@@ -30,7 +30,7 @@ using namespace stackcore;
 static const char* kOutputs[] = {"B", "C", "Cn", "A", "B0", "CB", "CBn", "Cd", "Cg", "Cg2", "H"};
 static const char* kOutputHelp[] = {
     "B: depth map. Each pixel from the frame where it is sharpest (regularised, refined, soft edges). Cleanest tones.",
-    "C: Laplacian pyramid. Per-detail selection across all frames. Most detail, more noise and halos.",
+    "C: Laplacian pyramid. Per-detail selection across all frames. Most detail; see Smoothing for its noise.",
     "Cn: noise-aware pyramid. C where the detail is above the noise, B elsewhere.",
     "A: focus-weighted average of all frames. Smooth, soft.",
     "B0: raw per-pixel argmax of the focus measure (unregularised B).",
@@ -48,8 +48,17 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     buildUi();
     connect(&worker_, &Worker::progress, this, &MainWindow::onProgress);
     connect(&worker_, &Worker::preview, this, &MainWindow::onPreview);
+    connect(&worker_, &Worker::frame, this, &MainWindow::onFrame);
     connect(&worker_, &Worker::logLine, this, &MainWindow::onLog);
     connect(&worker_, &Worker::finished, this, &MainWindow::onFinished);
+    connect(&thumbs_, &ThumbLoader::thumbnail, this, &MainWindow::onThumbnail);
+}
+
+QImage MainWindow::forDisplay(QImage img) const {
+    if (!colorSpace_.isValid() || img.isNull()) return img;
+    img.setColorSpace(colorSpace_);
+    img.convertToColorSpace(QColorSpace::SRgb);
+    return img;
 }
 
 void MainWindow::buildUi() {
@@ -94,10 +103,22 @@ void MainWindow::buildUi() {
     // ---- left: frames
     QDockWidget* frames = new QDockWidget("Frames", this);
     frames->setFeatures(QDockWidget::DockWidgetMovable);
+    QWidget* fw = new QWidget;
+    QVBoxLayout* fl0 = new QVBoxLayout(fw);
+    fl0->setContentsMargins(0, 0, 0, 0);
     frameList_ = new QListWidget;
     frameList_->setAlternatingRowColors(true);
+    frameList_->setIconSize(QSize(144, 96));
+    frameList_->setUniformItemSizes(true);
     frameList_->setToolTip("The stack's frames. Click one to see it; greyed files are not part of the stack.");
-    frames->setWidget(frameList_);
+    frameView_ = new QLabel;
+    frameView_->setAlignment(Qt::AlignCenter);
+    frameView_->setMinimumHeight(140);
+    frameView_->setStyleSheet("background: #202020;");
+    frameView_->setToolTip("While the frames are read and aligned: the stack building. Afterwards: the frame being processed.");
+    fl0->addWidget(frameList_, 1);
+    fl0->addWidget(frameView_);
+    frames->setWidget(fw);
     addDockWidget(Qt::LeftDockWidgetArea, frames);
     connect(frameList_, &QListWidget::currentRowChanged, this, &MainWindow::showFrame);
 
@@ -130,6 +151,14 @@ void MainWindow::buildUi() {
     lockScale_ = new QCheckBox("Lock scale (telecentric optics)");
     lockScale_->setToolTip("Apply no scale change between frames; use for telecentric objectives.");
     fl->addRow("", lockScale_);
+    smoothing_ = new QDoubleSpinBox;
+    smoothing_->setRange(0, 6);
+    smoothing_->setSingleStep(0.5);
+    smoothing_->setDecimals(1);
+    smoothing_->setValue(2);
+    smoothing_->setToolTip("Smoothing of C: detail weaker than this many times the noise is taken from B instead of the sharpest frame.\n"
+                           "0 = raw selection (noisiest), 2 is about Helicon's Smoothing 1, 3 equals Cn.");
+    fl->addRow("Smoothing (C)", smoothing_);
     fov_ = new QDoubleSpinBox;
     fov_->setRange(0, 1000);
     fov_->setDecimals(4);
@@ -190,9 +219,13 @@ void MainWindow::openFolder(const QString& dir) {
         QMessageBox::warning(this, "xLamina", QString("%1\n\nholds %2 TIFF files; a stack needs at least 3.").arg(dir).arg(files.size()));
         return;
     }
+    thumbs_.stop();
     folder_ = dir;
     frames_.clear();
+    frameRows_.clear();
     frameList_->clear();
+    frameView_->clear();
+    colorSpace_ = QColorSpace();
     // the stack is the TIFFs of the most common size; other files in the folder are listed greyed out
     QMap<QPair<unsigned, unsigned>, int> sizes;
     QList<TiffInfo> infos;
@@ -207,8 +240,12 @@ void MainWindow::openFolder(const QString& dir) {
     for (int i = 0; i < files.size(); ++i) {
         bool ok = infos[i].ok() && infos[i].width == best.first && infos[i].height == best.second;
         QListWidgetItem* it = new QListWidgetItem(files[i]);
-        if (ok) frames_ << d.filePath(files[i]);
-        else {
+        if (ok) {
+            frames_ << d.filePath(files[i]);
+            frameRows_ << i;
+            if (!colorSpace_.isValid() && !infos[i].icc.empty())
+                colorSpace_ = QColorSpace::fromIccProfile(QByteArray((const char*)infos[i].icc.data(), (int)infos[i].icc.size()));
+        } else {
             it->setForeground(Qt::gray);
             it->setFlags(it->flags() & ~Qt::ItemIsSelectable);
             it->setToolTip(infos[i].ok() ? QString("%1 x %2: not the stack's size, left out").arg(infos[i].width).arg(infos[i].height)
@@ -222,14 +259,43 @@ void MainWindow::openFolder(const QString& dir) {
     setWindowTitle(QString("xLamina %1 — %2").arg(XLAMINA_VERSION, QDir::toNativeSeparators(dir)));
     QString note = QString("%1 frames of %2 x %3").arg(frames_.size()).arg(best.first).arg(best.second);
     if (skipped) note += QString(" (%1 other TIFF%2 left out)").arg(skipped).arg(skipped > 1 ? "s" : "");
+    if (colorSpace_.isValid()) note += QString(", %1").arg(colorSpace_.description().isEmpty() ? "ICC profile" : colorSpace_.description());
     stage_->setText(note + ". Press Render.");
     statusBar()->showMessage(note + " in " + QDir::toNativeSeparators(dir));
     for (int i = 0; i < frameList_->count(); ++i)
         if (frameList_->item(i)->data(Qt::UserRole).toInt() == frames_.size() / 2) { frameList_->setCurrentRow(i); break; }
+    thumbs_.start(frames_, 144);
+}
+
+void MainWindow::onThumbnail(int index, QImage image) {
+    if (index < 0 || index >= frameRows_.size()) return;
+    frameList_->item(frameRows_[index])->setIcon(QIcon(QPixmap::fromImage(forDisplay(image))));
+}
+
+// While the frames are read, aligned and folded the main view shows each frame as
+// it is processed (raw first, so the stack's wobble is visible, then warped onto
+// the output grid) and the small pane shows the result building; from the depth
+// map on, the main view shows the result and the small pane the frame.
+void MainWindow::onFrame(int k, QImage image) {
+    if (k < 0 || k >= frameRows_.size()) return;
+    selecting_ = true;
+    frameList_->setCurrentRow(frameRows_[k]);
+    selecting_ = false;
+    image = forDisplay(image);
+    bool raw = stage_->text().startsWith("reading");
+    bool framesPhase = raw || stage_->text().startsWith("aligning") || stage_->text().startsWith("pass 1");
+    if (framesPhase) {
+        current_ = "frame";
+        view_->setImage(image, true);
+        statusBar()->showMessage(QString("%1 %2 of %3%4").arg(raw ? "Reading frame" : "Aligned frame").arg(k + 1).arg(frames_.size())
+                                     .arg(raw ? "" : " (warped onto the output grid)"));
+    } else {
+        frameView_->setPixmap(QPixmap::fromImage(image).scaled(frameView_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
 }
 
 void MainWindow::showFrame(int listRow) {
-    if (listRow < 0 || listRow >= frameList_->count() || worker_.running()) return;
+    if (selecting_ || listRow < 0 || listRow >= frameList_->count() || worker_.running()) return;
     int row = frameList_->item(listRow)->data(Qt::UserRole).toInt();
     if (row < 0 || row >= frames_.size()) return;
     // a quick 1/4 preview of the source frame, read on this thread (the RAM-disk / NVMe read dominates)
@@ -257,7 +323,7 @@ void MainWindow::showFrame(int listRow) {
         }
     }
     current_ = "frame";
-    view_->setImage(img, false);
+    view_->setImage(forDisplay(img), false);
     QFileInfo fi(frames_[row]);
     statusBar()->showMessage(QString("%1 — %2 x %3, %4-bit").arg(fi.fileName()).arg(info.width).arg(info.height).arg(info.bits));
 }
@@ -273,6 +339,7 @@ void MainWindow::render() {
     jo.stack.po.g.scale = scale_->currentIndex() == 0 ? 1.0 : 0.5;
     jo.stack.po.opt.streams_per_gpu = 2;
     jo.stack.streams = 2;
+    jo.stack.c_smoothing = smoothing_->value();
     jo.stack.outputs.clear();
     for (const char* n : kOutputs) if (outputs_[n]->isChecked()) jo.stack.outputs.push_back(n);
     if (jo.stack.outputs.empty()) { QMessageBox::information(this, "xLamina", "Choose at least one output."); return; }
@@ -304,6 +371,11 @@ void MainWindow::onProgress(QString stage, double fraction) {
 }
 
 void MainWindow::onPreview(QString name, QImage image) {
+    if (!name.startsWith("depth")) image = forDisplay(image);
+    if (name == "A" && stage_->text().startsWith("pass 1")) {   // the stack building, while the frames take the main view
+        frameView_->setPixmap(QPixmap::fromImage(image).scaled(frameView_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        return;
+    }
     current_ = name;
     view_->setImage(image, true);
     statusBar()->showMessage(QString("Preview: %1").arg(name));
@@ -357,7 +429,7 @@ QImage MainWindow::outputImage(const QString& name) {
         img = toQImage(rgb.data(), R.w, R.h);
     } else {
         for (size_t i = 0; i < R.names.size(); ++i)
-            if (QString::fromStdString(R.names[i]) == name) { img = toQImage(R.images[i].data(), R.w, R.h); break; }
+            if (QString::fromStdString(R.names[i]) == name) { img = forDisplay(toQImage(R.images[i].data(), R.w, R.h)); break; }
     }
     if (!img.isNull()) cache_[name] = img;
     return img;
@@ -383,10 +455,10 @@ void MainWindow::saveCurrent() {
     bool ok = false;
     if (fn.endsWith(".tif", Qt::CaseInsensitive) || fn.endsWith(".tiff", Qt::CaseInsensitive)) {
         for (size_t i = 0; i < R.names.size(); ++i)
-            if (QString::fromStdString(R.names[i]) == current_) ok = write_tiff_rgb16(fn.toStdString(), R.images[i], R.w, R.h);
+            if (QString::fromStdString(R.names[i]) == current_) ok = write_tiff_rgb16(fn.toStdString(), R.images[i], R.w, R.h, R.icc);   // the frames' profile
         if (current_ == "depth") ok = outputImage("depth").save(fn);
     } else {
-        QImageWriter w(fn);
+        QImageWriter w(fn);   // JPEG / PNG: the displayed (sRGB) image
         w.setQuality(95);
         ok = w.write(outputImage(current_));
     }

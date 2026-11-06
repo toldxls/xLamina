@@ -759,6 +759,36 @@ Mac's including the geometry numbers.
   0.9 s. Lines now live in a global scratch buffer. (`k_curve_stats` keeps a
   2 KB local array: 335 MB reserved, tolerable.)
 
+## 24. C's noise and the Smoothing control; colour (2026-11-06)
+
+Travis: "C looks very good but we lack a smoothing option, Helicon comes out
+much less noisy". Measured as the robust std of the high-pass residual (σ = 2
+Gaussian removed) over the flattest 30 % of the image, per luminance band,
+in 1/255 units:
+
+| image | dark | mid | bright |
+|---|---|---|---|
+| C (raw argmax) | 1.08 | 1.52 | 2.08 |
+| Helicon C, Smoothing 1 | 0.61 | 0.71 | 1.18 |
+| B | 0.44 | 0.63 | 0.98 |
+| Helicon B, R9 S1 | 0.47 | 0.57 | 1.00 |
+| Cn | 0.42 | 0.63 | 1.05 |
+| one source frame | 0.58 | 0.84 | 1.36 |
+| C, smoothing 1 / 1.5 / 2 | 0.66 / 0.53 / 0.46 | 1.06 / 0.87 / 0.74 | 1.70 / 1.50 / 1.31 |
+
+B and Cn are already at Helicon's level; raw C is twice as noisy as a single
+frame because in flat areas the argmax picks whichever frame's noise is
+largest. The fix is Cn's noise gate at a chosen strength: pyramid detail
+below `smoothing × σ_level` is taken from B's coefficient
+(`FinalParams::c_smoothing`, `--smoothing`, the GUI's "Smoothing (C)").
+0 keeps the raw selection (the validated reference C), 2 matches Helicon's
+Smoothing 1 (and keeps the plate edges intact at 1:1), 3 is Cn by
+construction. The GUI defaults to 2, the CLI to 0.
+
+Colour: the frames carry an Adobe RGB ICC profile; the outputs now embed it
+and the GUI converts to sRGB for display (`QColorSpace`), which was the "far
+off" colour. The remaining difference to Helicon is its tone curve (§10).
+
 ## Open items
 
 - **Residual flat-target roll bias**: a smooth hump of ±17 mdeg RMS per frame on far-defocused frames, antisymmetric about focus (the fitted rate is fine: 52 vs 50 mdeg/mm). Also ε reads −2.4 % (≈ 6σ). Cause unknown.

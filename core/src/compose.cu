@@ -442,8 +442,10 @@ FinalOutputs finalize(const HostFoldState& st, const std::vector<float>& noise_m
         collapse_pyramid(std::vector<const float*>(lv.begin(), lv.end() - 1), lv.back(), st.shapes, coll, tmpA, tmpB, s);
         CK(cudaStreamSynchronize(s));
     };
-    collapse_levels(lapC_c);
-    emit("C", coll, n * 3);
+    if (p.c_smoothing <= 0.f) {
+        collapse_levels(lapC_c);
+        emit("C", coll, n * 3);
+    }
     // lapB
     float* d_b = upload(b_img);
     DevPyramid pyrB;
@@ -477,21 +479,26 @@ FinalOutputs finalize(const HostFoldState& st, const std::vector<float>& noise_m
         tmpw[l] = dalloc<float>(m);
     }
     lv[levels - 1] = pyrB.lap[levels - 1];   // base from B
-    auto level_weights = [&](int l, bool use_depth, bool use_noise, float agree_v) {
+    auto level_weights = [&](int l, bool use_depth, bool use_noise, float agree_v, float noise_k) {
         auto sh = st.shapes[l];
         size_t m = (size_t)sh.w * sh.h;
         if (use_depth) k_take_b<<<blocks1(m), 256, 0, s>>>(c_idx[l], dl_lvl[l], c_sal[l], sB[l], wb[l], m, agree_v, p.dominance);
         else CK(cudaMemsetAsync(wb[l], 0, m * sizeof(float), s));
-        if (use_noise) k_noise_w<<<blocks1(m), 256, 0, s>>>(lapC[l], wb[l], m, p.noise_k * noise_mad[l] + 1e-12f, !use_depth);
+        if (use_noise) k_noise_w<<<blocks1(m), 256, 0, s>>>(lapC[l], wb[l], m, noise_k * noise_mad[l] + 1e-12f, !use_depth);
         gaussian_blur(wb[l], wb[l], tmpw[l], sh.w, sh.h, g1, s);
         k_level_mix<<<blocks1(m), 256, 0, s>>>(wb[l], pyrB.lap[l], lapC[l], lv[l], m * 1);
     };
     std::vector<const float*> lv_c(levels);
     for (int l = 0; l < levels; ++l) lv_c[l] = lv[l];
+    if (p.c_smoothing > 0.f) {   // C with smoothing: the noise gate at the chosen strength
+        for (int l = 0; l < levels - 1; ++l) level_weights(l, false, true, p.agree, p.c_smoothing);
+        collapse_levels(lv_c);
+        emit("C", coll, n * 3);
+    }
     std::vector<float> cbn_host;
     struct V { const char* name; bool depth, noise; };
     for (V v : {V{"CB", true, false}, V{"Cn", false, true}, V{"CBn", true, true}}) {
-        for (int l = 0; l < levels - 1; ++l) level_weights(l, v.depth, v.noise, p.agree);
+        for (int l = 0; l < levels - 1; ++l) level_weights(l, v.depth, v.noise, p.agree, p.noise_k);
         collapse_levels(lv_c);
         emit(v.name, coll, n * 3);
         if (std::string(v.name) == "CBn") cbn_host = out.images.back();
@@ -571,7 +578,7 @@ std::vector<float> noise_from_pair(const float* d_a, const float* d_b, int w, in
     return mad;
 }
 
-bool write_tiff_rgb16(const std::string& path, const std::vector<float>& rgb, int w, int h) {
+bool write_tiff_rgb16(const std::string& path, const std::vector<float>& rgb, int w, int h, const std::vector<uint8_t>& icc) {
     size_t n = (size_t)w * h * 3;
     std::vector<uint16_t> u(n);
     for (size_t i = 0; i < n; ++i) {
@@ -580,10 +587,12 @@ bool write_tiff_rgb16(const std::string& path, const std::vector<float>& rgb, in
     }
     FILE* f = fopen(path.c_str(), "wb");
     if (!f) return false;
-    // classic little-endian TIFF: header, IFD (11 entries), BitsPerSample / SampleFormat arrays, then the strip
-    uint32_t ifd_off = 8, n_ent = 11;
+    // classic little-endian TIFF: header, IFD, BitsPerSample / SampleFormat arrays, ICC profile, then the strip
+    bool has_icc = !icc.empty();
+    uint32_t ifd_off = 8, n_ent = has_icc ? 12 : 11;
     uint32_t ifd_size = 2 + n_ent * 12 + 4;
-    uint32_t bps_off = ifd_off + ifd_size, sf_off = bps_off + 6, data_off = sf_off + 6;
+    uint32_t bps_off = ifd_off + ifd_size, sf_off = bps_off + 6, icc_off = sf_off + 6;
+    uint32_t data_off = icc_off + (has_icc ? (uint32_t)icc.size() : 0);
     if (data_off & 1) ++data_off;
     uint32_t nbytes = (uint32_t)(n * 2);
     auto put16 = [&](uint16_t v) { fwrite(&v, 2, 1, f); };
@@ -602,9 +611,11 @@ bool write_tiff_rgb16(const std::string& path, const std::vector<float>& rgb, in
     entry(279, 4, 1, nbytes);                 // StripByteCounts
     entry(284, 3, 1, 1);                      // PlanarConfig chunky
     entry(339, 3, 3, sf_off);                 // SampleFormat (1,1,1)
+    if (has_icc) entry(34675, 7, (uint32_t)icc.size(), icc_off);   // ICC profile (UNDEFINED bytes)
     put32(0);                                 // next IFD
     put16(16); put16(16); put16(16);
     put16(1); put16(1); put16(1);
+    if (has_icc) fwrite(icc.data(), 1, icc.size(), f);
     long pos = ftell(f);
     while ((uint32_t)pos < data_off) { fputc(0, f); ++pos; }
     size_t m = fwrite(u.data(), 2, n, f);
