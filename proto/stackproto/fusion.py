@@ -508,6 +508,17 @@ def sgm_from_volume(V, Lv, guide_full, ctx):
     contrast is 0.39-0.51 against 0.66-0.69 in texture."""
     from .sgm import argmin_subpixel, sgm
     dh, dw, K = V.shape
+    ra = ctx.get("vol_agg_px", 0.0) * ctx.get("depth_full_fraction", 0.25)
+    if ra >= 1.0:
+        # Edge-aware aggregation of every frame's focus slice over a radius that
+        # spans the defocus "ghost" offset: pixels beside a thin bright plate
+        # edge otherwise peak in the frame where the edge's doubled ghost line
+        # passes over THEM (doubled outlines). Aggregated, they inherit the
+        # edge's in-focus evidence; the guide keeps separate objects apart.
+        ga = cv2.resize(guide_full, (dw, dh), interpolation=cv2.INTER_AREA)
+        r = int(round(ra))
+        V = np.stack([guided_filter(ga, V[:, :, k], r, 1e-4) for k in range(K)], axis=2)
+        V = np.maximum(V, 0.0)
     V = np.sqrt(V)
     vmax = V.max(axis=2, keepdims=True)
     vmed = np.median(V, axis=2, keepdims=True)
@@ -674,6 +685,36 @@ def _w_b2dual(chunk):
     return acc
 
 
+def focus_measure_kind(img, kind, radius):
+    """Focus-measure family for the Helicon-style simple B (radius in output px)."""
+    y = img @ LUMA
+    if kind == "grad":                                    # Tenengrad
+        gx = cv2.Sobel(y, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(y, cv2.CV_32F, 0, 1, ksize=3)
+        return cv2.GaussianBlur(gx * gx + gy * gy, (0, 0), radius)
+    if kind == "var":                                     # local variance (contrast)
+        m = cv2.GaussianBlur(y, (0, 0), radius)
+        return cv2.GaussianBlur(y * y, (0, 0), radius) - m * m
+    if kind == "varn":                                    # normalised variance
+        m = cv2.GaussianBlur(y, (0, 0), radius)
+        return (cv2.GaussianBlur(y * y, (0, 0), radius) - m * m) / (m * m + 1e-4)
+    return focus_measure_rgb(img, radius, normalized=(kind == "lapn"))
+
+
+def _w_simple(chunk):
+    g = _CTX["grid"]
+    ow, oh = g.size
+    best = np.full((oh, ow), -np.inf, np.float32)
+    idx = np.zeros((oh, ow), np.int16)
+    for k in chunk:
+        img = load_aligned(_CTX["paths"][k], _CTX["z"][k], _CTX["t"][k], g)
+        fm = focus_measure_kind(img, _CTX["simple_kind"], _CTX["simple_r"])
+        m = fm > best
+        best[m] = fm[m]
+        idx[m] = k
+    return best, idx
+
+
 def _chunks(n, parts):
     """Contiguous frame chunks (one per worker / GPU)."""
     edges = np.linspace(0, n, parts + 1).astype(int)
@@ -684,10 +725,11 @@ def run(paths, z, t, grid: Grid, workers=None, radius_px=6.0, power=4.0, smoothi
         log=print, order=None, depth_method="sgm", agg_radius_px=24.0, agg_eps=1e-4,
         fm_radius_px=2.0, guide="C", soft_px=3.0, depth_full_fraction=0.25, depth_fm_px=6.0, sgm_p1=0.03,
         sgm_p2=0.4, sgm_edge=0.02, sgm_c_lo=0.45, sgm_c_hi=0.65, sgm_dirs=8, dark_prior=1.0,
-        vol_cache=None, halo_prior=2.0, halo_radius_px=80.0, refine_r=6, refine_fm_px=1.5,
+        vol_cache=None, halo_prior=2.0, halo_radius_px=80.0, refine_r=12, refine_fm_px=9.0,
         trust_strength=0.0,
         soft_wide_px=40.0, wide_lo=0.4,
-        wide_hi=0.7, tex_lo=0.025, tex_hi=0.045, fine_lo=1.6, fine_hi=3.0, end_prior=1.0):
+        wide_hi=0.7, tex_lo=0.025, tex_hi=0.045, fine_lo=1.6, fine_hi=3.0, end_prior=1.0,
+        simple_kind="lap", simple_radius_px=9.0, simple_smooth_px=2.0, vol_agg_px=32.0):
     """Full fusion. Window sizes are in FULL-RES sensor pixels (scaled to the grid
     so results don't depend on the working scale). ``order`` permutes the merge
     order of partial states (tests)."""
@@ -709,7 +751,24 @@ def run(paths, z, t, grid: Grid, workers=None, radius_px=6.0, power=4.0, smoothi
     for i in idx[1:]:
         st = merge(st, parts[i])
     log(f"  pass 1 (A, B-depth, C) folded {n} frames in {len(parts)} parts, {levels} pyramid levels")
-    if depth_method == "sgm":
+    if depth_method == "simple":
+        # Helicon-style: per-pixel argmax of a focus measure over a radius, light
+        # depth smoothing, interpolated composition (two bracketing frames)
+        ctx.update(simple_kind=simple_kind, simple_r=max(0.8, simple_radius_px * grid.scale))
+        with ProcessPoolExecutor(max_workers=workers, initializer=_w_init, initargs=(ctx,)) as ex:
+            sp = list(ex.map(_w_simple, chunks))
+        bb, ii = sp[0][0].copy(), sp[0][1].copy()
+        for b2, i2 in sp[1:]:
+            m = _take(bb, ii, b2, i2)
+            bb[m] = b2[m]
+            ii[m] = i2[m]
+        d = cv2.medianBlur(ii.astype(np.float32), 5)
+        if simple_smooth_px > 0:
+            d = cv2.GaussianBlur(d, (0, 0), max(0.5, simple_smooth_px * grid.scale))
+        depth_s, conf = d.astype(np.float32), np.ones_like(d)
+        ctx.pop("soft_sigma", None)
+        log(f"  simple depth ({simple_kind}, r={ctx['simple_r']:.1f} px) done")
+    elif depth_method == "sgm":
         g_img = collapse(st.c_coef + [(st.c_base / max(st.count, 1)).astype(np.float32)])
         guide_full = np.clip(g_img @ LUMA, 0, 1).astype(np.float32)
         ds = depth_full_fraction / grid.scale        # depth res = fixed fraction of the sensor
@@ -718,7 +777,7 @@ def run(paths, z, t, grid: Grid, workers=None, radius_px=6.0, power=4.0, smoothi
                    sgm_edge=sgm_edge, sgm_c_lo=sgm_c_lo, sgm_c_hi=sgm_c_hi, sgm_dirs=sgm_dirs,
                    dark_prior=dark_prior, vol_cache=vol_cache, halo_prior=halo_prior,
                    halo_radius_px=halo_radius_px, depth_full_fraction=depth_full_fraction,
-                   end_prior=end_prior)
+                   end_prior=end_prior, vol_agg_px=vol_agg_px)
         depth_s, conf = depth_sgm(ctx, chunks, workers, guide_full, log)
         ctx["soft_sigma"] = max(0.8, soft_px * grid.scale)
         ctx["soft_sigma_wide"] = max(2.0, soft_wide_px * grid.scale)

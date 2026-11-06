@@ -368,6 +368,32 @@ Result: the dark gap and background beside the crystal stay clean and dark, the
 crystal edge is crisp, and the matrix is intact. Edge-band glare vs Helicon B
 is 3.1 % (best yet); sharpness 1.07–1.24.
 
+## 14. B: doubled plate edges ("ghost lines") (2026-11-06)
+
+The specimen is tyuyamunite: thin plates whose edges, seen edge-on, image as bright lines.
+
+- Scored against Helicon's actual output (tone-matched), the current B is closer
+  than any Helicon-style "simple" B (per-pixel argmax over radius 9 with
+  Laplacian / normalised / gradient / variance measures: error 0.0255–0.038 vs
+  0.0226, edge glare 4–7 %). So the multi-stage pipeline stays.
+- Frame strip at a plate cluster: edges are crisp at frames 107–113 and double
+  from ~116 (the rim of a thin bright edge's defocus disc). Our B took ~118.
+  - Every focus measure, ours included, peaks at 110–112 when AVERAGED over
+    the plate.
+  - Per pixel, the pixels BESIDE an edge peak in the frame where the doubled
+    ghost line passes over them, so the composite painted ghost lines next to
+    real edges.
+- The recovered "Helicon depth" disagrees with all our measures at fine scale.
+  It matches Helicon's output against OUR aligned frames, so any alignment
+  difference biases it: use it for regions, not for fine structure.
+- Fix: edge-aware (guided-filter) aggregation of every frame's focus slice over
+  32 full-res px before SGM (`vol_agg_px`). That spans the ghost offset, so
+  pixels beside an edge inherit its in-focus evidence. Fine refinement widened
+  to ±12 frames with a 9 px window (Helicon's "Radius 9" scale).
+- Result: edge-band glare vs Helicon B 3.1 % → **2.3 %**; edge-band error 0.0204
+  → 0.0199. The fan's glint blob shrinks to a small highlight like Helicon's;
+  plate outlines are closer to single. Matrix and backgrounds unchanged.
+
 ## Open items
 
 - **Residual flat-target roll bias**: a smooth hump of ±17 mdeg RMS per frame on far-defocused frames, antisymmetric about focus (the fitted rate is fine: 52 vs 50 mdeg/mm). Also ε reads −2.4 % (≈ 6σ). Cause unknown.
