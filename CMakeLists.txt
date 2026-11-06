@@ -17,6 +17,12 @@ endif()
 
 find_package(CUDAToolkit REQUIRED)
 
+# CCCL (thrust/cub) wants MSVC's conforming preprocessor
+if(MSVC)
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:preprocessor>)
+  add_compile_options($<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>)
+endif()
+
 add_subdirectory(core)
 add_subdirectory(cli)
 add_subdirectory(tools/m0)

@@ -520,6 +520,68 @@ at scale 1 and 0.5:
   bicubic turned out cheap enough to keep the prototype's interpolation
   exactly, so it stays.
 
+## 18. Port step 3: the pass-1 fold and the multi-GPU merge (2026-11-06)
+
+`core/src/fold.cu` (focus measure, Laplacian pyramid, salience, the A / B0 /
+C state updates, noise reference, host merge), `stackcli fold`,
+`tools/validate/check_fold.py` (+ `make_list.py`). Per GPU: upload, convert,
+warp and the per-frame measures run on 1–3 slot streams; one fold stream per
+GPU applies the state updates in arrival order (events hand each slot's
+scratch to the fold stream and back). The host merges the per-GPU states
+with `_take`.
+
+Against `fusion.fold` on frames 0 / 54 / 81 / 108 / 162 at half res:
+
+| field | agreement |
+|---|---|
+| A (weighted average) | max 5e-5, rms 1e-6 (the warp's own tolerance) |
+| focus measure (b_best, a_den, b_fmsum) | ≤ 5e-4 relative; rms 1e-8 |
+| B0 index | 99.996 % of pixels; the rest are near-ties (candidates within 1e-3) |
+| B0 colour, where the index agrees | ≤ 5e-5 |
+| C index, per level | 99.99–100 % |
+| C coefficient, where the index agrees | ≤ 3e-5 |
+| C salience | within 2 √sal · 1e-4, as a coefficient error of 1e-4 implies |
+| c_base, noise MAD, noise fm | 1e-6, 1e-5, 1e-6 |
+
+**Invariant** (whole stack, GPU only): GPU 0 alone, GPU 1 alone, and both
+GPUs with 3 streams produce **byte-identical B and C state**; A sums agree
+to 1e-13 (double, different association).
+
+Three things had to be learnt to get there:
+1. **Ties must follow `_take` inside the kernel.** Frames reach a GPU in
+   whatever order the readers finish, so a strict `>` let the first arrival
+   win exact ties (common in salience: zeros, coarse levels) and C differed
+   from run to run while B did not. `(v > best) || (v == best && k < idx)`
+   makes the arrival order irrelevant.
+2. **`cv::pyrUp` is not reflect-101 at the right and bottom.** It reflects
+   101 at the top/left but uses `7 s[n-1] + s[n-2]` (even output) and
+   `8 s[n-1]` (odd output) at the far edges. With reflect-101 everywhere, the
+   last column and the last two rows of every Laplacian level were wrong.
+3. **Salience tolerances are absolute, not relative**: a 3e-5 coefficient
+   error moves a 1e-6 salience by 6 %.
+
+The focus measure differs from OpenCV's by up to 5e-4 relative (two Gaussian
+blurs and a Laplacian in float; summation order and FMA are not replicated).
+It moves 0.004 % of B0's argmax choices, all near-ties, and is invisible to
+the composites.
+
+**Throughput, 163 frames, pass 1 complete:**
+
+| grid | GPUs | time | frames/s |
+|---|---|---|---|
+| half res (3420 × 2214) | 3080 Ti | 2.59 s | 63 |
+| half res | both | 2.45 s | 67 |
+| **full res (6840 × 4429)** | **3080 Ti** | **2.8 s** | 58 |
+| full res | both | 2.5 s | 65 |
+| full res | 3070 (1 slot) | 8.1 s | 20 |
+
+Pass 1 at full resolution runs at the ingest rate on the 3080 Ti (the
+prototype takes ~3.5 min for the half-res fold on this CPU). Memory at full
+res: 2.6 GB of state per GPU plus 2.2 GB per slot (raw bytes, float frame,
+warped frame, measure scratch), so the 3070 holds one slot and cannot
+overlap upload with compute; it contributes 47 of 163 frames beside the
+3080 Ti. The slot count is now chosen per GPU from free memory.
+
 ## Open items
 
 - **Residual flat-target roll bias**: a smooth hump of ±17 mdeg RMS per frame on far-defocused frames, antisymmetric about focus (the fitted rate is fine: 52 vs 50 mdeg/mm). Also ε reads −2.4 % (≈ 6σ). Cause unknown.

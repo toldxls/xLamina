@@ -32,6 +32,7 @@ using FrameFn = std::function<void(const DeviceFrame&)>;
 struct StreamerOptions {
     std::vector<int> devices;      // empty = all
     int streams_per_gpu = 3;
+    std::vector<int> streams_by_device;   // optional, parallel to `devices`: per-GPU stream count (memory)
     int readers = 16;
     int pool = 0;                  // pinned buffers; 0 = readers + 2 * streams * gpus
 };

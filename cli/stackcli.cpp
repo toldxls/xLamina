@@ -6,6 +6,11 @@
 //                                                  stream every frame through the GPUs: throughput + per-frame checksums
 //   stackcli warp   FILE.tif OUT.f32 --z ZR,ZI --t TX,TY --rect X0,Y0,X1,Y1 [--scale 1|0.5] [--quantize] [--gpu N]
 //                                                  read -> GPU -> fusion.load_aligned equivalent -> raw float RGB
+//   stackcli fold   LIST.txt --rect X0,Y0,X1,Y1 --out DIR [--scale 1|0.5] [--radius-px 6] [--power 4]
+//                   [--frames 0,5,9] [--gpus 0,1] [--streams 2] [--readers 16]
+//                                                  pass 1 (A, B0, C pyramid) over the frames in LIST (lines:
+//                                                  path zr zi tx ty), one partial state per GPU, merged on the host,
+//                                                  written as raw arrays for tools/validate/check_fold.py
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -17,6 +22,7 @@
 #include <vector>
 
 #include "stackcore/convert.h"
+#include "stackcore/fold.h"
 #include "stackcore/streamer.h"
 #include "stackcore/tiff.h"
 #include "stackcore/warp.h"
@@ -39,7 +45,9 @@ static int usage() {
             "  stackcli probe FILE.tif\n"
             "  stackcli dump FILE.tif OUT.f32 [--gpu N]\n"
             "  stackcli stream DIR [--prefix IMG_] [--gpus 0,1] [--streams 3] [--readers 16] [--pool N] [--sums OUT.txt]\n"
-            "  stackcli warp FILE.tif OUT.f32 --z ZR,ZI --t TX,TY --rect X0,Y0,X1,Y1 [--scale 1|0.5] [--quantize] [--gpu N]\n");
+            "  stackcli warp FILE.tif OUT.f32 --z ZR,ZI --t TX,TY --rect X0,Y0,X1,Y1 [--scale 1|0.5] [--quantize] [--gpu N]\n"
+            "  stackcli fold LIST.txt --rect X0,Y0,X1,Y1 --out DIR [--scale 1|0.5] [--radius-px 6] [--power 4]\n"
+            "                [--frames 0,5,9] [--gpus 0,1] [--streams 2] [--readers 16]\n");
     return 2;
 }
 
@@ -294,6 +302,182 @@ static int cmd_stream(int argc, char** argv) {
     return st.errors.empty() ? 0 : 1;
 }
 
+// ----------------------------------------------------------------------------- fold (pass 1)
+
+struct FoldSlot {
+    float *d_rgb = nullptr, *d_scratch = nullptr, *d_warp = nullptr;
+    FoldScratch sc;
+    cudaEvent_t ready = nullptr, done = nullptr;
+    bool used = false;
+};
+
+struct FoldDev {
+    int dev = -1;
+    cudaStream_t fold_s = nullptr;
+    FoldState st;
+    std::vector<FoldSlot> slots;
+};
+
+static int cmd_fold(int argc, char** argv) {
+    if (argc < 3) return usage();
+    fs::path list = argv[2];
+    Grid g;
+    std::string out;
+    double radius_px = 6.0, power = 4.0;
+    std::vector<int> frames_sel;
+    StreamerOptions opt;
+    opt.streams_per_gpu = 2;
+    bool have_rect = false;
+    for (int i = 3; i + 1 < argc; i += 2) {
+        std::string a = argv[i], v = argv[i + 1];
+        if (a == "--rect") { auto d = parse_doubles(v); if (d.size() != 4) return usage(); g.x0 = (int)d[0]; g.y0 = (int)d[1]; g.x1 = (int)d[2]; g.y1 = (int)d[3]; have_rect = true; }
+        else if (a == "--out") out = v;
+        else if (a == "--scale") g.scale = atof(v.c_str());
+        else if (a == "--radius-px") radius_px = atof(v.c_str());
+        else if (a == "--power") power = atof(v.c_str());
+        else if (a == "--frames") frames_sel = parse_list(v);
+        else if (a == "--gpus") opt.devices = parse_list(v);
+        else if (a == "--streams") opt.streams_per_gpu = atoi(v.c_str());
+        else if (a == "--readers") opt.readers = atoi(v.c_str());
+        else return usage();
+    }
+    if (out.empty() || !have_rect) return usage();
+    if (g.scale != 1.0 && g.scale != 0.5) { fprintf(stderr, "--scale must be 1 or 0.5\n"); return 2; }
+
+    // the list: path zr zi tx ty per line (paths may contain spaces: the last four fields are numbers)
+    std::vector<fs::path> paths;
+    std::vector<Similarity> T;
+    {
+        FILE* f = fopen(list.string().c_str(), "r");
+        if (!f) { fprintf(stderr, "cannot read %s\n", list.string().c_str()); return 1; }
+        char line[4096];
+        while (fgets(line, sizeof line, f)) {
+            std::string s(line);
+            while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
+            if (s.empty() || s[0] == '#') continue;
+            double v[4];
+            size_t end = s.size();
+            for (int j = 3; j >= 0; --j) {
+                size_t sp = s.rfind(' ', end - 1);
+                if (sp == std::string::npos) { fprintf(stderr, "bad list line: %s\n", s.c_str()); fclose(f); return 1; }
+                v[j] = atof(s.substr(sp + 1, end - sp - 1).c_str());
+                end = sp;
+            }
+            paths.push_back(s.substr(0, end));
+            T.push_back({v[0], v[1], v[2], v[3]});
+        }
+        fclose(f);
+    }
+    if (paths.empty()) { fprintf(stderr, "empty list\n"); return 1; }
+    // frame k keeps its index from the list even when a subset is run (the index is what the state records)
+    std::vector<int> ks;
+    if (frames_sel.empty()) for (int k = 0; k < (int)paths.size(); ++k) ks.push_back(k);
+    else ks = frames_sel;
+    std::vector<fs::path> run_paths;
+    for (int k : ks) run_paths.push_back(paths[k]);
+
+    TiffInfo t0 = tiff_probe(paths[ks[0]]);
+    if (!t0.ok()) { fprintf(stderr, "%s: %s\n", paths[ks[0]].string().c_str(), t0.error.c_str()); return 1; }
+    g.W = (int)t0.width;
+    g.H = (int)t0.height;
+    int ow = g.out_w(), oh = g.out_h();
+    FoldParams fp;
+    fp.levels = n_levels(ow, oh);
+    fp.radius = (float)std::max(0.8, radius_px * g.scale);
+    fp.power = (float)power;
+
+    int ndev = 0;
+    CK(cudaGetDeviceCount(&ndev));
+    std::vector<int> devs = opt.devices;
+    if (devs.empty()) for (int i = 0; i < ndev; ++i) devs.push_back(i);
+    std::vector<FoldDev> ctx(ndev);
+    size_t npx_full = (size_t)g.W * g.H, npx_out = (size_t)ow * oh;
+    opt.streams_by_device.clear();
+    for (int d : devs) {
+        auto& D = ctx[d];
+        D.dev = d;
+        CK(cudaSetDevice(d));
+        fold_setup_device(fp);
+        CK(cudaStreamCreateWithFlags(&D.fold_s, cudaStreamNonBlocking));
+        D.st.alloc(d, ow, oh, fp.levels);
+        // slots per GPU from the memory left after the state: each needs the frame buffers,
+        // the measure scratch and the streamer's raw upload buffer, plus a working margin
+        FoldScratch probe;
+        probe.w = ow; probe.h = oh; probe.levels = fp.levels; probe.shapes = pyramid_shapes(ow, oh, fp.levels);
+        size_t slot_bytes = npx_full * 12 + (g.scale != 1.0 ? (size_t)g.work_w() * g.work_h() * 12 : 0) + npx_out * 12 + probe.bytes();
+        size_t per_slot = slot_bytes + t0.pixel_bytes() + 2 * kReadAlign;
+        size_t fr, tot;
+        CK(cudaMemGetInfo(&fr, &tot));
+        size_t margin = 512u << 20;
+        int fit = fr > margin ? (int)((fr - margin) / per_slot) : 0;
+        int S = std::max(1, std::min(opt.streams_per_gpu, fit));
+        if (fit < 1) fprintf(stderr, "GPU %d: not enough memory for the state plus one slot (%.2f GB free)\n", d, fr / 1e9);
+        opt.streams_by_device.push_back(S);
+        D.slots.resize(S);
+        for (auto& S : D.slots) {
+            CK(cudaMalloc(&S.d_rgb, npx_full * 3 * sizeof(float)));
+            if (g.scale != 1.0) CK(cudaMalloc(&S.d_scratch, (size_t)g.work_w() * g.work_h() * 3 * sizeof(float)));
+            CK(cudaMalloc(&S.d_warp, npx_out * 3 * sizeof(float)));
+            S.sc.alloc(ow, oh, fp.levels);
+            CK(cudaEventCreateWithFlags(&S.ready, cudaEventDisableTiming));
+            CK(cudaEventCreateWithFlags(&S.done, cudaEventDisableTiming));
+        }
+        CK(cudaMemGetInfo(&fr, &tot));
+        printf("GPU %d: state %.2f GB + %d slot(s) x %.2f GB (%d requested, %d fit); %.2f of %.2f GB free after allocation\n", d,
+               D.st.bytes() / 1e9, S, per_slot / 1e9, opt.streams_per_gpu, fit, fr / 1e9, tot / 1e9);
+    }
+
+    auto on_frame = [&](const DeviceFrame& f) {
+        auto& D = ctx[f.dev];
+        auto& S = D.slots[f.slot];
+        if (S.used) cudaStreamWaitEvent(f.stream, S.done, 0);   // the fold stream must be done with this slot
+        convert_to_rgb_f32(f.d_pixels(), *f.info, S.d_rgb, nullptr, f.stream);
+        int k = ks[f.k];
+        load_aligned(S.d_rgb, g, T[k], S.d_scratch, S.d_warp, false, f.stream);
+        fold_measure(S.d_warp, fp, S.sc, f.stream);
+        cudaEventRecord(S.ready, f.stream);
+        cudaStreamWaitEvent(D.fold_s, S.ready, 0);
+        fold_accumulate(D.st, k, S.d_warp, fp, S.sc, D.fold_s);
+        cudaEventRecord(S.done, D.fold_s);
+        S.used = true;
+    };
+
+    printf("fold: %zu frames, grid %dx%d -> %dx%d at scale %g, %d levels, blur sigma %.2f px, %zu GPU(s)\n",
+           run_paths.size(), g.W, g.H, ow, oh, g.scale, fp.levels, fp.radius, devs.size());
+    StreamerStats st = stream_frames(run_paths, opt, on_frame);
+    for (auto& e : st.errors) fprintf(stderr, "  error: %s\n", e.c_str());
+    for (int d : devs) {
+        CK(cudaSetDevice(d));
+        CK(cudaStreamSynchronize(ctx[d].fold_s));
+        CK(cudaGetLastError());
+    }
+    printf("%d frames in %.3f s: %.1f frames/s, %.2f GB/s read\n", st.frames, st.seconds, st.frames / st.seconds,
+           st.bytes / st.seconds / 1e9);
+    for (size_t i = 0; i < devs.size(); ++i) printf("  GPU %d: %d frames\n", devs[i], st.frames_per_device[i]);
+
+    // host merge in device order (any order gives the same B / C; A to double rounding)
+    HostFoldState merged;
+    bool first = true;
+    for (int d : devs) {
+        HostFoldState h = download(ctx[d].st);
+        if (first) { merged = std::move(h); first = false; }
+        else merge_into(merged, h);
+    }
+    if (!write_state(merged, out)) { fprintf(stderr, "cannot write %s\n", out.c_str()); return 1; }
+    printf("  merged state (%d frames) -> %s\n", merged.count, out.c_str());
+    for (int d : devs) {
+        auto& D = ctx[d];
+        CK(cudaSetDevice(d));
+        for (auto& S : D.slots) {
+            cudaFree(S.d_rgb); cudaFree(S.d_scratch); cudaFree(S.d_warp); S.sc.free();
+            cudaEventDestroy(S.ready); cudaEventDestroy(S.done);
+        }
+        D.st.free();
+        cudaStreamDestroy(D.fold_s);
+    }
+    return st.errors.empty() ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) return usage();
     std::string cmd = argv[1];
@@ -301,5 +485,6 @@ int main(int argc, char** argv) {
     if (cmd == "dump") return cmd_dump(argc, argv);
     if (cmd == "stream") return cmd_stream(argc, argv);
     if (cmd == "warp") return cmd_warp(argc, argv);
+    if (cmd == "fold") return cmd_fold(argc, argv);
     return usage();
 }

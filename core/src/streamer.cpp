@@ -73,8 +73,13 @@ StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, con
         CK(cudaGetDeviceCount(&n));
         for (int i = 0; i < n; ++i) devs.push_back(i);
     }
-    const int S = std::max(1, opt.streams_per_gpu), R = std::max(1, opt.readers);
-    const int P = opt.pool > 0 ? opt.pool : R + 2 * S * (int)devs.size();
+    std::vector<int> S_dev(devs.size(), std::max(1, opt.streams_per_gpu));
+    if (opt.streams_by_device.size() == devs.size())
+        for (size_t i = 0; i < devs.size(); ++i) S_dev[i] = std::max(1, opt.streams_by_device[i]);
+    int S_sum = 0;
+    for (int s : S_dev) S_sum += s;
+    const int R = std::max(1, opt.readers);
+    const int P = opt.pool > 0 ? opt.pool : R + 2 * S_sum;
     const size_t cap = tiff_buffer_capacity(max_px);
     PinnedPool pool(cap, P);
     st.frames_per_device.assign(devs.size(), 0);
@@ -113,8 +118,10 @@ StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, con
     // one worker thread per GPU, S streams each
     std::vector<std::thread> workers;
     std::vector<std::string> worker_errors(devs.size());
+    std::atomic<int> live_workers{(int)devs.size()};
     for (size_t di = 0; di < devs.size(); ++di)
         workers.emplace_back([&, di] {
+            const int S = S_dev[di];
             try {
                 CK(cudaSetDevice(devs[di]));
                 std::vector<cudaStream_t> streams(S);
@@ -153,10 +160,15 @@ StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, con
                 }
             } catch (const std::exception& e) {
                 worker_errors[di] = e.what();
-                // keep draining so readers never block forever on a full pool
-                Ready r;
-                while (q.pop(r)) pool.release(r.buf);
+                // other GPUs take over this one's frames; only the last worker standing
+                // has to drain the queue so readers never block on a full pool
+                if (--live_workers == 0) {
+                    Ready r;
+                    while (q.pop(r)) pool.release(r.buf);
+                }
+                return;
             }
+            --live_workers;
         });
 
     for (auto& t : readers) t.join();
