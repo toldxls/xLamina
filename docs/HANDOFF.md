@@ -104,7 +104,7 @@ stack, within numeric tolerance:
 | 3 | **Done (§18)**: pass-1 fold per GPU: A sums, B0 argmax, Laplacian pyramid C select; host merge. Full res 2.8 s on the 3080 Ti | `fusion.fold`, `fusion.merge` (byte-identical across GPU splits) |
 | 4 | **Done (§19)**: focus + brightness volume at 1/4 res, guided-filter aggregation, in the pass-1 stream | `fusion._w_fmvol`, `sgm_from_volume` (aggregation part) |
 | 5 | **Done (§20)**: cost volume, SGM (8 paths), sub-frame argmin, guided upsampling; 0.5 s on the 3080 Ti | `sgm_from_volume`, `sgm.py` (depth identical at 99.999 %) |
-| 6 | Refinement pass + dual composition | `fusion._w_refine`, `_w_b2dual` |
+| 6 | **Done (§21)**: refinement pass + dual composition + finalize; `stackcli stack` writes all outputs. Full res 18.7 s | `fusion._w_refine`, `_w_b2dual`, `finalize` (end-to-end numeric check pending the Python reference run) |
 | 7 | Alignment: exact cubic B-spline GN pairs (NOT texture interpolation) + host solve | `align.py` |
 | 8 | Multi-GPU scheduler: split frames by measured throughput (3080 Ti + 3070 Ti first) | `fusion._chunks` + merge |
 

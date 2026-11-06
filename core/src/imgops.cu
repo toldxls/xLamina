@@ -1,6 +1,9 @@
 #include "stackcore/imgops.h"
 
 #include <cuda_fp16.h>
+#include <thrust/device_ptr.h>
+#include <thrust/execution_policy.h>
+#include <thrust/sort.h>
 
 #include <algorithm>
 #include <cmath>
@@ -143,6 +146,62 @@ __global__ void k_lap_level3(const float* __restrict__ g, const float* __restric
         size_t o = ((size_t)y * dw + x) * 3 + c;
         lap[o] = g[o] - pyrup_at(gn, sw, sh, x, y, c);
     }
+}
+
+__global__ void k_salience(const float* __restrict__ coef, int w, int h, float* __restrict__ sal) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= w || y >= h) return;
+    float s = 0.f;
+#pragma unroll
+    for (int dy = -1; dy <= 1; ++dy) {
+        int yy = refl101(y + dy, h);
+#pragma unroll
+        for (int dx = -1; dx <= 1; ++dx) {
+            const float* p = coef + ((size_t)yy * w + refl101(x + dx, w)) * 3;
+            float l = p[0] * c_luma[0] + p[1] * c_luma[1] + p[2] * c_luma[2];
+            s += l * l;
+        }
+    }
+    sal[(size_t)y * w + x] = (float)((double)s * (1.0 / 9.0));
+}
+
+template <int R>
+__global__ void k_median(const float* __restrict__ in, float* __restrict__ out, int w, int h) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= w || y >= h) return;
+    const int N = (2 * R + 1) * (2 * R + 1);
+    float v[N];
+    int n = 0;
+    for (int dy = -R; dy <= R; ++dy)
+        for (int dx = -R; dx <= R; ++dx)
+            v[n++] = in[(size_t)min(max(y + dy, 0), h - 1) * w + min(max(x + dx, 0), w - 1)];
+    for (int a = 1; a < N; ++a) {
+        float t = v[a];
+        int b = a - 1;
+        while (b >= 0 && v[b] > t) { v[b + 1] = v[b]; --b; }
+        v[b + 1] = t;
+    }
+    out[(size_t)y * w + x] = v[N / 2];
+}
+
+__global__ void k_resize_linear(const float* __restrict__ src, int sw, int sh, float* __restrict__ dst, int dw, int dh,
+                                double scale_x, double scale_y) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= dw || y >= dh) return;
+    float fx = (float)((x + 0.5) * scale_x - 0.5), fy = (float)((y + 0.5) * scale_y - 0.5);
+    int sx = (int)floorf(fx), sy = (int)floorf(fy);
+    fx -= sx; fy -= sy;
+    if (sx < 0) { fx = 0.f; sx = 0; }
+    if (sx >= sw - 1) { fx = 0.f; sx = sw - 1; }
+    if (sy < 0) { fy = 0.f; sy = 0; }
+    if (sy >= sh - 1) { fy = 0.f; sy = sh - 1; }
+    int sx1 = min(sx + 1, sw - 1), sy1 = min(sy + 1, sh - 1);
+    float a0 = 1.f - fx, a1 = fx, b0 = 1.f - fy, b1 = fy;
+    const float* r0 = src + (size_t)sy * sw;
+    const float* r1 = src + (size_t)sy1 * sw;
+    float row0 = r0[sx] * a0 + r0[sx1] * a1;
+    float row1 = r1[sx] * a0 + r1[sx1] * a1;
+    dst[(size_t)y * dw + x] = row0 * b0 + row1 * b1;
 }
 
 __global__ void k_mul(const float* a, const float* b, float* out, size_t n) {
@@ -303,6 +362,27 @@ void lap_level_rgb(const float* d_g, const float* d_gn, int sw, int sh, float* d
     k_lap_level3<<<grid2(dw, dh), BLK, 0, s>>>(d_g, d_gn, sw, sh, d_lap, dw, dh);
 }
 
+void salience3(const float* d_coef, int w, int h, float* d_sal, cudaStream_t s) {
+    k_salience<<<grid2(w, h), BLK, 0, s>>>(d_coef, w, h, d_sal);
+}
+void median3(const float* d_in, float* d_out, int w, int h, cudaStream_t s) { k_median<1><<<grid2(w, h), BLK, 0, s>>>(d_in, d_out, w, h); }
+void median5(const float* d_in, float* d_out, int w, int h, cudaStream_t s) { k_median<2><<<grid2(w, h), BLK, 0, s>>>(d_in, d_out, w, h); }
+void resize_linear(const float* d_src, int sw, int sh, float* d_dst, int dw, int dh, cudaStream_t s) {
+    k_resize_linear<<<grid2(dw, dh), BLK, 0, s>>>(d_src, sw, sh, d_dst, dw, dh, (double)sw / dw, (double)sh / dh);
+}
+float percentile(const float* d_in, float* d_scratch, size_t n, double p, cudaStream_t s) {
+    CK(cudaMemcpyAsync(d_scratch, d_in, n * sizeof(float), cudaMemcpyDeviceToDevice, s));
+    thrust::sort(thrust::cuda::par.on(s), thrust::device_ptr<float>(d_scratch), thrust::device_ptr<float>(d_scratch + n));
+    double idx = p / 100.0 * (double)(n - 1);
+    size_t lo = (size_t)std::floor(idx);
+    size_t hi = std::min(lo + 1, n - 1);
+    float v[2];
+    CK(cudaMemcpyAsync(&v[0], d_scratch + lo, sizeof(float), cudaMemcpyDeviceToHost, s));
+    CK(cudaMemcpyAsync(&v[1], d_scratch + hi, sizeof(float), cudaMemcpyDeviceToHost, s));
+    CK(cudaStreamSynchronize(s));
+    double frac = idx - lo;
+    return (float)(v[0] + frac * ((double)v[1] - v[0]));
+}
 void mul(const float* a, const float* b, float* out, size_t n, cudaStream_t s) { k_mul<<<blocks1(n), 256, 0, s>>>(a, b, out, n); }
 void add(const float* a, const float* b, float* out, size_t n, cudaStream_t s) { k_add<<<blocks1(n), 256, 0, s>>>(a, b, out, n); }
 void f16_to_f32(const void* a, float* out, size_t n, cudaStream_t s) { k_h2f<<<blocks1(n), 256, 0, s>>>((const __half*)a, out, n); }

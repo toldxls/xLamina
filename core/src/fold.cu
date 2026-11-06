@@ -29,30 +29,6 @@ namespace {
 
 __constant__ float c_luma[3] = {0.2126f, 0.7152f, 0.0722f};
 
-__device__ __forceinline__ int refl101(int p, int n) {
-    if (n == 1) return 0;
-    while ((unsigned)p >= (unsigned)n) p = p < 0 ? -p : 2 * n - 2 - p;
-    return p;
-}
-
-// salience: 3x3 box (reflect-101, normalised like cv::boxFilter) of luma^2
-__global__ void k_salience(const float* __restrict__ coef, int w, int h, float* __restrict__ sal) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= w || y >= h) return;
-    float s = 0.f;
-#pragma unroll
-    for (int dy = -1; dy <= 1; ++dy) {
-        int yy = refl101(y + dy, h);
-#pragma unroll
-        for (int dx = -1; dx <= 1; ++dx) {
-            const float* p = coef + ((size_t)yy * w + refl101(x + dx, w)) * 3;
-            float l = p[0] * c_luma[0] + p[1] * c_luma[1] + p[2] * c_luma[2];
-            s += l * l;
-        }
-    }
-    sal[(size_t)y * w + x] = (float)((double)s * (1.0 / 9.0));
-}
-
 // |coef @ LUMA| into tmp (for the noise MAD)
 __global__ void k_abs_luma(const float* __restrict__ coef, float* __restrict__ out, size_t n) {
     size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
@@ -111,8 +87,6 @@ __global__ void k_fill_f32(float* p, size_t n, float v) {
 }
 
 inline unsigned blocks1(size_t n) { return (unsigned)((n + 255) / 256); }
-inline dim3 grid2(int w, int h) { return dim3((w + 31) / 32, (h + 7) / 8); }
-const dim3 BLK(32, 8);
 
 float median_sorted(float* d, size_t n, cudaStream_t s) {
     thrust::sort(thrust::cuda::par.on(s), thrust::device_ptr<float>(d), thrust::device_ptr<float>(d + n));
@@ -239,7 +213,7 @@ void fold_measure(const float* d_img, const FoldParams& p, FoldScratch& sc, cuda
     for (int l = 0; l < p.levels - 1; ++l) {
         auto a = sc.shapes[l], b = sc.shapes[l + 1];
         lap_level_rgb(gl, sc.g[l + 1], b.w, b.h, sc.lap[l], a.w, a.h, s);
-        k_salience<<<grid2(a.w, a.h), BLK, 0, s>>>(sc.lap[l], a.w, a.h, sc.sal[l]);
+        salience3(sc.lap[l], a.w, a.h, sc.sal[l], s);
         gl = sc.g[l + 1];
     }
 }

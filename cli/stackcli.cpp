@@ -26,8 +26,11 @@
 #include <cstring>
 #include <filesystem>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <vector>
+
+#include "stackcore/compose.h"
 
 #include "stackcore/convert.h"
 #include "stackcore/depth.h"
@@ -48,6 +51,11 @@ using namespace stackcore;
             return 1;                                                                           \
         }                                                                                       \
     } while (0)
+#define CK_THROW(x)                                                                             \
+    do {                                                                                        \
+        cudaError_t e_ = (x);                                                                   \
+        if (e_ != cudaSuccess) throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(e_)); \
+    } while (0)
 
 static int usage() {
     fprintf(stderr,
@@ -58,7 +66,9 @@ static int usage() {
             "  stackcli warp FILE.tif OUT.f32 --z ZR,ZI --t TX,TY --rect X0,Y0,X1,Y1 [--scale 1|0.5] [--quantize] [--gpu N]\n"
             "  stackcli fold LIST.txt --rect X0,Y0,X1,Y1 --out DIR [--scale 1|0.5] [--radius-px 6] [--power 4]\n"
             "                [--frames 0,5,9] [--gpus 0,1] [--streams 2] [--readers 16] [--volume]\n"
-            "  stackcli depth VOLDIR --out DIR [--crop X0,Y0,W,H] [--gpu N] [--dirs 8]\n");
+            "  stackcli depth VOLDIR --out DIR [--crop X0,Y0,W,H] [--gpu N] [--dirs 8]\n"
+            "  stackcli stack LIST.txt --rect X0,Y0,X1,Y1 --out DIR [--scale 1|0.5] [--gpus 0,1] [--streams 2]\n"
+            "                 [--refine-r 12] [--refine-fm-px 9] [--soft-px 3]      the whole fusion -> 16-bit TIFFs\n");
     return 2;
 }
 
@@ -340,64 +350,121 @@ static bool write_raw(const fs::path& p, const T* data, size_t n) {
     return m == n;
 }
 
-static int cmd_fold(int argc, char** argv) {
-    if (argc < 3) return usage();
-    fs::path list = argv[2];
+// Everything the pass-1 stream produces, for `fold` to write out and for `stack` to carry on with.
+struct Pass1 {
     Grid g;
-    std::string out;
+    FoldParams fp;
+    VolumeParams vp;
+    std::vector<fs::path> paths;
+    std::vector<Similarity> T;
+    std::vector<int> devs;
+    HostFoldState merged;
+    std::vector<float> guide, ga;            // output res, depth res
+    std::vector<uint16_t> fm_all, lum_all;   // plane-major (K, dh, dw) float16
+    std::vector<float> V_all;                // plane-major, aggregated
+    int slices = 0;
+    StreamerStats st;
+    double vol_seconds = 0;
+};
+
+struct Pass1Options {
+    fs::path list;
+    Grid g;
     double radius_px = 6.0, power = 4.0;
     std::vector<int> frames_sel;
     StreamerOptions opt;
-    opt.streams_per_gpu = 2;
-    bool have_rect = false, volume = false;
+    bool volume = false;
     double depth_fraction = 0.25, depth_fm_px = 6.0, vol_agg_px = 32.0;
+};
+
+static bool read_list(const fs::path& list, std::vector<fs::path>& paths, std::vector<Similarity>& T) {
+    // path zr zi tx ty per line (paths may contain spaces: the last four fields are numbers)
+    FILE* f = fopen(list.string().c_str(), "r");
+    if (!f) { fprintf(stderr, "cannot read %s\n", list.string().c_str()); return false; }
+    char line[4096];
+    while (fgets(line, sizeof line, f)) {
+        std::string s(line);
+        while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
+        if (s.empty() || s[0] == '#') continue;
+        double v[4];
+        size_t end = s.size();
+        for (int j = 3; j >= 0; --j) {
+            size_t sp = s.rfind(' ', end - 1);
+            if (sp == std::string::npos) { fprintf(stderr, "bad list line: %s\n", s.c_str()); fclose(f); return false; }
+            v[j] = atof(s.substr(sp + 1, end - sp - 1).c_str());
+            end = sp;
+        }
+        paths.push_back(s.substr(0, end));
+        T.push_back({v[0], v[1], v[2], v[3]});
+    }
+    fclose(f);
+    return !paths.empty();
+}
+
+static int run_pass1(const Pass1Options& po, Pass1& P);
+
+static int cmd_fold(int argc, char** argv) {
+    if (argc < 3) return usage();
+    Pass1Options po;
+    po.list = argv[2];
+    std::string out;
+    po.opt.streams_per_gpu = 2;
+    bool have_rect = false;
+    Grid& g = po.g;
     for (int i = 3; i < argc; ++i) {
         std::string a = argv[i];
-        if (a == "--volume") { volume = true; continue; }
+        if (a == "--volume") { po.volume = true; continue; }
         if (i + 1 >= argc) return usage();
         std::string v = argv[++i];
         if (a == "--rect") { auto d = parse_doubles(v); if (d.size() != 4) return usage(); g.x0 = (int)d[0]; g.y0 = (int)d[1]; g.x1 = (int)d[2]; g.y1 = (int)d[3]; have_rect = true; }
         else if (a == "--out") out = v;
         else if (a == "--scale") g.scale = atof(v.c_str());
-        else if (a == "--radius-px") radius_px = atof(v.c_str());
-        else if (a == "--power") power = atof(v.c_str());
-        else if (a == "--frames") frames_sel = parse_list(v);
-        else if (a == "--gpus") opt.devices = parse_list(v);
-        else if (a == "--streams") opt.streams_per_gpu = atoi(v.c_str());
-        else if (a == "--readers") opt.readers = atoi(v.c_str());
-        else if (a == "--depth-fraction") depth_fraction = atof(v.c_str());
-        else if (a == "--depth-fm-px") depth_fm_px = atof(v.c_str());
-        else if (a == "--vol-agg-px") vol_agg_px = atof(v.c_str());
+        else if (a == "--radius-px") po.radius_px = atof(v.c_str());
+        else if (a == "--power") po.power = atof(v.c_str());
+        else if (a == "--frames") po.frames_sel = parse_list(v);
+        else if (a == "--gpus") po.opt.devices = parse_list(v);
+        else if (a == "--streams") po.opt.streams_per_gpu = atoi(v.c_str());
+        else if (a == "--readers") po.opt.readers = atoi(v.c_str());
+        else if (a == "--depth-fraction") po.depth_fraction = atof(v.c_str());
+        else if (a == "--depth-fm-px") po.depth_fm_px = atof(v.c_str());
+        else if (a == "--vol-agg-px") po.vol_agg_px = atof(v.c_str());
         else return usage();
     }
     if (out.empty() || !have_rect) return usage();
-    if (g.scale != 1.0 && g.scale != 0.5) { fprintf(stderr, "--scale must be 1 or 0.5\n"); return 2; }
-
-    // the list: path zr zi tx ty per line (paths may contain spaces: the last four fields are numbers)
-    std::vector<fs::path> paths;
-    std::vector<Similarity> T;
-    {
-        FILE* f = fopen(list.string().c_str(), "r");
-        if (!f) { fprintf(stderr, "cannot read %s\n", list.string().c_str()); return 1; }
-        char line[4096];
-        while (fgets(line, sizeof line, f)) {
-            std::string s(line);
-            while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
-            if (s.empty() || s[0] == '#') continue;
-            double v[4];
-            size_t end = s.size();
-            for (int j = 3; j >= 0; --j) {
-                size_t sp = s.rfind(' ', end - 1);
-                if (sp == std::string::npos) { fprintf(stderr, "bad list line: %s\n", s.c_str()); fclose(f); return 1; }
-                v[j] = atof(s.substr(sp + 1, end - sp - 1).c_str());
-                end = sp;
-            }
-            paths.push_back(s.substr(0, end));
-            T.push_back({v[0], v[1], v[2], v[3]});
+    Pass1 P;
+    if (int r = run_pass1(po, P)) return r;
+    if (!write_state(P.merged, out)) { fprintf(stderr, "cannot write %s\n", out.c_str()); return 1; }
+    printf("  merged state (%d frames) -> %s\n", P.merged.count, out.c_str());
+    if (po.volume) {
+        fs::path od(out);
+        const auto& vp = P.vp;
+        bool okw = write_raw(od / "guide.f32", P.guide.data(), P.guide.size()) && write_raw(od / "guide_d.f32", P.ga.data(), P.ga.size()) &&
+                   write_raw(od / "vol_fm.f16", P.fm_all.data(), P.fm_all.size()) && write_raw(od / "vol_lum.f16", P.lum_all.data(), P.lum_all.size()) &&
+                   write_raw(od / "vol_V.f32", P.V_all.data(), P.V_all.size());
+        FILE* mf = fopen((od / "volume.txt").string().c_str(), "w");
+        if (mf) {
+            fprintf(mf, "dw %d\ndh %d\nK %d\nslices %d\nfm_radius %.6g\nagg_r %d\nagg_eps %.6g\nlayout plane-major (K, dh, dw)\n", vp.dw, vp.dh,
+                    (int)P.paths.size(), P.slices, vp.fm_radius, vp.agg_r, vp.agg_eps);
+            fclose(mf);
         }
-        fclose(f);
+        if (!okw) { fprintf(stderr, "cannot write the volume files\n"); return 1; }
+        printf("  volume: %d slices of %dx%d, fm sigma %.2f, aggregation r=%d; guide + aggregation %.2f s -> %s\n", P.slices, vp.dw, vp.dh,
+               vp.fm_radius, vp.agg_r, P.vol_seconds, out.c_str());
     }
-    if (paths.empty()) { fprintf(stderr, "empty list\n"); return 1; }
+    return P.st.errors.empty() ? 0 : 1;
+}
+
+static int run_pass1(const Pass1Options& po, Pass1& P) {
+    Grid g = po.g;
+    StreamerOptions opt = po.opt;
+    const bool volume = po.volume;
+    if (g.scale != 1.0 && g.scale != 0.5) { fprintf(stderr, "--scale must be 1 or 0.5\n"); return 2; }
+    std::vector<fs::path>& paths = P.paths;
+    std::vector<Similarity>& T = P.T;
+    if (!read_list(po.list, paths, T)) return 1;
+    const std::vector<int>& frames_sel = po.frames_sel;
+    {
+    }
     // frame k keeps its index from the list even when a subset is run (the index is what the state records)
     std::vector<int> ks;
     if (frames_sel.empty()) for (int k = 0; k < (int)paths.size(); ++k) ks.push_back(k);
@@ -412,23 +479,25 @@ static int cmd_fold(int argc, char** argv) {
     int ow = g.out_w(), oh = g.out_h();
     FoldParams fp;
     fp.levels = n_levels(ow, oh);
-    fp.radius = (float)std::max(0.8, radius_px * g.scale);
-    fp.power = (float)power;
+    fp.radius = (float)std::max(0.8, po.radius_px * g.scale);
+    fp.power = (float)po.power;
     VolumeParams vp;
     {
-        double ds = depth_fraction / g.scale;   // depth res = fixed fraction of the sensor
+        double ds = po.depth_fraction / g.scale;   // depth res = fixed fraction of the sensor
         vp.dw = std::max(16, (int)std::nearbyint(ow * ds));
         vp.dh = std::max(16, (int)std::nearbyint(oh * ds));
-        vp.fm_radius = (float)std::max(0.8, depth_fm_px * depth_fraction);
-        vp.agg_r = (int)std::nearbyint(vol_agg_px * depth_fraction);
-        if (vol_agg_px * depth_fraction < 1.0) vp.agg_r = 0;
+        vp.fm_radius = (float)std::max(0.8, po.depth_fm_px * po.depth_fraction);
+        vp.agg_r = (int)std::nearbyint(po.vol_agg_px * po.depth_fraction);
+        if (po.vol_agg_px * po.depth_fraction < 1.0) vp.agg_r = 0;
     }
     const int K = (int)paths.size();
+    P.g = g; P.fp = fp; P.vp = vp;
 
     int ndev = 0;
     CK(cudaGetDeviceCount(&ndev));
     std::vector<int> devs = opt.devices;
     if (devs.empty()) for (int i = 0; i < ndev; ++i) devs.push_back(i);
+    P.devs = devs;
     std::vector<FoldDev> ctx(ndev);
     size_t npx_full = (size_t)g.W * g.H, npx_out = (size_t)ow * oh;
     opt.streams_by_device.clear();
@@ -503,15 +572,14 @@ static int cmd_fold(int argc, char** argv) {
     for (size_t i = 0; i < devs.size(); ++i) printf("  GPU %d: %d frames\n", devs[i], st.frames_per_device[i]);
 
     // host merge in device order (any order gives the same B / C; A to double rounding)
-    HostFoldState merged;
+    HostFoldState& merged = P.merged;
     bool first = true;
     for (int d : devs) {
         HostFoldState h = download(ctx[d].st);
         if (first) { merged = std::move(h); first = false; }
         else merge_into(merged, h);
     }
-    if (!write_state(merged, out)) { fprintf(stderr, "cannot write %s\n", out.c_str()); return 1; }
-    printf("  merged state (%d frames) -> %s\n", merged.count, out.c_str());
+    P.st = st;
 
     if (volume) {
         auto t0 = std::chrono::steady_clock::now();
@@ -554,8 +622,10 @@ static int cmd_fold(int argc, char** argv) {
         cudaFree(d_base); cudaFree(d_coll); cudaFree(d_t1); cudaFree(d_t2); cudaFree(d_guide); cudaFree(d_ga);
 
         // every GPU aggregates its own slices against the shared guide; the host collects plane-major volumes
-        std::vector<uint16_t> fm_all(nd * K, 0), lum_all(nd * K, 0);
-        std::vector<float> V_all(nd * K, 0.f);
+        std::vector<uint16_t>& fm_all = P.fm_all;
+        std::vector<uint16_t>& lum_all = P.lum_all;
+        std::vector<float>& V_all = P.V_all;
+        fm_all.assign(nd * K, 0); lum_all.assign(nd * K, 0); V_all.assign(nd * K, 0.f);
         int done = 0;
         for (int d : devs) {
             auto& D = ctx[d];
@@ -585,20 +655,10 @@ static int cmd_fold(int argc, char** argv) {
             cudaFree(d_g);
             cudaFree(d_V);
         }
-        double vs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-        fs::path od(out);
-        bool okw = write_raw(od / "guide.f32", guide_h.data(), guide_h.size()) && write_raw(od / "guide_d.f32", ga_h.data(), ga_h.size()) &&
-                   write_raw(od / "vol_fm.f16", fm_all.data(), fm_all.size()) && write_raw(od / "vol_lum.f16", lum_all.data(), lum_all.size()) &&
-                   write_raw(od / "vol_V.f32", V_all.data(), V_all.size());
-        FILE* mf = fopen((od / "volume.txt").string().c_str(), "w");
-        if (mf) {
-            fprintf(mf, "dw %d\ndh %d\nK %d\nslices %d\nfm_radius %.6g\nagg_r %d\nagg_eps %.6g\nlayout plane-major (K, dh, dw)\n", vp.dw, vp.dh, K,
-                    done, vp.fm_radius, vp.agg_r, vp.agg_eps);
-            fclose(mf);
-        }
-        if (!okw) { fprintf(stderr, "cannot write the volume files\n"); return 1; }
-        printf("  volume: %d slices of %dx%d, fm sigma %.2f, aggregation r=%d; guide + aggregation %.2f s -> %s\n", done, vp.dw, vp.dh,
-               vp.fm_radius, vp.agg_r, vs, out.c_str());
+        P.vol_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        P.guide = std::move(guide_h);
+        P.ga = std::move(ga_h);
+        P.slices = done;
     }
 
     for (int d : devs) {
@@ -727,6 +787,290 @@ static int cmd_depth(int argc, char** argv) {
     return 0;
 }
 
+// ----------------------------------------------------------------------------- stack: the whole pipeline
+
+// A streaming pass after pass 1: per slot convert + warp, then a per-slot stage on the slot stream and a
+// per-device accumulate stage on the device's fold stream (the same event hand-over as pass 1).
+struct PassSlot {
+    float *d_rgb = nullptr, *d_scratch = nullptr, *d_warp = nullptr;
+    cudaEvent_t ready = nullptr, done = nullptr;
+    bool used = false;
+    int index = 0;   // slot index within its device
+};
+struct PassDev {
+    int dev = -1;
+    cudaStream_t fold_s = nullptr;
+    std::vector<PassSlot> slots;
+};
+
+template <class SlotStage, class AccStage>
+static StreamerStats run_pass(const std::vector<fs::path>& run_paths, const std::vector<int>& ks, const std::vector<Similarity>& T,
+                              const Grid& g, const std::vector<int>& devs, int streams, int readers, std::vector<PassDev>& ctx,
+                              SlotStage slot_stage, AccStage acc_stage, const char* what) {
+    int ndev = 0;
+    CK_THROW(cudaGetDeviceCount(&ndev));
+    ctx.assign(ndev, PassDev{});
+    size_t npx_full = (size_t)g.W * g.H, npx_out = (size_t)g.out_w() * g.out_h();
+    StreamerOptions opt;
+    opt.devices = devs;
+    opt.streams_per_gpu = streams;
+    opt.readers = readers;
+    for (int d : devs) {
+        auto& D = ctx[d];
+        D.dev = d;
+        CK_THROW(cudaSetDevice(d));
+        CK_THROW(cudaStreamCreateWithFlags(&D.fold_s, cudaStreamNonBlocking));
+        D.slots.resize(streams);
+        int idx = 0;
+        for (auto& S : D.slots) {
+            S.index = idx++;
+            CK_THROW(cudaMalloc(&S.d_rgb, npx_full * 3 * sizeof(float)));
+            if (g.scale != 1.0) CK_THROW(cudaMalloc(&S.d_scratch, (size_t)g.work_w() * g.work_h() * 3 * sizeof(float)));
+            CK_THROW(cudaMalloc(&S.d_warp, npx_out * 3 * sizeof(float)));
+            CK_THROW(cudaEventCreateWithFlags(&S.ready, cudaEventDisableTiming));
+            CK_THROW(cudaEventCreateWithFlags(&S.done, cudaEventDisableTiming));
+        }
+    }
+    auto on_frame = [&](const DeviceFrame& f) {
+        auto& D = ctx[f.dev];
+        auto& S = D.slots[f.slot];
+        if (S.used) cudaStreamWaitEvent(f.stream, S.done, 0);
+        convert_to_rgb_f32(f.d_pixels(), *f.info, S.d_rgb, nullptr, f.stream);
+        int k = ks[f.k];
+        load_aligned(S.d_rgb, g, T[k], S.d_scratch, S.d_warp, false, f.stream);
+        slot_stage(f.dev, S, k, f.stream);
+        cudaEventRecord(S.ready, f.stream);
+        cudaStreamWaitEvent(D.fold_s, S.ready, 0);
+        acc_stage(f.dev, S, k, D.fold_s);
+        cudaEventRecord(S.done, D.fold_s);
+        S.used = true;
+    };
+    StreamerStats st = stream_frames(run_paths, opt, on_frame);
+    for (auto& e : st.errors) fprintf(stderr, "  error: %s\n", e.c_str());
+    for (int d : devs) {
+        CK_THROW(cudaSetDevice(d));
+        CK_THROW(cudaStreamSynchronize(ctx[d].fold_s));
+        CK_THROW(cudaGetLastError());
+    }
+    printf("  %s: %d frames in %.2f s (%.1f frames/s)", what, st.frames, st.seconds, st.frames / st.seconds);
+    for (size_t i = 0; i < devs.size(); ++i) printf("%s GPU %d %d", i ? "," : ";", devs[i], st.frames_per_device[i]);
+    printf("\n");
+    for (int d : devs) {
+        auto& D = ctx[d];
+        CK_THROW(cudaSetDevice(d));
+        for (auto& S : D.slots) {
+            cudaFree(S.d_rgb); cudaFree(S.d_scratch); cudaFree(S.d_warp);
+            cudaEventDestroy(S.ready); cudaEventDestroy(S.done);
+        }
+        cudaStreamDestroy(D.fold_s);
+    }
+    return st;
+}
+
+static int cmd_stack(int argc, char** argv) {
+    if (argc < 3) return usage();
+    Pass1Options po;
+    po.list = argv[2];
+    po.volume = true;
+    po.opt.streams_per_gpu = 2;
+    std::string out;
+    bool have_rect = false;
+    int refine_r = 12, streams = 2;
+    double refine_fm_px = 9.0, soft_px = 3.0;
+    Grid& g = po.g;
+    for (int i = 3; i + 1 < argc; i += 2) {
+        std::string a = argv[i], v = argv[i + 1];
+        if (a == "--rect") { auto d = parse_doubles(v); if (d.size() != 4) return usage(); g.x0 = (int)d[0]; g.y0 = (int)d[1]; g.x1 = (int)d[2]; g.y1 = (int)d[3]; have_rect = true; }
+        else if (a == "--out") out = v;
+        else if (a == "--scale") g.scale = atof(v.c_str());
+        else if (a == "--gpus") po.opt.devices = parse_list(v);
+        else if (a == "--streams") { streams = atoi(v.c_str()); po.opt.streams_per_gpu = streams; }
+        else if (a == "--readers") po.opt.readers = atoi(v.c_str());
+        else if (a == "--refine-r") refine_r = atoi(v.c_str());
+        else if (a == "--refine-fm-px") refine_fm_px = atof(v.c_str());
+        else if (a == "--soft-px") soft_px = atof(v.c_str());
+        else return usage();
+    }
+    if (out.empty() || !have_rect) return usage();
+    auto t_all = std::chrono::steady_clock::now();
+    auto since = [](std::chrono::steady_clock::time_point t) { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count(); };
+
+    // ---- pass 1 + volume
+    Pass1 P;
+    if (int r = run_pass1(po, P)) return r;
+    const int K = (int)P.paths.size();
+    const int ow = P.g.out_w(), oh = P.g.out_h();
+    const size_t no = (size_t)ow * oh, nd = (size_t)P.vp.dw * P.vp.dh;
+    const int prim = P.devs[0];
+    printf("pass 1: %.2f s stream + %.2f s volume\n", P.st.seconds, P.vol_seconds);
+
+    // ---- depth (SGM) on the primary GPU
+    auto t1 = std::chrono::steady_clock::now();
+    CK(cudaSetDevice(prim));
+    cudaStream_t s;
+    CK(cudaStreamCreate(&s));
+    DepthResult R;
+    float* d_guide = nullptr;
+    {
+        float *d_planes, *d_V, *d_ga;
+        void *d_L16p, *d_L16;
+        CK(cudaMalloc(&d_planes, nd * K * sizeof(float)));
+        CK(cudaMalloc(&d_V, nd * K * sizeof(float)));
+        CK(cudaMalloc(&d_L16p, nd * K * 2));
+        CK(cudaMalloc(&d_L16, nd * K * 2));
+        CK(cudaMalloc(&d_guide, no * sizeof(float)));
+        CK(cudaMalloc(&d_ga, nd * sizeof(float)));
+        CK(cudaMemcpy(d_planes, P.V_all.data(), nd * K * sizeof(float), cudaMemcpyHostToDevice));
+        CK(cudaMemcpy(d_L16p, P.lum_all.data(), nd * K * 2, cudaMemcpyHostToDevice));
+        CK(cudaMemcpy(d_guide, P.guide.data(), no * sizeof(float), cudaMemcpyHostToDevice));
+        CK(cudaMemcpy(d_ga, P.ga.data(), nd * sizeof(float), cudaMemcpyHostToDevice));
+        planes_to_kfastest_f32(d_planes, d_V, P.vp.dw, P.vp.dh, K, s);
+        planes_to_kfastest_f16(d_L16p, d_L16, P.vp.dw, P.vp.dh, K, s);
+        CK(cudaStreamSynchronize(s));
+        cudaFree(d_planes); cudaFree(d_L16p);
+        std::vector<float>().swap(P.V_all);
+        std::vector<uint16_t>().swap(P.fm_all);
+        std::vector<uint16_t>().swap(P.lum_all);
+        DepthParams dp;
+        R = depth_from_volume(d_V, d_L16, d_guide, d_ga, P.vp.dw, P.vp.dh, K, ow, oh, dp, s);
+        cudaFree(d_V); cudaFree(d_L16); cudaFree(d_ga);
+    }
+    printf("depth: %.2f s (cost %.0f ms, SGM %.0f ms, post %.0f ms); end-peaked %.1f%%\n", since(t1), R.ms_cost, R.ms_sgm, R.ms_post,
+           100 * R.end_fraction);
+
+    // ---- pass 2: refinement
+    auto t2 = std::chrono::steady_clock::now();
+    std::vector<int> all_k(K);
+    for (int k = 0; k < K; ++k) all_k[k] = k;
+    float refine_sigma = (float)std::max(0.6, refine_fm_px * P.g.scale);
+    {
+        int ndev = 0;
+        CK(cudaGetDeviceCount(&ndev));
+        std::vector<RefineState> rst(ndev);
+        std::vector<std::vector<RefineScratch>> rsc(ndev);
+        std::vector<float*> d_depth(ndev, nullptr);
+        for (int d : P.devs) {
+            CK(cudaSetDevice(d));
+            rst[d].alloc(d, ow, oh);
+            rsc[d].resize(streams);
+            for (auto& sc : rsc[d]) sc.alloc(ow, oh, refine_sigma);
+            CK(cudaMalloc(&d_depth[d], no * sizeof(float)));
+            CK(cudaMemcpy(d_depth[d], R.depth_s.data(), no * sizeof(float), cudaMemcpyHostToDevice));
+        }
+        std::vector<PassDev> ctx;
+        run_pass(P.paths, all_k, P.T, P.g, P.devs, streams, po.opt.readers, ctx,
+                 [&](int dev, PassSlot& S, int, cudaStream_t ss) { refine_measure(S.d_warp, rsc[dev][S.index], ss); },
+                 [&](int dev, PassSlot& S, int k, cudaStream_t fs) { refine_accumulate(rst[dev], k, rsc[dev][S.index].fm, d_depth[dev], refine_r, fs); },
+                 "refine pass");
+        HostRefine hr;
+        bool first = true;
+        for (int d : P.devs) {
+            HostRefine h = download(rst[d]);
+            if (first) { hr = std::move(h); first = false; } else merge_into(hr, h);
+            rst[d].free();
+            CK(cudaSetDevice(d));
+            for (auto& sc : rsc[d]) sc.free();
+            cudaFree(d_depth[d]);
+        }
+        CK(cudaSetDevice(prim));
+        refine_depth(R.depth_s, R.conf, R.spill, P.vp.dw, P.vp.dh, hr, ow, oh, P.g.scale, s);
+    }
+    std::vector<float> Ds = smooth_depth(R.depth_s, d_guide, ow, oh, P.g.scale, K, s);
+    printf("refine: %.2f s\n", since(t2));
+
+    // ---- pass 3: composition over the frames that carry a label
+    auto t3 = std::chrono::steady_clock::now();
+    std::vector<float> b_img;
+    {
+        std::vector<int> ks = compose_frames(R.depth_s, Ds, K);
+        std::vector<fs::path> sub;
+        for (int k : ks) sub.push_back(P.paths[k]);
+        int ndev = 0;
+        CK(cudaGetDeviceCount(&ndev));
+        std::vector<ComposeState> cst(ndev);
+        std::vector<std::vector<ComposeScratch>> csc(ndev);
+        std::vector<float*> d_D(ndev, nullptr), d_Ds(ndev, nullptr);
+        float s1 = (float)std::max(0.8, soft_px * P.g.scale);
+        for (int d : P.devs) {
+            CK(cudaSetDevice(d));
+            cst[d].alloc(d, ow, oh);
+            csc[d].resize(streams);
+            for (auto& sc : csc[d]) sc.alloc(ow, oh, s1);
+            CK(cudaMalloc(&d_D[d], no * sizeof(float)));
+            CK(cudaMalloc(&d_Ds[d], no * sizeof(float)));
+            CK(cudaMemcpy(d_D[d], R.depth_s.data(), no * sizeof(float), cudaMemcpyHostToDevice));
+            CK(cudaMemcpy(d_Ds[d], Ds.data(), no * sizeof(float), cudaMemcpyHostToDevice));
+        }
+        std::vector<PassDev> ctx;
+        run_pass(sub, ks, P.T, P.g, P.devs, streams, po.opt.readers, ctx,
+                 [&](int, PassSlot&, int, cudaStream_t) {},
+                 [&](int dev, PassSlot& S, int k, cudaStream_t fs) { compose_frame(cst[dev], k, S.d_warp, d_D[dev], d_Ds[dev], csc[dev][S.index], fs); },
+                 "compose pass");
+        HostCompose hc;
+        bool first = true;
+        for (int d : P.devs) {
+            HostCompose h = download(cst[d]);
+            if (first) { hc = std::move(h); first = false; } else merge_into(hc, h);
+            cst[d].free();
+            CK(cudaSetDevice(d));
+            for (auto& sc : csc[d]) sc.free();
+            cudaFree(d_D[d]); cudaFree(d_Ds[d]);
+        }
+        CK(cudaSetDevice(prim));
+        b_img = compose_mix(hc, R.conf, ow, oh, P.g.scale, s);
+        printf("compose: %zu of %d frames carry a label; %.2f s\n", ks.size(), K, since(t3));
+    }
+
+    // ---- noise from two adjacent middle frames, then finalize
+    auto t4 = std::chrono::steady_clock::now();
+    std::vector<float> noise_mad;
+    {
+        int mid = std::max(0, K / 2 - 1);
+        float* d_pair[2];
+        for (int j = 0; j < 2; ++j) {
+            TiffInfo info;
+            float* d_rgb = nullptr;
+            if (int r = load_frame_to_device(P.paths[mid + j], info, d_rgb)) return r;
+            float* d_scr = nullptr;
+            if (P.g.scale != 1.0) CK(cudaMalloc(&d_scr, (size_t)P.g.work_w() * P.g.work_h() * 3 * sizeof(float)));
+            CK(cudaMalloc(&d_pair[j], no * 3 * sizeof(float)));
+            load_aligned(d_rgb, P.g, P.T[mid + j], d_scr, d_pair[j], false, s);
+            CK(cudaStreamSynchronize(s));
+            cudaFree(d_rgb); cudaFree(d_scr);
+        }
+        noise_mad = noise_from_pair(d_pair[0], d_pair[1], ow, oh, P.fp.levels, s);
+        cudaFree(d_pair[0]); cudaFree(d_pair[1]);
+    }
+    FinalParams fpar;
+    FinalOutputs F = finalize(P.merged, noise_mad, R.depth_s, b_img, fpar, s);
+    printf("finalize: %.2f s; noise sigma per level (x1e-4):", since(t4));
+    for (float v : noise_mad) printf(" %.2f", v * 1e4);
+    printf("\n");
+
+    // ---- write
+    auto t5 = std::chrono::steady_clock::now();
+    fs::create_directories(out);
+    fs::path od(out);
+    for (size_t i = 0; i < F.names.size(); ++i)
+        if (!write_tiff_rgb16((od / (F.names[i] + ".tif")).string(), F.images[i], ow, oh)) { fprintf(stderr, "cannot write %s\n", F.names[i].c_str()); return 1; }
+    write_raw(od / "depth.f32", R.depth_s.data(), R.depth_s.size());
+    write_raw(od / "depth_smooth.f32", Ds.data(), Ds.size());
+    write_raw(od / "conf.f32", R.conf.data(), R.conf.size());
+    FILE* mf = fopen((od / "stack.txt").string().c_str(), "w");
+    if (mf) {
+        fprintf(mf, "w %d\nh %d\nframes %d\nlevels %d\nscale %g\nrect %d %d %d %d\nnoise_mad", ow, oh, K, P.fp.levels, P.g.scale, P.g.x0, P.g.y0, P.g.x1, P.g.y1);
+        for (float v : noise_mad) fprintf(mf, " %.9g", v);
+        fprintf(mf, "\noutputs");
+        for (auto& nme : F.names) fprintf(mf, " %s", nme.c_str());
+        fprintf(mf, "\n");
+        fclose(mf);
+    }
+    cudaFree(d_guide);
+    cudaStreamDestroy(s);
+    printf("wrote %zu outputs (%dx%d) in %.2f s -> %s\ntotal %.2f s\n", F.names.size(), ow, oh, since(t5), out.c_str(), since(t_all));
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) return usage();
     std::string cmd = argv[1];
@@ -736,5 +1080,9 @@ int main(int argc, char** argv) {
     if (cmd == "warp") return cmd_warp(argc, argv);
     if (cmd == "fold") return cmd_fold(argc, argv);
     if (cmd == "depth") return cmd_depth(argc, argv);
+    if (cmd == "stack") {
+        try { return cmd_stack(argc, argv); }
+        catch (const std::exception& e) { fprintf(stderr, "stack failed: %s\n", e.what()); return 1; }
+    }
     return usage();
 }

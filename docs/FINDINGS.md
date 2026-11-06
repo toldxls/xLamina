@@ -644,6 +644,50 @@ rint, 3 × 3 median; conf = w upsampled.
 - Memory: V (1.2 GB) is overwritten by C, S adds 1.2 GB, Lv 0.6 GB: ~3 GB
   on the depth GPU, which at full res means freeing the pass-1 slots first.
 
+## 21. Port step 6: refinement, composition, finalize — `stackcli stack` (2026-11-06)
+
+`core/src/compose.cu`, `stackcli stack LIST --rect … --out DIR [--scale]`:
+the whole fusion as one command, writing A, B, B0, C, CB, Cn, CBn, Cd, Cg,
+Cg2 and H as 16-bit TIFFs (own writer, one strip) plus the depth maps.
+
+Pipeline on the PC, in order: pass 1 (fold + volume slices, all GPUs) →
+depth on the primary GPU → **pass 2** (refinement: fine focus argmax within
+±12 frames of the SGM depth, all GPUs, `_take` merge) → refined depth
+(`median3`, conf and spill gates) → smoothed depth (two `median5`, guided
+filter r = 40 scale) → **pass 3** (dual composition: blurred narrow labels
+and the continuous smoothed depth, double accumulators per GPU, merged by
+summation) → mix by fine detail (20th-percentile noise floor) and focus
+confidence → noise σ per level from two adjacent middle frames → finalize
+(pyramid variants on the primary GPU) → TIFFs.
+
+| | half res (3420 × 2214) | full res (6840 × 4429) |
+|---|---|---|
+| pass 1 + volume | 3.5 s | 3.3 s |
+| depth | 0.8 s | 0.9 s |
+| refine pass + refined/smoothed depth | 3.5 s | 4.2 s |
+| compose pass + mix | 3.6 s | 4.8 s |
+| noise + finalize | 0.5 s | 1.3 s |
+| write 11 TIFFs | 0.5 s | 1.9 s |
+| **total** | **14 s** | **18.7 s** |
+
+Helicon on the same card: B ~20 s, C ~10 s, one output each. The prototype
+needs ~3.5 min for the half-res run on this CPU.
+
+- Three passes over the frames are inherent: the composition needs the
+  final depth, which needs every frame's fine focus measure, and the stack
+  (59 GB warped at full res) cannot stay on the GPUs. Each pass costs the
+  ~2.5 s ingest (§16); what remains outside the passes (~5–6 s at full res)
+  is host transfers, host merges and serial post-processing, all trimmable.
+- The composition pass streams only frames whose label is used; on this
+  stack the smoothed depth spans all 163.
+- Memory at full res: the 3070 fits one slot per pass beside the state, so
+  it takes a third of pass 1 and ~40 % of the later passes.
+- Visual check of B at 1 : 1 (plate fan, matrix, dark gap): the prototype's
+  current look, including its open problem 1 (edge glow). The end-to-end
+  numeric comparison with the prototype's outputs and the Helicon scores
+  (`score_b`) needs the Python reference run on this stack (~10 min of
+  CPU); pending Travis's go.
+
 ## Open items
 
 - **Residual flat-target roll bias**: a smooth hump of ±17 mdeg RMS per frame on far-defocused frames, antisymmetric about focus (the fitted rate is fine: 52 vs 50 mdeg/mm). Also ε reads −2.4 % (≈ 6σ). Cause unknown.

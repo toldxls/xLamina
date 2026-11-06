@@ -29,6 +29,15 @@ void luma(const float* d_rgb, float* d_y, size_t n, cudaStream_t s);
 void laplacian3_sq(const float* d_in, float* d_out, int w, int h, cudaStream_t s);
 // out = |Laplacian(in, ksize 3)|
 void laplacian3_abs(const float* d_in, float* d_out, int w, int h, cudaStream_t s);
+// salience of a pyramid level: 3x3 box (normalised) of (coef @ LUMA)^2
+void salience3(const float* d_coef, int w, int h, float* d_sal, cudaStream_t s);
+// cv::medianBlur ksize 3 / 5 on float (replicate border)
+void median3(const float* d_in, float* d_out, int w, int h, cudaStream_t s);
+void median5(const float* d_in, float* d_out, int w, int h, cudaStream_t s);
+// cv::resize INTER_LINEAR (float coefficients), single channel
+void resize_linear(const float* d_src, int sw, int sh, float* d_dst, int dw, int dh, cudaStream_t s);
+// p-th percentile (0..100) with numpy's linear interpolation; sorts a copy (scratch of n floats)
+float percentile(const float* d_in, float* d_scratch, size_t n, double p, cudaStream_t s);
 // cv::pyrDown / pyrUp, 3 channels; pyrUp to an explicit size (2w or 2w-1)
 void pyr_down_rgb(const float* d_in, int w, int h, float* d_out, int w2, int h2, cudaStream_t s);
 void pyr_up_rgb(const float* d_in, int sw, int sh, float* d_out, int dw, int dh, cudaStream_t s);

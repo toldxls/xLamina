@@ -7,7 +7,8 @@ add_library(stackcore STATIC
     src/imgops.cu
     src/fold.cu
     src/volume.cu
-    src/depth.cu)
+    src/depth.cu
+    src/compose.cu)
 target_include_directories(stackcore PUBLIC include)
 # static CUDA runtime: the executables need only the NVIDIA driver, no cudart DLL beside them
 target_link_libraries(stackcore PUBLIC CUDA::cudart_static)
