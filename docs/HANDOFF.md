@@ -100,7 +100,7 @@ stack, within numeric tolerance:
 | # | CUDA component | Python reference |
 |---|---|---|
 | 1 | **Done (§16)**: TIFF → pinned buffers → GPU streaming (thread pool, 2–3 streams/GPU) | `frames.read_rgb` (bit-exact), `fusion.load_aligned` |
-| 2 | Similarity warp onto the output grid (texture fetch is fine here) | `fusion.load_aligned` |
+| 2 | **Done (§17)**: similarity warp onto the output grid (software bicubic, 1.8 ms/frame) | `fusion.load_aligned` (1e-6 rms) |
 | 3 | Pass-1 fold per GPU: A sums, B0 argmax, Laplacian pyramid C select; host merge | `fusion.fold`, `fusion.merge` (determinism test) |
 | 4 | Focus + brightness volume at 1/4 res, guided-filter aggregation | `fusion._w_fmvol`, `sgm_from_volume` |
 | 5 | SGM (8 paths) + argmin | `sgm.py` |

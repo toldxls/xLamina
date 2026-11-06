@@ -486,6 +486,40 @@ What it means:
 - The NVMe source folder streams at 6.2 GB/s (5.1 s): the RAM disk is worth
   2× here, which is less than the 3× its raw read rate suggests.
 
+## 17. Port step 2: the similarity warp (2026-11-06)
+
+`core/src/warp.cu` (`affine_for`, `box_down2_rgb`, `warp_bicubic_rgb`,
+`load_aligned`), `stackcli warp`, `tools/validate/check_warp.py` against
+`fusion.load_aligned` with the stack's own transforms
+(`tests/data/report_2026-11-05.json`, native-crop grid), frames 0 / 81 / 162
+at scale 1 and 0.5:
+
+| | exact positions (product) vs cv2 | OpenCV-4 replica (1/32 px) vs cv2 |
+|---|---|---|
+| frame 81 (reference, identity) | identical, 100 % of pixels | identical |
+| frames 0, 162, scale 1 | rms 1.2e-6, max 7e-5 | rms 7e-5, max 2.7e-3 |
+| frames 0, 162, scale 0.5 | rms 5e-7, max 5e-5 | rms 6e-5, max 5e-3 |
+
+- **OpenCV 5.0 (this PC) no longer snaps float warps to 1/32 px.** The
+  prototype's `warpAffine` was reproduced to 1e-6 rms by sampling at exact
+  positions with OpenCV's cubic kernel (a = −0.75), BORDER_REFLECT and the same
+  float summation order, and *not* by replicating the 4.x fixed-point path.
+  The §1 finding (1/32 px snapping biased pair scales ~20 %) was made with
+  OpenCV 4 on the Mac; the alignment code's B-spline refinement makes the
+  pipeline immune to it either way, which is why the alignment report
+  reproduced to 3e-6 px across the two OpenCV versions (§15).
+- The residual 1e-6 rms is OpenCV 5's own coefficient arithmetic (float32
+  sample positions were tried: same gap). 7e-5 max = 4 LSB of 16-bit at a few
+  high-gradient pixels, 0.07 LSB rms: far below anything the fusion scores
+  can see (edge-band RMSE vs Helicon is 0.02).
+- INTER_AREA ×0.5 as a 2×2 box in OpenCV's summation order matches to 2e-7
+  (float association at the last bit).
+- Cost on the 3080 Ti: **1.8 ms per full-res frame** (software bicubic, 16
+  taps per channel, double positions) and 1.1 ms at half res including the
+  box-down. The design allowed texture bilinear here for speed; software
+  bicubic turned out cheap enough to keep the prototype's interpolation
+  exactly, so it stays.
+
 ## Open items
 
 - **Residual flat-target roll bias**: a smooth hump of ±17 mdeg RMS per frame on far-defocused frames, antisymmetric about focus (the fitted rate is fine: 52 vs 50 mdeg/mm). Also ε reads −2.4 % (≈ 6σ). Cause unknown.
