@@ -520,6 +520,35 @@ def sgm_from_volume(V, Lv, guide_full, ctx):
     # turned noise into a mottled patchwork. No focus confidence there; a gentle
     # pull toward that end frame (the sharpest view available) and SGM keeps the
     # depth smooth.
+    # spill zone h: much darker than something bright within halo_radius
+    # (should match the defocus blur reach of a bright object in front). Here a
+    # bright neighbour's defocused light only ADDS: frames where the background
+    # looks "sharp" carry its glow and a ghost of its edge. Helicon uses the
+    # frame where the bright object is in focus instead; so in spill zones the
+    # focus evidence is discounted and the darkness term decides.
+    g = cv2.resize(guide_full, (dw, dh), interpolation=cv2.INTER_AREA)
+    rh = max(1, int(round(ctx.get("halo_radius_px", 80.0) * ctx.get("depth_full_fraction", 0.25))))
+    # "bright nearby" = an EXTENDED bright object (a crystal), found by
+    # morphological opening: every bright feature smaller than ~16 full-res px
+    # (specular sparkles, grain highlights) is removed, so the dark textured
+    # matrix no longer sees "bright neighbours" (an ungated rule made it waxy),
+    # while the dark gap beside a crystal keeps the full rule. The ratio uses
+    # the pixel's own composite brightness (ramp 0.3..0.7, the version that
+    # cleared the crystal edge); only strongly textured pixels are vetoed.
+    ro = max(1, int(round(16.0 * ctx.get("depth_full_fraction", 0.25))))
+    gopen = cv2.morphologyEx(g, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * ro + 1, 2 * ro + 1)))
+    nbmax = cv2.dilate(gopen, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * rh + 1, 2 * rh + 1)))
+    h = np.clip(((nbmax - g) / (nbmax + 0.02) - 0.3) / 0.4, 0.0, 1.0)
+    lapq = np.abs(cv2.Laplacian(cv2.GaussianBlur(g, (0, 0), 0.8), cv2.CV_32F, ksize=3))
+    texq = cv2.GaussianBlur(lapq, (0, 0), 3.0) / (cv2.GaussianBlur(g, (0, 0), 3.0) + 0.02)
+    h = h * np.clip((0.20 - texq) / 0.08, 0.0, 1.0)
+    # keep it on the DARK side of the edge: a wide blur spread it onto the bright
+    # object's own edge pixels, which then took defocused frames (soft, bubbled
+    # crystal edge). Light smoothing only, then pull back off the object.
+    h = cv2.GaussianBlur(h, (0, 0), 1.0)
+    h = cv2.erode(h, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+    w = w * (1.0 - h[:, :, None])
+    ctx["_spill"] = h
     kmax = V.argmax(axis=2)
     eg = ctx.get("end_guard", 3)
     at0, at1 = kmax < eg, kmax > K - 1 - eg
@@ -535,7 +564,6 @@ def sgm_from_volume(V, Lv, guide_full, ctx):
     ctx["_end_fraction"] = float(endm.mean())
     lam = ctx.get("dark_prior", 0.0)
     lam_h = ctx.get("halo_prior", 0.0)
-    g = cv2.resize(guide_full, (dw, dh), interpolation=cv2.INTER_AREA)
     if lam > 0 or lam_h > 0:
         lmin = Lv.min(axis=2, keepdims=True)
         lmax = Lv.max(axis=2, keepdims=True)
@@ -545,13 +573,6 @@ def sgm_from_volume(V, Lv, guide_full, ctx):
             # (end-peaked) pixels want the least-defocused view instead
             C = C + (1.0 - w) * (1.0 - endm[:, :, None]) * lam * dark
         if lam_h > 0:
-            # spill zone: much darker than something bright nearby. Defocused
-            # light from that neighbour can only ADD brightness here, so prefer
-            # the darkest frame even where the focus curve looks confident (the
-            # B edge halo). Bright objects themselves are the local max: h ~ 0.
-            r = max(1, int(round(ctx.get("halo_radius_px", 24.0) * ctx.get("depth_full_fraction", 0.25))))
-            nbmax = cv2.dilate(g, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1)))
-            h = np.clip(((nbmax - g) / (nbmax + 0.02) - 0.3) / 0.5, 0.0, 1.0)
             C = C + lam_h * h[:, :, None] * dark
         del dark
     C = C.astype(np.float32)
@@ -663,7 +684,7 @@ def run(paths, z, t, grid: Grid, workers=None, radius_px=6.0, power=4.0, smoothi
         log=print, order=None, depth_method="sgm", agg_radius_px=24.0, agg_eps=1e-4,
         fm_radius_px=2.0, guide="C", soft_px=3.0, depth_full_fraction=0.25, depth_fm_px=6.0, sgm_p1=0.03,
         sgm_p2=0.4, sgm_edge=0.02, sgm_c_lo=0.45, sgm_c_hi=0.65, sgm_dirs=8, dark_prior=1.0,
-        vol_cache=None, halo_prior=1.0, halo_radius_px=24.0, refine_r=6, refine_fm_px=1.5,
+        vol_cache=None, halo_prior=2.0, halo_radius_px=80.0, refine_r=6, refine_fm_px=1.5,
         trust_strength=0.0,
         soft_wide_px=40.0, wide_lo=0.4,
         wide_hi=0.7, tex_lo=0.025, tex_hi=0.045, fine_lo=1.6, fine_hi=3.0, end_prior=1.0):
@@ -720,7 +741,10 @@ def run(paths, z, t, grid: Grid, workers=None, radius_px=6.0, power=4.0, smoothi
             strength = (gb / np.maximum(sm / n, 1e-12)).astype(np.float32)
             confs = cv2.GaussianBlur(conf, (0, 0), max(1.0, 6 * grid.scale))
             refined = np.where(np.isfinite(rb), ri.astype(np.float32), depth_s)
-            depth_s = np.where(confs > 0.5, cv2.medianBlur(refined, 3), depth_s).astype(np.float32)
+            spill = cv2.resize(ctx["_spill"], (ow, oh), interpolation=cv2.INTER_LINEAR) \
+                if ctx.get("_spill") is not None else np.zeros_like(confs)
+            ok = (confs > 0.5) & (spill < 0.3)       # refinement must not undo the spill rule
+            depth_s = np.where(ok, cv2.medianBlur(refined, 3), depth_s).astype(np.float32)
             if trust_strength > 0:
                 strong = strength > trust_strength
                 depth_s = np.where(strong, cv2.medianBlur(gi.astype(np.float32), 3), depth_s).astype(np.float32)
@@ -743,7 +767,14 @@ def run(paths, z, t, grid: Grid, workers=None, radius_px=6.0, power=4.0, smoothi
         depth_s, conf = smooth_depth_map(st, smoothing, fill_sigmas=fill)
     ctx["depth"] = depth_s
     if depth_method == "sgm":
-        ctx["depth_smooth"] = cv2.GaussianBlur(depth_s, (0, 0), max(2.0, soft_wide_px * grid.scale))
+        # edge-aware smooth depth (never mixes across a real depth jump), with a
+        # large median first to remove outlier patches in weak-evidence areas
+        dmed = cv2.medianBlur(depth_s.astype(np.float32), 5)
+        dmed = cv2.medianBlur(dmed, 5)
+        gfg = guide_full if guide_full.shape == depth_s.shape else cv2.resize(
+            guide_full, (depth_s.shape[1], depth_s.shape[0]))
+        ctx["depth_smooth"] = np.clip(guided_filter(gfg, dmed, max(2, int(round(soft_wide_px * grid.scale))),
+                                                    2e-3), 0, n - 1).astype(np.float32)
         with ProcessPoolExecutor(max_workers=workers, initializer=_w_init, initargs=(ctx,)) as ex:
             accs = list(ex.map(_w_b2dual, chunks))
         n1 = sum(a[0] for a in accs); d1 = sum(a[1] for a in accs)
@@ -765,8 +796,15 @@ def run(paths, z, t, grid: Grid, workers=None, radius_px=6.0, power=4.0, smoothi
         ftex = cv2.GaussianBlur(lapf, (0, 0), fs) / (cv2.GaussianBlur(y1, (0, 0), fs) + 0.02)
         floor = float(np.percentile(ftex, 20)) + 1e-9
         c_tex = np.clip((ftex / floor - fine_lo) / (fine_hi - fine_lo), 0, 1)
-        cm = cv2.GaussianBlur(c_tex, (0, 0), max(2.0, 6 * grid.scale))[:, :, None]
+        # ...but smooth ONLY where nothing is in focus either: in-focus crystal
+        # faces have little fine texture yet a confident focus peak (the smooth
+        # path there picked slightly-off frames: doubled striations, glowing edges)
+        c_focus = np.clip((cv2.GaussianBlur(conf, (0, 0), max(2.0, 6 * grid.scale)) - 0.3) / 0.3, 0, 1)
+        crisp = 1.0 - (1.0 - c_tex) * (1.0 - c_focus)
+        cm = cv2.GaussianBlur(crisp, (0, 0), max(2.0, 8 * grid.scale))[:, :, None]
         b_img = (cm * b1 + (1 - cm) * b2).astype(np.float32)
+        ctx["_blend_mix"] = cm[:, :, 0]
+        ctx["_b_narrow"], ctx["_b_smooth"] = b1.astype(np.float32), b2.astype(np.float32)
     else:
         with ProcessPoolExecutor(max_workers=workers, initializer=_w_init, initargs=(ctx,)) as ex:
             accs = list(ex.map(_w_b2, chunks))
@@ -787,4 +825,6 @@ def run(paths, z, t, grid: Grid, workers=None, radius_px=6.0, power=4.0, smoothi
     log(f"  noise sigma per level: {[round(v * 1e4, 2) for v in st.noise_mad]} (x1e-4)")
     out, maps, pyrs = finalize(st, depth_s, b_img)
     return out, {"depth": depth_s, "conf": conf, "replaced": maps, "levels": levels, "state": st,
-                 "pyramids": pyrs, "fine_strength": ctx.get("fine_strength")}
+                 "pyramids": pyrs, "fine_strength": ctx.get("fine_strength"),
+                 "blend_mix": ctx.get("_blend_mix"), "b_narrow": ctx.get("_b_narrow"),
+                 "b_smooth": ctx.get("_b_smooth")}

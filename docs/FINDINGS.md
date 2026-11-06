@@ -337,6 +337,37 @@ background edges look way worse compared to Helicon."
 - Metrics vs Helicon B (tone-matched, half res): edge-band glare 3.7 % → 3.3 %;
   sharpness 1.05–1.16. The out-of-range background now looks like Helicon's.
 
+## 13. B: dark background behind bright crystals (2026-11-06)
+
+Travis: "Helicon's B handles dark background behind bright crystal much better,
+ours still has ghostly glow and doubled edges."
+
+Mechanism: dark background pixels next to a bright crystal were composed from
+frames focused on the background, where the crystal is defocused. Its blur adds
+glow, and the rim of its blur disc reads as a "sharp" ghost edge, so the focus
+measure is confidently wrong there. Helicon uses frames where the crystal is
+in focus, which leaves the dark featureless background dark.
+
+Fix (the spill zone): dark pixels near an EXTENDED bright object get their focus
+confidence discounted by h, a darkness preference (×2), and no fine refinement.
+Five iterations to get the gate right:
+1. 24 px reach: too short (defocus blur here is ~60 px).
+2. 80 px with wide smoothing of h: cleared the background, but spread onto the
+   crystal's own edge (soft, bubbled edge).
+3. Light smoothing + erosion: crystal edge crisp. But with no gate, dark
+   textured matrix near sparkles turned waxy (matrix sharpness 1.05 → 0.71).
+4. Gates on texture and brightness swing: matrix fine, but the gap's glow came
+   back. Its own texture (0.07) overlaps the matrix's, and the composite's glow
+   makes those pixels look brighter, so they fall out of the zone.
+5. **Final: the bright object is found by morphological opening** (removes
+   bright features under ~16 full-res px: sparkles and grain highlights), so
+   the matrix never sees "bright neighbours". The rule then runs ungated, with
+   only a high texture veto (0.20).
+
+Result: the dark gap and background beside the crystal stay clean and dark, the
+crystal edge is crisp, and the matrix is intact. Edge-band glare vs Helicon B
+is 3.1 % (best yet); sharpness 1.07–1.24.
+
 ## Open items
 
 - **Residual flat-target roll bias**: a smooth hump of ±17 mdeg RMS per frame on far-defocused frames, antisymmetric about focus (the fitted rate is fine: 52 vs 50 mdeg/mm). Also ε reads −2.4 % (≈ 6σ). Cause unknown.
