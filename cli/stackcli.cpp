@@ -15,17 +15,22 @@
 //                                                  --volume also the depth-map input: per-frame focus/brightness
 //                                                  slices at the depth resolution and the guided-filter aggregated
 //                                                  focus volume (tools/validate/check_volume.py)
+//   stackcli depth  VOLDIR --out DIR [--crop X0,Y0,W,H] [--gpu N] [--dirs 8] ...
+//                                                  SGM depth from a `fold --volume` output (tools/validate/check_depth.py)
 #include <cuda_runtime.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
+#include <map>
 #include <string>
 #include <vector>
 
 #include "stackcore/convert.h"
+#include "stackcore/depth.h"
 #include "stackcore/fold.h"
 #include "stackcore/streamer.h"
 #include "stackcore/tiff.h"
@@ -52,7 +57,8 @@ static int usage() {
             "  stackcli stream DIR [--prefix IMG_] [--gpus 0,1] [--streams 3] [--readers 16] [--pool N] [--sums OUT.txt]\n"
             "  stackcli warp FILE.tif OUT.f32 --z ZR,ZI --t TX,TY --rect X0,Y0,X1,Y1 [--scale 1|0.5] [--quantize] [--gpu N]\n"
             "  stackcli fold LIST.txt --rect X0,Y0,X1,Y1 --out DIR [--scale 1|0.5] [--radius-px 6] [--power 4]\n"
-            "                [--frames 0,5,9] [--gpus 0,1] [--streams 2] [--readers 16]\n");
+            "                [--frames 0,5,9] [--gpus 0,1] [--streams 2] [--readers 16] [--volume]\n"
+            "  stackcli depth VOLDIR --out DIR [--crop X0,Y0,W,H] [--gpu N] [--dirs 8]\n");
     return 2;
 }
 
@@ -609,6 +615,118 @@ static int cmd_fold(int argc, char** argv) {
     return st.errors.empty() ? 0 : 1;
 }
 
+// ----------------------------------------------------------------------------- depth (SGM)
+
+static std::map<std::string, std::string> read_kv(const fs::path& p) {
+    std::map<std::string, std::string> m;
+    FILE* f = fopen(p.string().c_str(), "r");
+    if (!f) return m;
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        std::string s(line);
+        while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+        size_t sp = s.find(' ');
+        if (sp != std::string::npos) m[s.substr(0, sp)] = s.substr(sp + 1);
+    }
+    fclose(f);
+    return m;
+}
+
+template <class T>
+static bool read_raw(const fs::path& p, std::vector<T>& v, size_t n) {
+    v.resize(n);
+    FILE* f = fopen(p.string().c_str(), "rb");
+    if (!f) return false;
+    size_t m = fread(v.data(), sizeof(T), n, f);
+    fclose(f);
+    return m == n;
+}
+
+static int cmd_depth(int argc, char** argv) {
+    if (argc < 3) return usage();
+    fs::path vd = argv[2];
+    std::string out;
+    int gpu = 0;
+    std::vector<int> crop;
+    DepthParams dp;
+    for (int i = 3; i + 1 < argc; i += 2) {
+        std::string a = argv[i], v = argv[i + 1];
+        if (a == "--out") out = v;
+        else if (a == "--gpu") gpu = atoi(v.c_str());
+        else if (a == "--crop") crop = parse_list(v);
+        else if (a == "--dirs") dp.dirs = atoi(v.c_str());
+        else return usage();
+    }
+    if (out.empty()) return usage();
+    auto vm = read_kv(vd / "volume.txt"), mm = read_kv(vd / "manifest.txt");
+    if (vm.empty() || mm.empty()) { fprintf(stderr, "no volume.txt / manifest.txt in %s\n", vd.string().c_str()); return 1; }
+    int dw = atoi(vm["dw"].c_str()), dh = atoi(vm["dh"].c_str()), K = atoi(vm["K"].c_str());
+    int ow = atoi(mm["w"].c_str()), oh = atoi(mm["h"].c_str());
+    size_t nd = (size_t)dw * dh, no = (size_t)ow * oh;
+    std::vector<float> V, guide, ga;
+    std::vector<uint16_t> Lv;
+    if (!read_raw(vd / "vol_V.f32", V, nd * K) || !read_raw(vd / "vol_lum.f16", Lv, nd * K) || !read_raw(vd / "guide.f32", guide, no) ||
+        !read_raw(vd / "guide_d.f32", ga, nd)) { fprintf(stderr, "cannot read the volume files\n"); return 1; }
+    if (!crop.empty()) {   // crop at the depth res; the output grid is an integer multiple
+        if (crop.size() != 4) return usage();
+        if (ow % dw != 0 || oh % dh != 0) { fprintf(stderr, "--crop needs an integer output/depth ratio (%d/%d, %d/%d)\n", ow, dw, oh, dh); return 1; }
+        int sx = ow / dw, sy = oh / dh, x0 = crop[0], y0 = crop[1], cw = crop[2], ch = crop[3];
+        std::vector<float> V2((size_t)cw * ch * K), ga2((size_t)cw * ch), g2((size_t)cw * sx * ch * sy);
+        std::vector<uint16_t> L2((size_t)cw * ch * K);
+        for (int k = 0; k < K; ++k)
+            for (int y = 0; y < ch; ++y) {
+                memcpy(&V2[((size_t)k * ch + y) * cw], &V[((size_t)k * dh + y0 + y) * dw + x0], cw * sizeof(float));
+                memcpy(&L2[((size_t)k * ch + y) * cw], &Lv[((size_t)k * dh + y0 + y) * dw + x0], cw * sizeof(uint16_t));
+            }
+        for (int y = 0; y < ch; ++y) memcpy(&ga2[(size_t)y * cw], &ga[(size_t)(y0 + y) * dw + x0], cw * sizeof(float));
+        for (int y = 0; y < ch * sy; ++y) memcpy(&g2[(size_t)y * cw * sx], &guide[(size_t)(y0 * sy + y) * ow + x0 * sx], cw * sx * sizeof(float));
+        V.swap(V2); Lv.swap(L2); ga.swap(ga2); guide.swap(g2);
+        dw = cw; dh = ch; ow = cw * sx; oh = ch * sy;
+        nd = (size_t)dw * dh; no = (size_t)ow * oh;
+    }
+    CK(cudaSetDevice(gpu));
+    cudaStream_t s;
+    CK(cudaStreamCreate(&s));
+    float *d_planes, *d_V, *d_guide, *d_ga;
+    void *d_L16p, *d_L16;
+    CK(cudaMalloc(&d_planes, nd * K * sizeof(float)));
+    CK(cudaMalloc(&d_V, nd * K * sizeof(float)));
+    CK(cudaMalloc(&d_L16p, nd * K * 2));
+    CK(cudaMalloc(&d_L16, nd * K * 2));
+    CK(cudaMalloc(&d_guide, no * sizeof(float)));
+    CK(cudaMalloc(&d_ga, nd * sizeof(float)));
+    auto t0 = std::chrono::steady_clock::now();
+    CK(cudaMemcpy(d_planes, V.data(), nd * K * sizeof(float), cudaMemcpyHostToDevice));
+    CK(cudaMemcpy(d_L16p, Lv.data(), nd * K * 2, cudaMemcpyHostToDevice));
+    CK(cudaMemcpy(d_guide, guide.data(), no * sizeof(float), cudaMemcpyHostToDevice));
+    CK(cudaMemcpy(d_ga, ga.data(), nd * sizeof(float), cudaMemcpyHostToDevice));
+    planes_to_kfastest_f32(d_planes, d_V, dw, dh, K, s);
+    planes_to_kfastest_f16(d_L16p, d_L16, dw, dh, K, s);
+    CK(cudaStreamSynchronize(s));
+    cudaFree(d_planes);
+    cudaFree(d_L16p);
+    double ms_up = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    printf("depth: volume %dx%dx%d -> output %dx%d on GPU %d (upload + layout %.0f ms)\n", dw, dh, K, ow, oh, gpu, ms_up);
+    DepthResult R = depth_from_volume(d_V, d_L16, d_guide, d_ga, dw, dh, K, ow, oh, dp, s);
+    printf("  cost %.0f ms, SGM (%d dirs) %.0f ms, upsample + guided filter + median %.0f ms; end-peaked %.1f%% of pixels\n",
+           R.ms_cost, dp.dirs, R.ms_sgm, R.ms_post, 100 * R.end_fraction);
+    fs::create_directories(out);
+    fs::path od(out);
+    bool okw = write_raw(od / "depth_s.f32", R.depth_s.data(), R.depth_s.size()) && write_raw(od / "conf.f32", R.conf.data(), R.conf.size()) &&
+               write_raw(od / "spill.f32", R.spill.data(), R.spill.size()) && write_raw(od / "depth_d.f32", R.depth_d.data(), R.depth_d.size());
+    FILE* mf = fopen((od / "depth.txt").string().c_str(), "w");
+    if (mf) {
+        fprintf(mf, "dw %d\ndh %d\nK %d\now %d\noh %d\ndirs %d\nend_fraction %.6f\nms_cost %.1f\nms_sgm %.1f\nms_post %.1f\n", dw, dh, K, ow, oh,
+                dp.dirs, R.end_fraction, R.ms_cost, R.ms_sgm, R.ms_post);
+        fclose(mf);
+    }
+    cudaFree(d_V); cudaFree(d_L16); cudaFree(d_guide); cudaFree(d_ga);
+    cudaStreamDestroy(s);
+    if (!okw) { fprintf(stderr, "cannot write %s\n", out.c_str()); return 1; }
+    printf("  -> %s\n", out.c_str());
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) return usage();
     std::string cmd = argv[1];
@@ -617,5 +735,6 @@ int main(int argc, char** argv) {
     if (cmd == "stream") return cmd_stream(argc, argv);
     if (cmd == "warp") return cmd_warp(argc, argv);
     if (cmd == "fold") return cmd_fold(argc, argv);
+    if (cmd == "depth") return cmd_depth(argc, argv);
     return usage();
 }

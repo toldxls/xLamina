@@ -617,6 +617,33 @@ the same inputs the prototype would see:
   to the host adds 0.65–0.9 s, almost all transfers, done serially per slice
   (an obvious later optimisation; SGM will want `V` on one GPU anyway).
 
+## 20. Port step 5: cost volume, SGM, sub-frame depth (2026-11-06)
+
+`core/src/depth.cu` (`depth_from_volume`), `stackcli depth`,
+`tools/validate/check_depth.py`. From the aggregated volume on one GPU:
+per-pixel curve statistics (max, median over K, argmax; Lv min / max),
+the spill zone h (ellipse opening r 4, dilation r 20, texture veto, blur,
+ellipse erosion, all OpenCV-shaped), confidence w with the end-frame mask,
+the cost C in place of V (numpy's float64 promotions reproduced where they
+happen), P2 from the guide's Sobel gradient, SGM, parabolic sub-frame
+argmin, bilinear upsample, guided filter on the output grid (r = 2 ow/dw),
+rint, 3 × 3 median; conf = w upsampled.
+
+- **SGM on the GPU:** one thread block per scanline, one thread per label,
+  the previous pixel's costs in shared memory with ±∞ guards, a block-wide
+  min per step; diagonals enumerate their entry row and column. Directions
+  run in the prototype's order so S accumulates identically.
+- Checked on a 300 × 200 × 163 crop of the real volume (both sides get the
+  GPU's V, Lv and guides; the numpy reference takes 0.4 s on the crop and
+  minutes on the whole volume): **spill h and conf to 7e-7; depth_s
+  identical at 99.999 % of pixels, the rest off by one frame.**
+- Whole volume (1710 × 1107 × 163) on the 3080 Ti: cost 356 ms (the
+  per-pixel median sort dominates; a selection would halve it), **SGM
+  87 ms**, post-processing 20 ms at half res / 70 ms at full res; 0.5 s in
+  all, 0.7 s on the 3070. 19.4 % of pixels peak at an end frame.
+- Memory: V (1.2 GB) is overwritten by C, S adds 1.2 GB, Lv 0.6 GB: ~3 GB
+  on the depth GPU, which at full res means freeing the pass-1 slots first.
+
 ## Open items
 
 - **Residual flat-target roll bias**: a smooth hump of ±17 mdeg RMS per frame on far-defocused frames, antisymmetric about focus (the fitted rate is fine: 52 vs 50 mdeg/mm). Also ε reads −2.4 % (≈ 6σ). Cause unknown.
