@@ -24,7 +24,7 @@ class Lab:
         self.grid = fusion.Grid(W, H, (cp["left"], cp["top"], W - 1 - cp["right"], H - 1 - cp["bottom"]),
                                 scale)
         self.workers = workers
-        self.cache = str(self.dir / f"fmvol_{scale:g}.npz")
+        self.cache = str(self.dir / f"fmvol_q_{scale:g}.npz")     # fixed 1/4-sensor depth res
 
     def fuse(self, **kw):
         kw.setdefault("depth_method", "sgm")

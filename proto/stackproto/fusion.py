@@ -488,10 +488,14 @@ def _w_fmvol(chunk):
     out = {}
     for k in chunk:
         img = load_aligned(_CTX["paths"][k], _CTX["z"][k], _CTX["t"][k], g)
+        # measure at the FIXED depth resolution (a fixed fraction of the sensor),
+        # so every threshold means the same at any output scale. (Measuring at
+        # the output scale and resizing made full-res runs fall below the
+        # half-res-tuned thresholds: washed-out, glowing patches.)
+        img = cv2.resize(img, (dw, dh), interpolation=cv2.INTER_AREA)
         fm = focus_measure_rgb(img, _CTX["fm_radius"], normalized=True)
         lum = cv2.GaussianBlur(img @ LUMA, (0, 0), 2.0 * _CTX["fm_radius"])
-        out[k] = (cv2.resize(fm, (dw, dh), interpolation=cv2.INTER_AREA).astype(np.float16),
-                  cv2.resize(lum, (dw, dh), interpolation=cv2.INTER_AREA).astype(np.float16))
+        out[k] = (fm.astype(np.float16), lum.astype(np.float16))
     return out
 
 
@@ -513,12 +517,25 @@ def sgm_from_volume(V, Lv, guide_full, ctx):
     C = w * (1.0 - V / np.maximum(vmax, 1e-12))
     del V
     lam = ctx.get("dark_prior", 0.0)
-    if lam > 0:
+    lam_h = ctx.get("halo_prior", 0.0)
+    g = cv2.resize(guide_full, (dw, dh), interpolation=cv2.INTER_AREA)
+    if lam > 0 or lam_h > 0:
         lmin = Lv.min(axis=2, keepdims=True)
         lmax = Lv.max(axis=2, keepdims=True)
-        C = C + (1.0 - w) * lam * (Lv - lmin) / np.maximum(lmax - lmin, 0.01)
+        dark = (Lv - lmin) / np.maximum(lmax - lmin, 0.01)
+        if lam > 0:
+            C = C + (1.0 - w) * lam * dark
+        if lam_h > 0:
+            # spill zone: much darker than something bright nearby. Defocused
+            # light from that neighbour can only ADD brightness here, so prefer
+            # the darkest frame even where the focus curve looks confident (the
+            # B edge halo). Bright objects themselves are the local max: h ~ 0.
+            r = max(1, int(round(ctx.get("halo_radius_px", 24.0) * ctx.get("depth_full_fraction", 0.25))))
+            nbmax = cv2.dilate(g, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1)))
+            h = np.clip(((nbmax - g) / (nbmax + 0.02) - 0.3) / 0.5, 0.0, 1.0)
+            C = C + lam_h * h[:, :, None] * dark
+        del dark
     C = C.astype(np.float32)
-    g = cv2.resize(guide_full, (dw, dh), interpolation=cv2.INTER_AREA)
     gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3) / 8
     gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3) / 8
     grad = np.sqrt(gx * gx + gy * gy)
@@ -611,9 +628,10 @@ def _chunks(n, parts):
 
 def run(paths, z, t, grid: Grid, workers=None, radius_px=6.0, power=4.0, smoothing_px=8,
         log=print, order=None, depth_method="sgm", agg_radius_px=24.0, agg_eps=1e-4,
-        fm_radius_px=2.0, guide="C", soft_px=3.0, depth_scale=0.5, sgm_p1=0.03,
-        sgm_p2=0.4, sgm_edge=0.02, sgm_c_lo=0.45, sgm_c_hi=0.60, sgm_dirs=8, dark_prior=1.0,
-        vol_cache=None, refine_r=6, refine_fm_px=1.5, soft_wide_px=40.0, wide_lo=0.4,
+        fm_radius_px=2.0, guide="C", soft_px=3.0, depth_full_fraction=0.25, depth_fm_px=6.0, sgm_p1=0.03,
+        sgm_p2=0.4, sgm_edge=0.02, sgm_c_lo=0.45, sgm_c_hi=0.65, sgm_dirs=8, dark_prior=1.0,
+        vol_cache=None, halo_prior=1.0, halo_radius_px=24.0, refine_r=6, refine_fm_px=1.5,
+        soft_wide_px=40.0, wide_lo=0.4,
         wide_hi=0.7, tex_lo=0.025, tex_hi=0.045):
     """Full fusion. Window sizes are in FULL-RES sensor pixels (scaled to the grid
     so results don't depend on the working scale). ``order`` permutes the merge
@@ -639,10 +657,12 @@ def run(paths, z, t, grid: Grid, workers=None, radius_px=6.0, power=4.0, smoothi
     if depth_method == "sgm":
         g_img = collapse(st.c_coef + [(st.c_base / max(st.count, 1)).astype(np.float32)])
         guide_full = np.clip(g_img @ LUMA, 0, 1).astype(np.float32)
-        ctx.update(dsize=(max(16, int(round(ow * depth_scale))), max(16, int(round(oh * depth_scale)))),
-                   fm_radius=max(0.8, fm_radius_px * grid.scale), sgm_p1=sgm_p1, sgm_p2=sgm_p2,
+        ds = depth_full_fraction / grid.scale        # depth res = fixed fraction of the sensor
+        ctx.update(dsize=(max(16, int(round(ow * ds))), max(16, int(round(oh * ds)))),
+                   fm_radius=max(0.8, depth_fm_px * depth_full_fraction), sgm_p1=sgm_p1, sgm_p2=sgm_p2,
                    sgm_edge=sgm_edge, sgm_c_lo=sgm_c_lo, sgm_c_hi=sgm_c_hi, sgm_dirs=sgm_dirs,
-                   dark_prior=dark_prior, vol_cache=vol_cache)
+                   dark_prior=dark_prior, vol_cache=vol_cache, halo_prior=halo_prior,
+                   halo_radius_px=halo_radius_px, depth_full_fraction=depth_full_fraction)
         depth_s, conf = depth_sgm(ctx, chunks, workers, guide_full, log)
         ctx["soft_sigma"] = max(0.8, soft_px * grid.scale)
         ctx["soft_sigma_wide"] = max(2.0, soft_wide_px * grid.scale)
@@ -693,9 +713,11 @@ def run(paths, z, t, grid: Grid, workers=None, radius_px=6.0, power=4.0, smoothi
         # matrix 0.046-0.113, smooth crystal faces 0.012-0.03 (those keep the
         # narrow blend through their high focus confidence).
         cs = cv2.GaussianBlur(conf, (0, 0), max(2.0, 10 * grid.scale))
-        lap = np.abs(cv2.Laplacian(cv2.GaussianBlur(guide_full, (0, 0), 1.0), cv2.CV_32F, ksize=3))
-        tex = cv2.GaussianBlur(lap, (0, 0), max(2.0, 12 * grid.scale)) / (
-            cv2.GaussianBlur(guide_full, (0, 0), max(2.0, 12 * grid.scale)) + 0.02)
+        dw_, dh_ = ctx["dsize"]
+        gd = cv2.resize(guide_full, (dw_, dh_), interpolation=cv2.INTER_AREA)     # fixed scale
+        lap = np.abs(cv2.Laplacian(cv2.GaussianBlur(gd, (0, 0), 0.8), cv2.CV_32F, ksize=3))
+        tex = cv2.GaussianBlur(lap, (0, 0), 3.0) / (cv2.GaussianBlur(gd, (0, 0), 3.0) + 0.02)
+        tex = cv2.resize(tex, (ow, oh), interpolation=cv2.INTER_LINEAR)
         c_focus = np.clip((cs - wide_lo) / (wide_hi - wide_lo), 0, 1)
         c_tex = np.clip((tex - tex_lo) / (tex_hi - tex_lo), 0, 1)
         cm = (1.0 - (1.0 - c_focus) * (1.0 - c_tex))[:, :, None]

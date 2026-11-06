@@ -280,6 +280,34 @@ specimen; crystal-fan needles are slightly less crisp than Helicon B at 1:1.
   It re-renders from stored pyramids without re-fusing, so in the GUI it is a
   live slider on the GPU.
 
+## 11. B edge glare and a scale-dependence bug (2026-11-06)
+
+Travis: "our B has too much glare around edges."
+
+- Helicon's recovered depth is fragmented in the dark surroundings of bright
+  objects (many small regions, mostly darker frames). Ours was smooth, so those
+  surroundings sat at their own depth while the bright neighbour was defocused
+  and spilled light on them: the classic depth-map halo.
+- **Full-res test exposed a design bug.** The SGM pipeline measured focus and
+  texture at the OUTPUT scale, and its thresholds had been tuned at half res.
+  At full res nearly everything fell below them: washed-out, glowing patches
+  over grains and crystals.
+
+  Fix: the focus/brightness volume and the texture map are measured at a fixed
+  1/4-sensor resolution whatever the output scale (`depth_full_fraction`). The
+  fine refinement pass adds output-resolution detail. Re-measured thresholds
+  landed where they were (contrast 0.45 → 0.65, texture 0.025 → 0.045).
+- Added a spill-zone prior: pixels much darker than something bright within
+  24 full-res px prefer darker frames even when confident. Small effect alone.
+  A remaining bright wisp at one crystal edge is sharp, probably a real thin
+  crystal edge that Helicon leaves defocused.
+- Half-res result vs Helicon B (tone-matched): edge-band area markedly brighter
+  4.5 % → 3.7 %, elsewhere 3.6 → 2.9 %; sharpness up (fan 1.25, edge 1.25,
+  matrix 1.09); defocused background now looks like Helicon's. At full res the
+  fixed SGM is close to Helicon B on grains and crystals
+  (`~/Desktop/stacker_B_edges_fullres.jpg`).
+- Residual: a few small dark specks in the far background.
+
 ## Open items
 
 - **Residual flat-target roll bias**: a smooth hump of ±17 mdeg RMS per frame on far-defocused frames, antisymmetric about focus (the fitted rate is fine: 52 vs 50 mdeg/mm). Also ε reads −2.4 % (≈ 6σ). Cause unknown.
