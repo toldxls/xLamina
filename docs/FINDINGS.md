@@ -682,11 +682,25 @@ needs ~3.5 min for the half-res run on this CPU.
   stack the smoothed depth spans all 163.
 - Memory at full res: the 3070 fits one slot per pass beside the state, so
   it takes a third of pass 1 and ~40 % of the later passes.
-- Visual check of B at 1 : 1 (plate fan, matrix, dark gap): the prototype's
-  current look, including its open problem 1 (edge glow). The end-to-end
-  numeric comparison with the prototype's outputs and the Helicon scores
-  (`score_b`) needs the Python reference run on this stack (~10 min of
-  CPU); pending Travis's go.
+- **End-to-end against the prototype** (`tools/validate/check_stack.py`,
+  half res, the Python run regenerated on this PC: 221 s for the fusion):
+
+  | output | max | rms | within 1 LSB₁₆ | within 4 LSB |
+  |---|---|---|---|---|
+  | A | 1.5e-5 | 1.7e-6 | 100 % | 100 % |
+  | B | 7e-3 | 5e-5 | 97.7 % | 98.8 % |
+  | B0 | 0.31 | 3e-4 | 99.98 % | 99.99 % |
+  | C | 5e-2 | 9e-5 | 99.8 % | 99.9 % |
+  | Cn, Cg, Cg2 | 4e-2 | 6e-5 | 97.6 % | 98.9 % |
+  | CB, CBn, H | 5e-2 | 1.3e-4 | 91 % | 95 % |
+  | depth | identical 99.87 %, within 1 frame 99.97 %, within 3 frames 99.99 % | | | |
+
+  The large maxima are single pixels where a near-tie (§18) or a one-frame
+  depth difference chose another frame; the depth-guided variants inherit
+  both. **Scored against Helicon B exactly like `score_b.py`, the GPU's B
+  gives RMSE all 0.0228, edge-band 0.0199, edge glare 2.3 %, depth~Helicon
+  46 %: the handoff's baseline numbers, identical to the prototype's.** The
+  port reproduces the prototype.
 
 ## 22. Port step 7: alignment on the GPU (2026-11-06)
 
