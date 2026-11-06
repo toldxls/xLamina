@@ -8,9 +8,13 @@
 //                                                  read -> GPU -> fusion.load_aligned equivalent -> raw float RGB
 //   stackcli fold   LIST.txt --rect X0,Y0,X1,Y1 --out DIR [--scale 1|0.5] [--radius-px 6] [--power 4]
 //                   [--frames 0,5,9] [--gpus 0,1] [--streams 2] [--readers 16]
+//                   [--volume] [--depth-fraction 0.25] [--depth-fm-px 6] [--vol-agg-px 32]
 //                                                  pass 1 (A, B0, C pyramid) over the frames in LIST (lines:
 //                                                  path zr zi tx ty), one partial state per GPU, merged on the host,
-//                                                  written as raw arrays for tools/validate/check_fold.py
+//                                                  written as raw arrays for tools/validate/check_fold.py. With
+//                                                  --volume also the depth-map input: per-frame focus/brightness
+//                                                  slices at the depth resolution and the guided-filter aggregated
+//                                                  focus volume (tools/validate/check_volume.py)
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -25,6 +29,7 @@
 #include "stackcore/fold.h"
 #include "stackcore/streamer.h"
 #include "stackcore/tiff.h"
+#include "stackcore/volume.h"
 #include "stackcore/warp.h"
 
 namespace fs = std::filesystem;
@@ -307,6 +312,7 @@ static int cmd_stream(int argc, char** argv) {
 struct FoldSlot {
     float *d_rgb = nullptr, *d_scratch = nullptr, *d_warp = nullptr;
     FoldScratch sc;
+    VolumeScratch vsc;
     cudaEvent_t ready = nullptr, done = nullptr;
     bool used = false;
 };
@@ -316,7 +322,17 @@ struct FoldDev {
     cudaStream_t fold_s = nullptr;
     FoldState st;
     std::vector<FoldSlot> slots;
+    std::vector<void*> fm16, lum16;   // per frame index: this GPU's volume slices (null = not here)
 };
+
+template <class T>
+static bool write_raw(const fs::path& p, const T* data, size_t n) {
+    FILE* f = fopen(p.string().c_str(), "wb");
+    if (!f) return false;
+    size_t m = fwrite(data, sizeof(T), n, f);
+    fclose(f);
+    return m == n;
+}
 
 static int cmd_fold(int argc, char** argv) {
     if (argc < 3) return usage();
@@ -327,9 +343,13 @@ static int cmd_fold(int argc, char** argv) {
     std::vector<int> frames_sel;
     StreamerOptions opt;
     opt.streams_per_gpu = 2;
-    bool have_rect = false;
-    for (int i = 3; i + 1 < argc; i += 2) {
-        std::string a = argv[i], v = argv[i + 1];
+    bool have_rect = false, volume = false;
+    double depth_fraction = 0.25, depth_fm_px = 6.0, vol_agg_px = 32.0;
+    for (int i = 3; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--volume") { volume = true; continue; }
+        if (i + 1 >= argc) return usage();
+        std::string v = argv[++i];
         if (a == "--rect") { auto d = parse_doubles(v); if (d.size() != 4) return usage(); g.x0 = (int)d[0]; g.y0 = (int)d[1]; g.x1 = (int)d[2]; g.y1 = (int)d[3]; have_rect = true; }
         else if (a == "--out") out = v;
         else if (a == "--scale") g.scale = atof(v.c_str());
@@ -339,6 +359,9 @@ static int cmd_fold(int argc, char** argv) {
         else if (a == "--gpus") opt.devices = parse_list(v);
         else if (a == "--streams") opt.streams_per_gpu = atoi(v.c_str());
         else if (a == "--readers") opt.readers = atoi(v.c_str());
+        else if (a == "--depth-fraction") depth_fraction = atof(v.c_str());
+        else if (a == "--depth-fm-px") depth_fm_px = atof(v.c_str());
+        else if (a == "--vol-agg-px") vol_agg_px = atof(v.c_str());
         else return usage();
     }
     if (out.empty() || !have_rect) return usage();
@@ -385,6 +408,16 @@ static int cmd_fold(int argc, char** argv) {
     fp.levels = n_levels(ow, oh);
     fp.radius = (float)std::max(0.8, radius_px * g.scale);
     fp.power = (float)power;
+    VolumeParams vp;
+    {
+        double ds = depth_fraction / g.scale;   // depth res = fixed fraction of the sensor
+        vp.dw = std::max(16, (int)std::nearbyint(ow * ds));
+        vp.dh = std::max(16, (int)std::nearbyint(oh * ds));
+        vp.fm_radius = (float)std::max(0.8, depth_fm_px * depth_fraction);
+        vp.agg_r = (int)std::nearbyint(vol_agg_px * depth_fraction);
+        if (vol_agg_px * depth_fraction < 1.0) vp.agg_r = 0;
+    }
+    const int K = (int)paths.size();
 
     int ndev = 0;
     CK(cudaGetDeviceCount(&ndev));
@@ -397,9 +430,10 @@ static int cmd_fold(int argc, char** argv) {
         auto& D = ctx[d];
         D.dev = d;
         CK(cudaSetDevice(d));
-        fold_setup_device(fp);
         CK(cudaStreamCreateWithFlags(&D.fold_s, cudaStreamNonBlocking));
         D.st.alloc(d, ow, oh, fp.levels);
+        D.fm16.assign(K, nullptr);
+        D.lum16.assign(K, nullptr);
         // slots per GPU from the memory left after the state: each needs the frame buffers,
         // the measure scratch and the streamer's raw upload buffer, plus a working margin
         FoldScratch probe;
@@ -418,7 +452,8 @@ static int cmd_fold(int argc, char** argv) {
             CK(cudaMalloc(&S.d_rgb, npx_full * 3 * sizeof(float)));
             if (g.scale != 1.0) CK(cudaMalloc(&S.d_scratch, (size_t)g.work_w() * g.work_h() * 3 * sizeof(float)));
             CK(cudaMalloc(&S.d_warp, npx_out * 3 * sizeof(float)));
-            S.sc.alloc(ow, oh, fp.levels);
+            S.sc.alloc(ow, oh, fp.levels, fp.radius);
+            if (volume) S.vsc.alloc(ow, oh, vp);
             CK(cudaEventCreateWithFlags(&S.ready, cudaEventDisableTiming));
             CK(cudaEventCreateWithFlags(&S.done, cudaEventDisableTiming));
         }
@@ -435,6 +470,12 @@ static int cmd_fold(int argc, char** argv) {
         int k = ks[f.k];
         load_aligned(S.d_rgb, g, T[k], S.d_scratch, S.d_warp, false, f.stream);
         fold_measure(S.d_warp, fp, S.sc, f.stream);
+        if (volume) {   // this frame's depth-resolution slices stay on this GPU until the aggregation
+            size_t nb = (size_t)vp.dw * vp.dh * 2;
+            cudaMallocAsync(&D.fm16[k], nb, f.stream);
+            cudaMallocAsync(&D.lum16[k], nb, f.stream);
+            volume_slice(S.d_warp, vp, S.vsc, D.fm16[k], D.lum16[k], f.stream);
+        }
         cudaEventRecord(S.ready, f.stream);
         cudaStreamWaitEvent(D.fold_s, S.ready, 0);
         fold_accumulate(D.st, k, S.d_warp, fp, S.sc, D.fold_s);
@@ -465,11 +506,101 @@ static int cmd_fold(int argc, char** argv) {
     }
     if (!write_state(merged, out)) { fprintf(stderr, "cannot write %s\n", out.c_str()); return 1; }
     printf("  merged state (%d frames) -> %s\n", merged.count, out.c_str());
+
+    if (volume) {
+        auto t0 = std::chrono::steady_clock::now();
+        // guide: luma of the collapsed merged C, clipped to [0, 1], on the first device; then at the depth res
+        int d0 = devs[0];
+        CK(cudaSetDevice(d0));
+        cudaStream_t s0 = ctx[d0].fold_s;
+        std::vector<const float*> d_coef;
+        std::vector<float*> owned;
+        for (int l = 0; l < fp.levels - 1; ++l) {
+            float* p;
+            CK(cudaMalloc(&p, merged.c_coef[l].size() * sizeof(float)));
+            CK(cudaMemcpy(p, merged.c_coef[l].data(), merged.c_coef[l].size() * sizeof(float), cudaMemcpyHostToDevice));
+            d_coef.push_back(p);
+            owned.push_back(p);
+        }
+        std::vector<float> base_f(merged.c_base.size());
+        for (size_t i = 0; i < base_f.size(); ++i) base_f[i] = (float)(merged.c_base[i] / std::max(merged.count, 1));
+        float *d_base, *d_coll, *d_t1, *d_t2, *d_guide, *d_ga;
+        CK(cudaMalloc(&d_base, base_f.size() * sizeof(float)));
+        CK(cudaMemcpy(d_base, base_f.data(), base_f.size() * sizeof(float), cudaMemcpyHostToDevice));
+        CK(cudaMalloc(&d_coll, npx_out * 3 * sizeof(float)));
+        CK(cudaMalloc(&d_t1, npx_out * 3 * sizeof(float)));
+        CK(cudaMalloc(&d_t2, npx_out * 3 * sizeof(float)));
+        CK(cudaMalloc(&d_guide, npx_out * sizeof(float)));
+        size_t nd = (size_t)vp.dw * vp.dh;
+        CK(cudaMalloc(&d_ga, nd * sizeof(float)));
+        collapse_pyramid(d_coef, d_base, merged.shapes, d_coll, d_t1, d_t2, s0);
+        luma(d_coll, d_guide, npx_out, s0);
+        clip01(d_guide, npx_out, s0);
+        AreaResizer rz;
+        rz.build(ow, oh, vp.dw, vp.dh);
+        rz.run(d_guide, d_ga, 1, s0);
+        std::vector<float> guide_h(npx_out), ga_h(nd);
+        CK(cudaMemcpyAsync(guide_h.data(), d_guide, npx_out * sizeof(float), cudaMemcpyDeviceToHost, s0));
+        CK(cudaMemcpyAsync(ga_h.data(), d_ga, nd * sizeof(float), cudaMemcpyDeviceToHost, s0));
+        CK(cudaStreamSynchronize(s0));
+        rz.free();
+        for (auto p : owned) cudaFree(p);
+        cudaFree(d_base); cudaFree(d_coll); cudaFree(d_t1); cudaFree(d_t2); cudaFree(d_guide); cudaFree(d_ga);
+
+        // every GPU aggregates its own slices against the shared guide; the host collects plane-major volumes
+        std::vector<uint16_t> fm_all(nd * K, 0), lum_all(nd * K, 0);
+        std::vector<float> V_all(nd * K, 0.f);
+        int done = 0;
+        for (int d : devs) {
+            auto& D = ctx[d];
+            CK(cudaSetDevice(d));
+            cudaStream_t s = D.fold_s;
+            float *d_g, *d_V;
+            CK(cudaMalloc(&d_g, nd * sizeof(float)));
+            CK(cudaMemcpyAsync(d_g, ga_h.data(), nd * sizeof(float), cudaMemcpyHostToDevice, s));
+            CK(cudaMalloc(&d_V, nd * sizeof(float)));
+            GuideStats gs;
+            if (vp.agg_r > 0) gs.build(d_g, vp.dw, vp.dh, vp.agg_r, s);
+            for (int k = 0; k < K; ++k) {
+                if (!D.fm16[k]) continue;
+                if (vp.agg_r > 0) aggregate_slice(d_g, gs, D.fm16[k], d_V, vp.agg_eps, s);
+                else { f16_to_f32(D.fm16[k], d_V, nd, s); relu_sqrt(d_V, nd, s); }
+                CK(cudaMemcpyAsync(V_all.data() + nd * k, d_V, nd * sizeof(float), cudaMemcpyDeviceToHost, s));
+                CK(cudaMemcpyAsync(fm_all.data() + nd * k, D.fm16[k], nd * 2, cudaMemcpyDeviceToHost, s));
+                CK(cudaMemcpyAsync(lum_all.data() + nd * k, D.lum16[k], nd * 2, cudaMemcpyDeviceToHost, s));
+                CK(cudaStreamSynchronize(s));
+                cudaFreeAsync(D.fm16[k], s);
+                cudaFreeAsync(D.lum16[k], s);
+                D.fm16[k] = D.lum16[k] = nullptr;
+                ++done;
+            }
+            CK(cudaStreamSynchronize(s));
+            if (vp.agg_r > 0) gs.free();
+            cudaFree(d_g);
+            cudaFree(d_V);
+        }
+        double vs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        fs::path od(out);
+        bool okw = write_raw(od / "guide.f32", guide_h.data(), guide_h.size()) && write_raw(od / "guide_d.f32", ga_h.data(), ga_h.size()) &&
+                   write_raw(od / "vol_fm.f16", fm_all.data(), fm_all.size()) && write_raw(od / "vol_lum.f16", lum_all.data(), lum_all.size()) &&
+                   write_raw(od / "vol_V.f32", V_all.data(), V_all.size());
+        FILE* mf = fopen((od / "volume.txt").string().c_str(), "w");
+        if (mf) {
+            fprintf(mf, "dw %d\ndh %d\nK %d\nslices %d\nfm_radius %.6g\nagg_r %d\nagg_eps %.6g\nlayout plane-major (K, dh, dw)\n", vp.dw, vp.dh, K,
+                    done, vp.fm_radius, vp.agg_r, vp.agg_eps);
+            fclose(mf);
+        }
+        if (!okw) { fprintf(stderr, "cannot write the volume files\n"); return 1; }
+        printf("  volume: %d slices of %dx%d, fm sigma %.2f, aggregation r=%d; guide + aggregation %.2f s -> %s\n", done, vp.dw, vp.dh,
+               vp.fm_radius, vp.agg_r, vs, out.c_str());
+    }
+
     for (int d : devs) {
         auto& D = ctx[d];
         CK(cudaSetDevice(d));
         for (auto& S : D.slots) {
             cudaFree(S.d_rgb); cudaFree(S.d_scratch); cudaFree(S.d_warp); S.sc.free();
+            if (volume) S.vsc.free();
             cudaEventDestroy(S.ready); cudaEventDestroy(S.done);
         }
         D.st.free();

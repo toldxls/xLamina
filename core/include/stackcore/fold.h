@@ -21,6 +21,8 @@
 #include <string>
 #include <vector>
 
+#include "stackcore/imgops.h"
+
 namespace stackcore {
 
 struct FoldParams {
@@ -66,7 +68,8 @@ struct FoldState {
     size_t bytes() const;
 };
 
-// Per-slot temporaries for one frame's measures (sized for w x h).
+// Per-slot temporaries for one frame's measures (sized for w x h), plus the
+// two blur kernels the focus measure needs (built on the current device).
 struct FoldScratch {
     int w = 0, h = 0, levels = 0;
     std::vector<LevelShape> shapes;
@@ -74,13 +77,11 @@ struct FoldScratch {
     std::vector<float*> g;     // Gaussian levels 1..levels-1 (level 0 is the frame)
     std::vector<float*> lap;   // levels-1 Laplacian levels, x3 (top level = g[levels-1])
     std::vector<float*> sal;   // levels-1 salience maps
-    void alloc(int w, int h, int levels);
+    DevGaussian g_small, g_big;
+    void alloc(int w, int h, int levels, float radius);
     void free();
     size_t bytes() const;
 };
-
-// Upload the blur kernels once per device (depends on radius only).
-void fold_setup_device(const FoldParams& p);
 
 // Stage 1 (per-slot stream): focus measure + Laplacian pyramid + salience of
 // d_img (h*w*3 float RGB on the output grid) into `sc`.

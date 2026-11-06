@@ -31,9 +31,9 @@ def write_list(path, rep, frames_dir):
             f.write(f"{Path(frames_dir) / p['file']} {z.real:.17g} {z.imag:.17g} {p['tx']:.17g} {p['ty']:.17g}\n")
 
 
-def run_fold(cli, list_path, rect, scale, out, frames=None, gpus=None, streams=2):
+def run_fold(cli, list_path, rect, scale, out, frames=None, gpus=None, streams=2, extra=()):
     args = [cli, "fold", str(list_path), "--rect", ",".join(map(str, rect)), "--scale", f"{scale:g}", "--out", str(out),
-            "--streams", str(streams)]
+            "--streams", str(streams)] + list(extra)
     if frames is not None:
         args += ["--frames", ",".join(map(str, frames))]
     if gpus is not None:

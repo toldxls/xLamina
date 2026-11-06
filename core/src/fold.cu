@@ -27,108 +27,12 @@ std::vector<LevelShape> pyramid_shapes(int w, int h, int levels) {
 
 namespace {
 
-__constant__ float c_k_small[16];   // blur sigma 0.8 (OpenCV ksize 7 -> radius 3)
-__constant__ float c_k_big[64];     // blur sigma = radius (ksize = round(8 sigma + 1) | 1)
 __constant__ float c_luma[3] = {0.2126f, 0.7152f, 0.0722f};
 
-__device__ __forceinline__ int refl101(int p, int n) {   // BORDER_REFLECT_101
+__device__ __forceinline__ int refl101(int p, int n) {
     if (n == 1) return 0;
     while ((unsigned)p >= (unsigned)n) p = p < 0 ? -p : 2 * n - 2 - p;
     return p;
-}
-
-__global__ void k_luma(const float* __restrict__ rgb, float* __restrict__ y, size_t n) {
-    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    const float* p = rgb + i * 3;
-    y[i] = p[0] * c_luma[0] + p[1] * c_luma[1] + p[2] * c_luma[2];
-}
-
-// separable blur, kernel in constant memory (which one chosen by template), radius R at runtime
-template <bool BIG>
-__global__ void k_blur_row(const float* __restrict__ in, float* __restrict__ out, int w, int h, int R) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= w || y >= h) return;
-    const float* k = BIG ? c_k_big : c_k_small;
-    const float* row = in + (size_t)y * w;
-    float s = 0.f;
-    for (int i = -R; i <= R; ++i) s += k[i + R] * row[refl101(x + i, w)];   // RowFilter: left to right
-    out[(size_t)y * w + x] = s;
-}
-
-template <bool BIG>
-__global__ void k_blur_col(const float* __restrict__ in, float* __restrict__ out, int w, int h, int R) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= w || y >= h) return;
-    const float* k = BIG ? c_k_big : c_k_small;
-    float s = k[R] * in[(size_t)y * w + x];                                   // SymmColumnFilter: centre, then pairs
-    for (int i = 1; i <= R; ++i)
-        s += k[R + i] * (in[(size_t)refl101(y + i, h) * w + x] + in[(size_t)refl101(y - i, h) * w + x]);
-    out[(size_t)y * w + x] = s;
-}
-
-// OpenCV Laplacian ksize 3: {2,0,2, 0,-8,0, 2,0,2}, then squared
-__global__ void k_lap3_sq(const float* __restrict__ in, float* __restrict__ out, int w, int h) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= w || y >= h) return;
-    int xm = refl101(x - 1, w), xp = refl101(x + 1, w), ym = refl101(y - 1, h), yp = refl101(y + 1, h);
-    const float* r0 = in + (size_t)ym * w;
-    const float* r1 = in + (size_t)y * w;
-    const float* r2 = in + (size_t)yp * w;
-    float l = 2.f * r0[xm] + 2.f * r0[xp] - 8.f * r1[x] + 2.f * r2[xm] + 2.f * r2[xp];
-    out[(size_t)y * w + x] = l * l;
-}
-
-// pyrDown, 3 channels, reflect-101, [1 4 6 4 1]/256
-__global__ void k_pyrdown3(const float* __restrict__ in, int w, int h, float* __restrict__ out, int w2, int h2) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= w2 || y >= h2) return;
-    int xs[5], ys[5];
-#pragma unroll
-    for (int i = 0; i < 5; ++i) {
-        xs[i] = refl101(2 * x + i - 2, w);
-        ys[i] = refl101(2 * y + i - 2, h);
-    }
-#pragma unroll
-    for (int c = 0; c < 3; ++c) {
-        float r[5];
-#pragma unroll
-        for (int i = 0; i < 5; ++i) {
-            const float* p = in + (size_t)ys[i] * w * 3 + c;
-            r[i] = p[xs[0] * 3] + p[xs[4] * 3] + 4.f * (p[xs[1] * 3] + p[xs[3] * 3]) + 6.f * p[xs[2] * 3];
-        }
-        float s = r[2] * 6.f + (r[1] + r[3]) * 4.f + r[0] + r[4];
-        out[((size_t)y * w2 + x) * 3 + c] = s * (1.f / 256.f);
-    }
-}
-
-// lap = g - pyrUp(gn) where pyrUp has the size of g (dw = 2 sw or 2 sw - 1). cv::pyrUp
-// reflects 101 at the top/left but uses replicate-style weights at the right and
-// bottom borders: 7 s[n-1] + s[n-2] for the even output, 8 s[n-1] for the odd one
-// (measured against cv2 5.0; FINDINGS 18).
-__global__ void k_lap_level3(const float* __restrict__ g, const float* __restrict__ gn, int sw, int sh,
-                             float* __restrict__ lap, int dw, int dh) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= dw || y >= dh) return;
-    int xi = x >> 1, yi = y >> 1;
-    bool xo = x & 1, yo = y & 1;
-    bool right = xi == sw - 1, bottom = yi == sh - 1;
-    int xa = refl101(xi - 1, sw), xb = refl101(xi + 1, sw), ya = refl101(yi - 1, sh), yb = refl101(yi + 1, sh);
-    xi = refl101(xi, sw);
-    yi = refl101(yi, sh);
-#pragma unroll
-    for (int c = 0; c < 3; ++c) {
-        auto rowv = [&](int yy) {
-            const float* p = gn + (size_t)yy * sw * 3 + c;
-            if (right) return xo ? p[xi * 3] * 8.f : p[xa * 3] + p[xi * 3] * 7.f;
-            return xo ? (p[xi * 3] + p[xb * 3]) * 4.f : p[xa * 3] + p[xb * 3] + 6.f * p[xi * 3];
-        };
-        float v;
-        if (bottom) v = yo ? rowv(yi) * 8.f : rowv(ya) + rowv(yi) * 7.f;
-        else v = yo ? (rowv(yi) + rowv(yb)) * 4.f : rowv(ya) + rowv(yb) + 6.f * rowv(yi);
-        size_t o = ((size_t)y * dw + x) * 3 + c;
-        lap[o] = g[o] - v * (1.f / 64.f);
-    }
 }
 
 // salience: 3x3 box (reflect-101, normalised like cv::boxFilter) of luma^2
@@ -157,7 +61,7 @@ __global__ void k_abs_luma(const float* __restrict__ coef, float* __restrict__ o
     out[i] = fabsf(p[0] * c_luma[0] + p[1] * c_luma[1] + p[2] * c_luma[2]);
 }
 
-// ---- state updates
+// ---- state updates (the _take rule: higher value wins, ties go to the lower frame index)
 
 __global__ void k_fold_ab(double* __restrict__ a_num, double* __restrict__ a_den, float* __restrict__ b_best,
                           int16_t* __restrict__ b_idx, float* __restrict__ b_col, double* __restrict__ b_fmsum,
@@ -173,7 +77,6 @@ __global__ void k_fold_ab(double* __restrict__ a_num, double* __restrict__ a_den
     a_num[i * 3 + 2] += wgt * (double)p[2];
     a_den[i] += wgt;
     b_fmsum[i] += (double)f;
-    // _take: higher value wins, ties go to the lower frame index (frames arrive in any order)
     if (f > b_best[i] || (f == b_best[i] && k < b_idx[i])) {
         b_best[i] = f;
         b_idx[i] = (int16_t)k;
@@ -210,25 +113,6 @@ __global__ void k_fill_f32(float* p, size_t n, float v) {
 inline unsigned blocks1(size_t n) { return (unsigned)((n + 255) / 256); }
 inline dim3 grid2(int w, int h) { return dim3((w + 31) / 32, (h + 7) / 8); }
 const dim3 BLK(32, 8);
-
-// OpenCV getGaussianKernel for CV_32F
-std::vector<float> gaussian_kernel(int n, double sigma) {
-    std::vector<float> cf(n);
-    double scale2X = -0.5 / (sigma * sigma), sum = 0;
-    for (int i = 0; i < n; ++i) {
-        double x = i - (n - 1) * 0.5;
-        cf[i] = (float)std::exp(scale2X * x * x);
-        sum += cf[i];
-    }
-    sum = 1. / sum;
-    for (int i = 0; i < n; ++i) cf[i] = (float)(cf[i] * sum);
-    return cf;
-}
-
-int blur_radius(double sigma) {   // cv::GaussianBlur ksize for float images: round(sigma * 4 * 2 + 1) | 1
-    int ks = (int)std::nearbyint(sigma * 8 + 1) | 1;
-    return ks / 2;
-}
 
 float median_sorted(float* d, size_t n, cudaStream_t s) {
     thrust::sort(thrust::cuda::par.on(s), thrust::device_ptr<float>(d), thrust::device_ptr<float>(d + n));
@@ -296,7 +180,7 @@ size_t FoldState::bytes() const {
     return b + (size_t)shapes.back().w * shapes.back().h * 24;
 }
 
-void FoldScratch::alloc(int w_, int h_, int levels_) {
+void FoldScratch::alloc(int w_, int h_, int levels_, float radius) {
     w = w_; h = h_; levels = levels_;
     shapes = pyramid_shapes(w, h, levels);
     size_t n = (size_t)w * h;
@@ -313,6 +197,8 @@ void FoldScratch::alloc(int w_, int h_, int levels_) {
         CK(cudaMalloc(&b, m * sizeof(float)));
         lap.push_back(a); sal.push_back(b);
     }
+    g_small.build(0.8);
+    g_big.build(radius);
 }
 
 void FoldScratch::free() {
@@ -321,6 +207,8 @@ void FoldScratch::free() {
     for (auto p : lap) cudaFree(p);
     for (auto p : sal) cudaFree(p);
     g.clear(); lap.clear(); sal.clear();
+    g_small.free();
+    g_big.free();
 }
 
 size_t FoldScratch::bytes() const {
@@ -332,36 +220,25 @@ size_t FoldScratch::bytes() const {
 
 // ----------------------------------------------------------------------------- stages
 
-void fold_setup_device(const FoldParams& p) {
-    auto ks = gaussian_kernel(2 * blur_radius(0.8) + 1, 0.8);
-    auto kb = gaussian_kernel(2 * blur_radius(p.radius) + 1, p.radius);
-    if (kb.size() > 64) throw std::runtime_error("fold: blur radius too large for the constant kernel");
-    CK(cudaMemcpyToSymbol(c_k_small, ks.data(), ks.size() * sizeof(float)));
-    CK(cudaMemcpyToSymbol(c_k_big, kb.data(), kb.size() * sizeof(float)));
-}
-
 void fold_measure(const float* d_img, const FoldParams& p, FoldScratch& sc, cudaStream_t s) {
     int w = sc.w, h = sc.h;
     size_t n = (size_t)w * h;
-    int rs = blur_radius(0.8), rb = blur_radius(p.radius);
     // focus measure: luma -> blur 0.8 -> Laplacian^2 -> blur radius
-    k_luma<<<blocks1(n), 256, 0, s>>>(d_img, sc.y, n);
-    k_blur_row<false><<<grid2(w, h), BLK, 0, s>>>(sc.y, sc.t1, w, h, rs);
-    k_blur_col<false><<<grid2(w, h), BLK, 0, s>>>(sc.t1, sc.t2, w, h, rs);
-    k_lap3_sq<<<grid2(w, h), BLK, 0, s>>>(sc.t2, sc.t1, w, h);
-    k_blur_row<true><<<grid2(w, h), BLK, 0, s>>>(sc.t1, sc.t2, w, h, rb);
-    k_blur_col<true><<<grid2(w, h), BLK, 0, s>>>(sc.t2, sc.fm, w, h, rb);
+    luma(d_img, sc.y, n, s);
+    gaussian_blur(sc.y, sc.t2, sc.t1, w, h, sc.g_small, s);
+    laplacian3_sq(sc.t2, sc.t1, w, h, s);
+    gaussian_blur(sc.t1, sc.fm, sc.t2, w, h, sc.g_big, s);
     // Laplacian pyramid
     const float* gl = d_img;
     for (int l = 1; l < p.levels; ++l) {
         auto a = sc.shapes[l - 1], b = sc.shapes[l];
-        k_pyrdown3<<<grid2(b.w, b.h), BLK, 0, s>>>(gl, a.w, a.h, sc.g[l], b.w, b.h);
+        pyr_down_rgb(gl, a.w, a.h, sc.g[l], b.w, b.h, s);
         gl = sc.g[l];
     }
     gl = d_img;
     for (int l = 0; l < p.levels - 1; ++l) {
         auto a = sc.shapes[l], b = sc.shapes[l + 1];
-        k_lap_level3<<<grid2(a.w, a.h), BLK, 0, s>>>(gl, sc.g[l + 1], b.w, b.h, sc.lap[l], a.w, a.h);
+        lap_level_rgb(gl, sc.g[l + 1], b.w, b.h, sc.lap[l], a.w, a.h, s);
         k_salience<<<grid2(a.w, a.h), BLK, 0, s>>>(sc.lap[l], a.w, a.h, sc.sal[l]);
         gl = sc.g[l + 1];
     }
@@ -428,7 +305,6 @@ void merge_into(HostFoldState& a, const HostFoldState& b) {
     for (size_t i = 0; i < n; ++i) {
         a.a_den[i] += b.a_den[i];
         a.b_fmsum[i] += b.b_fmsum[i];
-        // _take: src wins on a higher value, ties -> lower frame index
         if (b.b_best[i] > a.b_best[i] || (b.b_best[i] == a.b_best[i] && b.b_idx[i] < a.b_idx[i])) {
             a.b_best[i] = b.b_best[i];
             a.b_idx[i] = b.b_idx[i];

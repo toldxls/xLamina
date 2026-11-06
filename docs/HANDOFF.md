@@ -102,7 +102,7 @@ stack, within numeric tolerance:
 | 1 | **Done (§16)**: TIFF → pinned buffers → GPU streaming (thread pool, 2–3 streams/GPU) | `frames.read_rgb` (bit-exact), `fusion.load_aligned` |
 | 2 | **Done (§17)**: similarity warp onto the output grid (software bicubic, 1.8 ms/frame) | `fusion.load_aligned` (1e-6 rms) |
 | 3 | **Done (§18)**: pass-1 fold per GPU: A sums, B0 argmax, Laplacian pyramid C select; host merge. Full res 2.8 s on the 3080 Ti | `fusion.fold`, `fusion.merge` (byte-identical across GPU splits) |
-| 4 | Focus + brightness volume at 1/4 res, guided-filter aggregation | `fusion._w_fmvol`, `sgm_from_volume` |
+| 4 | **Done (§19)**: focus + brightness volume at 1/4 res, guided-filter aggregation, in the pass-1 stream | `fusion._w_fmvol`, `sgm_from_volume` (aggregation part) |
 | 5 | SGM (8 paths) + argmin | `sgm.py` |
 | 6 | Refinement pass + dual composition | `fusion._w_refine`, `_w_b2dual` |
 | 7 | Alignment: exact cubic B-spline GN pairs (NOT texture interpolation) + host solve | `align.py` |

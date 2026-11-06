@@ -4,7 +4,9 @@ add_library(stackcore STATIC
     src/streamer.cpp
     src/convert.cu
     src/warp.cu
-    src/fold.cu)
+    src/imgops.cu
+    src/fold.cu
+    src/volume.cu)
 target_include_directories(stackcore PUBLIC include)
 target_link_libraries(stackcore PUBLIC CUDA::cudart)
 target_compile_definitions(stackcore PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
