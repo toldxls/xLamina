@@ -296,7 +296,9 @@ static ReadResult bench_read(const std::vector<fs::path>& files, int threads, bo
     ReadResult r;
     r.files = (int)files.size();
     std::atomic<size_t> next{0}, total{0};
-    const size_t CH = 16u << 20;
+    // one whole frame per read so the destination is never L3-resident (a
+    // 16 MB chunk reused per thread sat in the 7950X3D's cache and read 20 GB/s)
+    const size_t CH = 256u << 20;
     auto t0 = clk::now();
     std::vector<std::thread> th;
     for (int i = 0; i < threads; ++i)

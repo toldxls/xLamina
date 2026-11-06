@@ -17,4 +17,6 @@ endif()
 
 find_package(CUDAToolkit REQUIRED)
 
+add_subdirectory(core)
+add_subdirectory(cli)
 add_subdirectory(tools/m0)

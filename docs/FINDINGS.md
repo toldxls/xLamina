@@ -422,10 +422,12 @@ Per frame (6960 × 4640 × 16-bit RGB = 193.8 MB), median of 10:
 | those four together | 3.2 ms (317 fps) | 5.9 ms (169 fps) |
 
 Host: memcpy 23–26 GB/s whatever the thread count (dual-channel DDR5, one
-crossing). RAM disk (Q:) 16.7 GB/s with 8 reader threads, **20 GB/s with 16**,
-unbuffered; the Windows file cache reads at the same 17–20 GB/s. The NVMe
-source folder reads at 6.5 GB/s. Both GPUs uploading at once: no interference,
-each keeps its own rate (13.3 + 6.7 GB/s).
+crossing). RAM disk (Q:) **16 GB/s** unbuffered with 8 or 16 reader threads
+when every read lands in fresh memory (a first version reused a 16 MB buffer
+per thread, which stayed in the 7950X3D's L3 and read a flattering 20 GB/s);
+the Windows file cache reads at the same rate. The NVMe source folder reads
+at 6.5 GB/s. Both GPUs uploading at once: no interference, each keeps its own
+rate (13.3 + 6.7 GB/s).
 
 What it means:
 1. **Both cards are PCIe-bound, by 4–5×.** The 3080 Ti computes a frame's
@@ -433,10 +435,10 @@ What it means:
    a link, not because it adds compute. The 3080 Ti at x16 would double its
    upload rate; that needs the 3070 out of PCIEX16_2.
 2. **Stack upload for 163 frames: ~1.6 s** with both links busy; reading from the
-   RAM disk ~1.6–1.9 s; kernels ~0.4 s. So one pass over the stack is ~2 s if
-   reads, uploads and kernels overlap, ~4 s if they don't. Helicon's B at 20 s
-   and C at 10 s are beatable with room to spare; DESIGN's 3–5 s target for a
-   200-frame two-pass job is tight but plausible.
+   RAM disk ~2 s; kernels ~0.4 s. So one pass over the stack is ~2–2.5 s if
+   reads, uploads and kernels overlap (confirmed in §16: 2.4 s). Helicon's B at
+   20 s and C at 10 s are beatable with room to spare; DESIGN's 3–5 s target
+   for a 200-frame two-pass job is tight but plausible.
 3. **Host memory is the next ceiling.** memcpy saturates at ~25 GB/s, so every
    extra copy of a frame costs ~8 ms, as much as a whole frame's kernels on the
    3080 Ti. The reader must `ReadFile` **directly into the pinned ring**
@@ -447,6 +449,42 @@ What it means:
 5. Not measured yet: power-limited runs (`nvidia-smi -pl` needs admin) and
    per-card scaling with 2–3 streams; M2's scheduler gets those from the real
    fold kernels.
+
+## 16. Port step 1: TIFF → pinned ring → GPU streaming (2026-11-06)
+
+`core/` (stackcore: `tiff`, `pinned_pool`, `streamer`, `convert`) and
+`cli/stackcli.cpp` (`probe`, `dump`, `stream`). Checked with
+`tools/validate/check_read.py`.
+
+- **The files.** Camera Raw's TIFF export is one uncompressed little-endian
+  strip (193,766,400 bytes at offset ~20–24 K, after the XMP/EXIF/ICC blocks);
+  Helicon's outputs are 4404 one-row strips with no gaps. Both read as a
+  single `ReadFile`. The reader parses the first IFD itself (classic/BigTIFF,
+  either byte order, uncompressed chunky 8/16-bit); compressed TIFF and JPEG
+  are refused for now and will go through libtiff / libjpeg-turbo.
+- **No copy on the host.** The read is `FILE_FLAG_NO_BUFFERING` straight into
+  the pinned buffer, starting at the 4 KB boundary before the pixel data; the
+  upload starts at the resulting offset inside the buffer. 16 readers, one
+  shared frame queue, each GPU a worker thread with 3 streams and 3 device
+  buffers; a frame's pinned buffer is released when its upload event fires.
+- **Exactness.** `stackcli dump` vs `frames.read_rgb`: every pixel identical on
+  frames 0, 81, 162 and on Helicon's B; whole-frame checksums agree to 1e-14.
+- **Throughput, 163 frames (31.6 GB), unbuffered, into the convert kernel:**
+
+  | GPUs | time | rate | split |
+  |---|---|---|---|
+  | 3080 Ti alone | 2.52 s | 64.8 fps, 12.6 GB/s | – |
+  | 3070 alone | 4.89 s | 33.4 fps, 6.5 GB/s | – |
+  | both | 2.41–2.57 s | 66–68 fps, **13 GB/s** | 83–90 / 73–80 |
+
+  4, 8, 16, 24 or 32 readers and a larger pool make no difference: the RAM
+  disk delivers ~13 GB/s while the GPUs are also DMA-reading host RAM (16 GB/s
+  on its own, §15). That is the machine's ingest ceiling: **~2.4 s per pass**
+  over this stack whatever the GPU count, and the split follows who is free,
+  not the link ratio. The second GPU buys per-frame compute time (at 67 fps a
+  frame has ~15 ms on the 3080 Ti or ~30 ms on the 3070), not ingest.
+- The NVMe source folder streams at 6.2 GB/s (5.1 s): the RAM disk is worth
+  2× here, which is less than the 3× its raw read rate suggests.
 
 ## Open items
 
