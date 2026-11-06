@@ -5,6 +5,10 @@ setlocal
 cd /d "%~dp0.."
 call tools\build.cmd
 if errorlevel 1 exit /b 1
+if "%VS%"=="" (
+  if exist "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\VC\Redist" set "VS=%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools"
+  if exist "%ProgramFiles%\Microsoft Visual Studio\2022\Community\VC\Redist" set "VS=%ProgramFiles%\Microsoft Visual Studio\2022\Community"
+)
 if "%QT_DIR%"=="" (
   for /d %%d in ("C:\Qt\6.*") do if exist "%%d\msvc2022_64\bin\windeployqt.exe" set "QT_DIR=%%d\msvc2022_64"
 )
@@ -18,6 +22,15 @@ if exist build\gui\xLamina.exe (
   "%QT_DIR%\bin\windeployqt.exe" --release --no-translations --no-opengl-sw --no-system-d3d-compiler --compiler-runtime "dist\%NAME%\xLamina.exe" >nul
   if errorlevel 1 ( echo windeployqt failed & exit /b 2 )
 )
+rem the VC++ runtime (windeployqt --compiler-runtime finds it only in a full Visual Studio)
+for /d %%r in ("%VS%\VC\Redist\MSVC\14.*") do if exist "%%r\x64\Microsoft.VC143.CRT\vcruntime140.dll" set "REDIST=%%r\x64\Microsoft.VC143.CRT"
+if not "%REDIST%"=="" (
+  copy /y "%REDIST%\vcruntime140.dll" dist\%NAME%\ >nul
+  copy /y "%REDIST%\vcruntime140_1.dll" dist\%NAME%\ >nul
+  copy /y "%REDIST%\msvcp140.dll" dist\%NAME%\ >nul
+  copy /y "%REDIST%\msvcp140_1.dll" dist\%NAME%\ >nul
+  copy /y "%REDIST%\msvcp140_2.dll" dist\%NAME%\ >nul
+) else ( echo VC++ redist not found: the zip will need the runtime installed & exit /b 3 )
 copy /y README.md dist\%NAME%\ >nul
 copy /y LICENSE dist\%NAME%\ >nul
 if exist dist\%NAME%.zip del dist\%NAME%.zip
