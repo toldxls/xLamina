@@ -25,3 +25,7 @@ policies, per-frame transforms, diagnostics) and `diagnostics.png`. One row is
 appended to `history/diagnostics.csv`.
 
 Tests: `.venv/bin/python -m pytest -q tests` (~30 s).
+
+## Moving to another machine
+See `docs/HANDOFF.md` (status, open problems, Windows/CUDA setup) and `CLAUDE.md`.
+Comparison tools against Helicon's output live in `tools/bench/` (paths from env vars).
