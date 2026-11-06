@@ -118,15 +118,17 @@ __global__ void k_warp_bspline(const float* __restrict__ coef, int w, int h, flo
 
 // scipy spline_filter(order 3, mode mirror) along one axis: one thread per line, the whole line in
 // double like scipy's buffer (ni_splines.c: gain, mirror causal init, causal pass, mirror anticausal
-// init, anticausal pass). Lines up to 4096 samples.
-__global__ void k_bspline_prefilter(float* __restrict__ img, int w, int h, int along_x) {
+// init, anticausal pass). The line lives in a global scratch (`lines x n` doubles): a per-thread
+// local array made the driver reserve local memory for every resident thread (gigabytes, never
+// returned).
+__global__ void k_bspline_prefilter(float* __restrict__ img, int w, int h, int along_x, double* __restrict__ scratch) {
     int line = blockIdx.x * blockDim.x + threadIdx.x;
     int n = along_x ? w : h;
     int lines = along_x ? h : w;
-    if (line >= lines || n > 4096) return;
+    if (line >= lines) return;
     size_t stride = along_x ? 1 : (size_t)w;
     float* src = img + (along_x ? (size_t)line * w : (size_t)line);
-    double c[4096];
+    double* c = scratch + (size_t)line * n;
     const double z = -0.2679491924311227;   // sqrt(3) - 2
     const double gain = (1.0 - z) * (1.0 - 1.0 / z);   // 6
     for (int i = 0; i < n; ++i) c[i] = (double)src[(size_t)i * stride] * gain;
@@ -351,9 +353,12 @@ void AlignPyramid::build(const float* d_luma, int w, int h, cudaStream_t s, int 
     // level-0 B-spline coefficients (rows then columns, like spline_filter's axis loop)
     CK(cudaMalloc(&coef, n * sizeof(float)));
     CK(cudaMemcpyAsync(coef, l0.I, n * sizeof(float), cudaMemcpyDeviceToDevice, s));
-    k_bspline_prefilter<<<blocks1(w), 256, 0, s>>>(coef, w, h, 0);   // scipy filters axis 0 (columns) first
-    k_bspline_prefilter<<<blocks1(h), 256, 0, s>>>(coef, w, h, 1);
+    double* lines;
+    CK(cudaMalloc(&lines, n * sizeof(double)));
+    k_bspline_prefilter<<<blocks1(w), 256, 0, s>>>(coef, w, h, 0, lines);   // scipy filters axis 0 (columns) first
+    k_bspline_prefilter<<<blocks1(h), 256, 0, s>>>(coef, w, h, 1, lines);
     CK(cudaStreamSynchronize(s));
+    cudaFree(lines);
     g08.free();
     cudaFree(tmp);
     cudaFree(sm);

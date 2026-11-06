@@ -67,6 +67,10 @@ using namespace stackcore;
 static int usage() {
     fprintf(stderr,
             "usage:\n"
+            "  stackcli run DIR [--out DIR] [--prefix IMG_] [--scale 1|0.5] [--outputs B,C,Cn] [--ref middle] [--lock-scale 1]\n"
+            "               [--fov-mm X | --um-per-px X] [--gpus 0,1] [--streams 2] [--align-scale 0.25] [--baselines 1,2,4,8]\n"
+            "               align the frames in DIR and fuse them: report.json + 16-bit TIFFs in DIR_stacker (or --out)\n"
+            "  developer commands:\n"
             "  stackcli probe FILE.tif\n"
             "  stackcli dump FILE.tif OUT.f32 [--gpu N]\n"
             "  stackcli stream DIR [--prefix IMG_] [--gpus 0,1] [--streams 3] [--readers 16] [--pool N] [--sums OUT.txt]\n"
@@ -377,7 +381,9 @@ struct Pass1 {
 };
 
 struct Pass1Options {
-    fs::path list;
+    fs::path list;                        // frame list file, or...
+    std::vector<fs::path> paths;          // ...the frames and transforms already in memory
+    std::vector<Similarity> T;
     Grid g;
     double radius_px = 6.0, power = 4.0;
     std::vector<int> frames_sel;
@@ -470,7 +476,8 @@ static int run_pass1(const Pass1Options& po, Pass1& P) {
     if (g.scale != 1.0 && g.scale != 0.5) { fprintf(stderr, "--scale must be 1 or 0.5\n"); return 2; }
     std::vector<fs::path>& paths = P.paths;
     std::vector<Similarity>& T = P.T;
-    if (!read_list(po.list, paths, T)) return 1;
+    if (!po.paths.empty()) { paths = po.paths; T = po.T; }
+    else if (!read_list(po.list, paths, T)) return 1;
     const std::vector<int>& frames_sel = po.frames_sel;
     {
     }
@@ -876,31 +883,57 @@ static StreamerStats run_pass(const std::vector<fs::path>& run_paths, const std:
     return st;
 }
 
+struct StackOptions {
+    Pass1Options po;                  // frames, transforms, grid, GPUs, readers (po.volume is forced on)
+    std::string out;
+    int streams = 2, refine_r = 12;
+    double refine_fm_px = 9.0, soft_px = 3.0;
+    std::vector<std::string> outputs; // which images to write; empty = all
+};
+
+// parses the options shared by `stack` and `run`; returns false on an unknown option
+static bool parse_stack_option(const std::string& a, const std::string& v, StackOptions& so) {
+    Grid& g = so.po.g;
+    if (a == "--scale") g.scale = atof(v.c_str());
+    else if (a == "--gpus") so.po.opt.devices = parse_list(v);
+    else if (a == "--streams") { so.streams = atoi(v.c_str()); so.po.opt.streams_per_gpu = so.streams; }
+    else if (a == "--readers") so.po.opt.readers = atoi(v.c_str());
+    else if (a == "--refine-r") so.refine_r = atoi(v.c_str());
+    else if (a == "--refine-fm-px") so.refine_fm_px = atof(v.c_str());
+    else if (a == "--soft-px") so.soft_px = atof(v.c_str());
+    else if (a == "--outputs") {
+        so.outputs.clear();
+        size_t i = 0;
+        while (i < v.size()) { size_t j = v.find(',', i); if (j == std::string::npos) j = v.size(); if (j > i) so.outputs.push_back(v.substr(i, j - i)); i = j + 1; }
+    } else return false;
+    return true;
+}
+
+static int run_stack(StackOptions& so);
+
 static int cmd_stack(int argc, char** argv) {
     if (argc < 3) return usage();
-    Pass1Options po;
-    po.list = argv[2];
-    po.volume = true;
-    po.opt.streams_per_gpu = 2;
-    std::string out;
+    StackOptions so;
+    so.po.list = argv[2];
+    so.po.opt.streams_per_gpu = 2;
     bool have_rect = false;
-    int refine_r = 12, streams = 2;
-    double refine_fm_px = 9.0, soft_px = 3.0;
-    Grid& g = po.g;
+    Grid& g = so.po.g;
     for (int i = 3; i + 1 < argc; i += 2) {
         std::string a = argv[i], v = argv[i + 1];
         if (a == "--rect") { auto d = parse_doubles(v); if (d.size() != 4) return usage(); g.x0 = (int)d[0]; g.y0 = (int)d[1]; g.x1 = (int)d[2]; g.y1 = (int)d[3]; have_rect = true; }
-        else if (a == "--out") out = v;
-        else if (a == "--scale") g.scale = atof(v.c_str());
-        else if (a == "--gpus") po.opt.devices = parse_list(v);
-        else if (a == "--streams") { streams = atoi(v.c_str()); po.opt.streams_per_gpu = streams; }
-        else if (a == "--readers") po.opt.readers = atoi(v.c_str());
-        else if (a == "--refine-r") refine_r = atoi(v.c_str());
-        else if (a == "--refine-fm-px") refine_fm_px = atof(v.c_str());
-        else if (a == "--soft-px") soft_px = atof(v.c_str());
-        else return usage();
+        else if (a == "--out") so.out = v;
+        else if (!parse_stack_option(a, v, so)) return usage();
     }
-    if (out.empty() || !have_rect) return usage();
+    if (so.out.empty() || !have_rect) return usage();
+    return run_stack(so);
+}
+
+static int run_stack(StackOptions& so) {
+    Pass1Options& po = so.po;
+    po.volume = true;
+    const std::string& out = so.out;
+    const int refine_r = so.refine_r, streams = so.streams;
+    const double refine_fm_px = so.refine_fm_px, soft_px = so.soft_px;
     auto t_all = std::chrono::steady_clock::now();
     auto since = [](std::chrono::steady_clock::time_point t) { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count(); };
 
@@ -1060,8 +1093,12 @@ static int cmd_stack(int argc, char** argv) {
     auto t5 = std::chrono::steady_clock::now();
     fs::create_directories(out);
     fs::path od(out);
-    for (size_t i = 0; i < F.names.size(); ++i)
+    size_t written = 0;
+    for (size_t i = 0; i < F.names.size(); ++i) {
+        if (!so.outputs.empty() && std::find(so.outputs.begin(), so.outputs.end(), F.names[i]) == so.outputs.end()) continue;
         if (!write_tiff_rgb16((od / (F.names[i] + ".tif")).string(), F.images[i], ow, oh)) { fprintf(stderr, "cannot write %s\n", F.names[i].c_str()); return 1; }
+        ++written;
+    }
     write_raw(od / "depth.f32", R.depth_s.data(), R.depth_s.size());
     write_raw(od / "depth_smooth.f32", Ds.data(), Ds.size());
     write_raw(od / "conf.f32", R.conf.data(), R.conf.size());
@@ -1076,33 +1113,55 @@ static int cmd_stack(int argc, char** argv) {
     }
     cudaFree(d_guide);
     cudaStreamDestroy(s);
-    printf("wrote %zu outputs (%dx%d) in %.2f s -> %s\ntotal %.2f s\n", F.names.size(), ow, oh, since(t5), out.c_str(), since(t_all));
+    printf("wrote %zu outputs (%dx%d) in %.2f s -> %s\nfusion total %.2f s\n", written, ow, oh, since(t5), out.c_str(), since(t_all));
     return 0;
 }
 
 // ----------------------------------------------------------------------------- align
 
-static int cmd_align(int argc, char** argv) {
-    if (argc < 3) return usage();
-    fs::path dir = argv[2];
+struct AlignOptions {
+    fs::path dir;
     std::string out, prefix = "IMG_", ref_rule = "middle", pairs_sel;
     double align_scale = 0.25;
     std::vector<int> baselines = {1, 2, 4, 8}, devs;
     int readers = 16;
-    for (int i = 3; i + 1 < argc; i += 2) {
-        std::string a = argv[i], v = argv[i + 1];
-        if (a == "--out") out = v;
-        else if (a == "--prefix") prefix = v;
-        else if (a == "--align-scale") align_scale = atof(v.c_str());
-        else if (a == "--baselines") baselines = parse_list(v);
-        else if (a == "--ref") ref_rule = v;
-        else if (a == "--gpus") devs = parse_list(v);
-        else if (a == "--pairs") pairs_sel = v;
-        else if (a == "--readers") readers = atoi(v.c_str());
-        else return usage();
-    }
-    if (out.empty()) return usage();
+    bool lock_scale = false;
+    double um_per_px = 0;             // 0 = unknown (from --um-per-px or --fov-mm)
+};
+
+static bool parse_align_option(const std::string& a, const std::string& v, AlignOptions& ao) {
+    if (a == "--prefix") ao.prefix = v;
+    else if (a == "--align-scale") ao.align_scale = atof(v.c_str());
+    else if (a == "--baselines") ao.baselines = parse_list(v);
+    else if (a == "--ref") ao.ref_rule = v;
+    else if (a == "--gpus") ao.devs = parse_list(v);
+    else if (a == "--pairs") ao.pairs_sel = v;
+    else if (a == "--readers") ao.readers = atoi(v.c_str());
+    else if (a == "--lock-scale") ao.lock_scale = v != "0" && v != "false";
+    else if (a == "--um-per-px") ao.um_per_px = atof(v.c_str());
+    else if (a == "--fov-mm") ao.um_per_px = -atof(v.c_str());   // resolved once the width is known
+    else return false;
+    return true;
+}
+
+struct AlignOut {
     std::vector<fs::path> paths;
+    std::vector<Similarity> T;        // relative to the reference, full-res px (scale locked if asked)
+    int W = 0, H = 0, ref = 0, rect[4] = {0, 0, 0, 0};
+    GlobalSolve G;
+    double smin = 1, smax = 1, seconds = 0;
+};
+
+static void write_report(const AlignOptions& ao, const AlignOut& A, const fs::path& od);
+
+static int run_align(AlignOptions& ao, AlignOut& A) {
+    const fs::path& dir = ao.dir;
+    const std::string &out = ao.out, &prefix = ao.prefix, &ref_rule = ao.ref_rule, &pairs_sel = ao.pairs_sel;
+    const double align_scale = ao.align_scale;
+    const std::vector<int>& baselines = ao.baselines;
+    std::vector<int> devs = ao.devs;
+    const int readers = ao.readers;
+    std::vector<fs::path>& paths = A.paths;
     for (auto& e : fs::directory_iterator(dir)) {
         auto name = e.path().filename().string();
         auto ext = e.path().extension().string();
@@ -1156,6 +1215,8 @@ static int cmd_align(int argc, char** argv) {
             for (auto& S : slots[d]) { cudaFree(S.d_rgb); cudaFree(S.d_y); cudaFree(S.d_small); S.rz.free(); }
         }
         printf("align: %d frames %dx%d -> luma %dx%d in %.2f s\n", N, W, H, w, h, st.seconds);
+        if (getenv("STACKER_MEM_DEBUG"))
+            for (int d : devs) { size_t fr, tot; cudaSetDevice(d); cudaMemGetInfo(&fr, &tot); printf("  [mem] GPU %d after pass 0: %.2f GB free\n", d, fr / 1e9); }
     }
 
     // ---- pairs, dynamically shared by the GPUs, each with an LRU cache of pyramids
@@ -1177,7 +1238,7 @@ static int cmd_align(int argc, char** argv) {
     auto t_pairs = std::chrono::steady_clock::now();
     std::vector<std::thread> workers;
     std::vector<std::string> worker_err(ndev);
-    std::vector<int> per_dev(ndev, 0);
+    std::vector<int> per_dev(ndev, 0), builds(ndev, 0);
     for (int d : devs)
         workers.emplace_back([&, d] {
             try {
@@ -1198,6 +1259,7 @@ static int cmd_align(int argc, char** argv) {
                     AlignPyramid& P = cache[k];
                     P.build(d_luma, w, h, s);
                     lru.push_back(k);
+                    ++builds[d];
                     return P;
                 };
                 AlignParams ap;
@@ -1218,6 +1280,8 @@ static int cmd_align(int argc, char** argv) {
         });
     for (auto& t : workers) t.join();
     for (int d : devs) if (!worker_err[d].empty()) { fprintf(stderr, "GPU %d: %s\n", d, worker_err[d].c_str()); return 1; }
+    if (getenv("STACKER_MEM_DEBUG"))
+        for (int d : devs) { size_t fr, tot; cudaSetDevice(d); cudaMemGetInfo(&fr, &tot); printf("  [mem] GPU %d after pairs: %.2f GB free, %d pyramid builds\n", d, fr / 1e9, builds[d]); }
     double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_pairs).count();
     printf("  %zu pairs in %.2f s (%.1f ms/pair)", pairs.size(), secs, 1000 * secs / pairs.size());
     for (int d : devs) printf("%s GPU %d %d", d == devs[0] ? ";" : ",", d, per_dev[d]);
@@ -1237,44 +1301,116 @@ static int cmd_align(int argc, char** argv) {
         return 0;
     }
 
-    // ---- global solve, reference, geometry, report
-    GlobalSolve G = solve_global(N, results);
-    std::vector<std::complex<double>> z0 = G.z, tf(N);
-    for (int k = 0; k < N; ++k) tf[k] = {G.t[k].real() / fx, G.t[k].imag() / fy};   // work px -> full-res px
-    int ref = choose_reference(z0, ref_rule);
-    std::vector<std::complex<double>> zr = z0, tr = tf;
-    rebase(zr, tr, ref);
-    int rect[4];
-    common_rect(zr, tr, W, H, rect);
-    double smin = 1e300, smax = -1e300;
-    for (auto& z : zr) { smin = std::min(smin, std::abs(z)); smax = std::max(smax, std::abs(z)); }
-    printf("  solve: %d/%d pairs usable, %d outliers, ncc min %.4f median %.4f; ref #%d; native crop %dx%d (L%d R%d T%d B%d); scale spread %.3f%%\n",
-           G.pairs_used, G.pairs_total, G.outliers, G.ncc_min, G.ncc_median, ref, rect[2] - rect[0] + 1, rect[3] - rect[1] + 1, rect[0],
-           W - 1 - rect[2], rect[1], H - 1 - rect[3], 100 * (smax / smin - 1));
+    // ---- global solve, reference, geometry
+    A.G = solve_global(N, results);
+    std::vector<std::complex<double>> z0 = A.G.z, tf(N);
+    for (int k = 0; k < N; ++k) tf[k] = {A.G.t[k].real() / fx, A.G.t[k].imag() / fy};   // work px -> full-res px
+    A.ref = choose_reference(z0, ref_rule);
+    std::vector<std::complex<double>> za = z0;
+    if (ao.lock_scale) for (auto& z : za) z /= std::abs(z);   // the geometry uses the APPLIED transforms
+    std::vector<std::complex<double>> zr = za, tr = tf;
+    rebase(zr, tr, A.ref);
+    common_rect(zr, tr, W, H, A.rect);
+    A.W = W; A.H = H;
+    A.smin = 1e300; A.smax = -1e300;
+    for (auto& z : zr) { A.smin = std::min(A.smin, std::abs(z)); A.smax = std::max(A.smax, std::abs(z)); }
+    A.T.resize(N);
+    for (int k = 0; k < N; ++k) A.T[k] = {zr[k].real(), zr[k].imag(), tr[k].real(), tr[k].imag()};
+    if (ao.um_per_px < 0) ao.um_per_px = -ao.um_per_px * 1000.0 / W;   // from --fov-mm
+    A.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_all).count();
+    printf("  solve: %d/%d pairs usable, %d outliers, ncc min %.4f median %.4f; ref #%d; native crop %dx%d (L%d R%d T%d B%d); scale spread %.3f%%%s; %.2f s\n",
+           A.G.pairs_used, A.G.pairs_total, A.G.outliers, A.G.ncc_min, A.G.ncc_median, A.ref, A.rect[2] - A.rect[0] + 1, A.rect[3] - A.rect[1] + 1,
+           A.rect[0], W - 1 - A.rect[2], A.rect[1], H - 1 - A.rect[3], 100 * (A.smax / A.smin - 1), ao.lock_scale ? " (scale locked)" : "", A.seconds);
+    return 0;
+}
+
+static void write_report(const AlignOptions& ao, const AlignOut& A, const fs::path& od) {
+    const int N = (int)A.paths.size(), W = A.W, H = A.H;
+    const int* rect = A.rect;
+    fs::create_directories(od);
     FILE* f = fopen((od / "report.json").string().c_str(), "w");
-    if (!f) { fprintf(stderr, "cannot write %s\n", (od / "report.json").string().c_str()); return 1; }
-    fprintf(f, "{\n \"stack\": \"%s\",\n \"alignment\": {\"align_scale\": %g, \"baselines\": [", dir.filename().string().c_str(), align_scale);
-    for (size_t i = 0; i < baselines.size(); ++i) fprintf(f, "%s%d", i ? ", " : "", baselines[i]);
-    fprintf(f, "], \"scale_locked\": false, \"pairs_used\": %d, \"pairs_total\": %d, \"outliers\": %d, \"ncc_min\": %.17g, \"ncc_median\": %.17g},\n",
-            G.pairs_used, G.pairs_total, G.outliers, G.ncc_min, G.ncc_median);
-    fprintf(f, " \"geometry\": {\n  \"input\": {\"width\": %d, \"height\": %d, \"frames\": %d},\n  \"reference\": {\"index\": %d, \"rule\": \"%s\"},\n"
-               "  \"selected_policy\": \"native-crop\",\n  \"policies\": {\"native-crop\": {\"width\": %d, \"height\": %d, \"crop_px\": {\"left\": %d, \"right\": %d, \"top\": %d, \"bottom\": %d}}},\n"
-               "  \"scale_spread\": {\"s_min\": %.17g, \"s_max\": %.17g, \"total_pct\": %.17g}\n },\n \"per_frame\": [\n",
-            W, H, N, ref, ref_rule.c_str(), rect[2] - rect[0] + 1, rect[3] - rect[1] + 1, rect[0], W - 1 - rect[2], rect[1], H - 1 - rect[3], smin, smax,
-            100 * (smax / smin - 1));
-    for (int k = 0; k < N; ++k)
+    if (!f) { fprintf(stderr, "cannot write %s\n", (od / "report.json").string().c_str()); return; }
+    fprintf(f, "{\n \"stack\": \"%s\",\n \"alignment\": {\"align_scale\": %g, \"baselines\": [", ao.dir.filename().string().c_str(), ao.align_scale);
+    for (size_t i = 0; i < ao.baselines.size(); ++i) fprintf(f, "%s%d", i ? ", " : "", ao.baselines[i]);
+    fprintf(f, "], \"scale_locked\": %s, \"pairs_used\": %d, \"pairs_total\": %d, \"outliers\": %d, \"ncc_min\": %.17g, \"ncc_median\": %.17g},\n",
+            ao.lock_scale ? "true" : "false", A.G.pairs_used, A.G.pairs_total, A.G.outliers, A.G.ncc_min, A.G.ncc_median);
+    int cw = rect[2] - rect[0] + 1, ch = rect[3] - rect[1] + 1;
+    fprintf(f, " \"geometry\": {\n  \"input\": {\"width\": %d, \"height\": %d, \"frames\": %d, \"um_per_px_calibrated\": ", W, H, N);
+    if (ao.um_per_px > 0) fprintf(f, "%.17g},\n", ao.um_per_px); else fprintf(f, "null},\n");
+    fprintf(f, "  \"reference\": {\"index\": %d, \"rule\": \"%s\"},\n  \"selected_policy\": \"native-crop\",\n  \"policies\": {\"native-crop\": {\"width\": %d, \"height\": %d, "
+               "\"crop_px\": {\"left\": %d, \"right\": %d, \"top\": %d, \"bottom\": %d}, \"pixels_kept_pct\": %.17g",
+            A.ref, ao.ref_rule.c_str(), cw, ch, rect[0], W - 1 - rect[2], rect[1], H - 1 - rect[3], 100.0 * cw * ch / ((double)W * H));
+    if (ao.um_per_px > 0)
+        fprintf(f, ", \"um_per_px\": %.17g, \"um_per_px_range_over_depth\": [%.17g, %.17g], \"range_pct\": [%.17g, %.17g], \"fov_mm\": [%.17g, %.17g]",
+                ao.um_per_px, ao.um_per_px * A.smin, ao.um_per_px * A.smax, 100 * (A.smin - 1), 100 * (A.smax - 1), cw * ao.um_per_px / 1000.0,
+                ch * ao.um_per_px / 1000.0);
+    fprintf(f, "}},\n  \"scale_spread\": {\"s_min\": %.17g, \"s_max\": %.17g, \"total_pct\": %.17g, \"corner_shift_px\": %.17g}\n },\n \"per_frame\": [\n",
+            A.smin, A.smax, 100 * (A.smax / A.smin - 1), (A.smax / A.smin - 1) * std::hypot((double)W, (double)H) / 2.0);
+    for (int k = 0; k < N; ++k) {
+        std::complex<double> z(A.T[k].zr, A.T[k].zi);
         fprintf(f, "  {\"i\": %d, \"file\": \"%s\", \"s\": %.17g, \"theta_deg\": %.17g, \"tx\": %.17g, \"ty\": %.17g}%s\n", k,
-                paths[k].filename().string().c_str(), std::abs(zr[k]), std::arg(zr[k]) * 180.0 / 3.14159265358979323846, tr[k].real(), tr[k].imag(),
+                A.paths[k].filename().string().c_str(), std::abs(z), std::arg(z) * 180.0 / 3.14159265358979323846, A.T[k].tx, A.T[k].ty,
                 k + 1 < N ? "," : "");
+    }
     fprintf(f, " ],\n \"transform_convention\": \"reference-grid centred px -> frame centred px: p_k = s e^{i theta} p + t\"\n}\n");
     fclose(f);
     FILE* lf = fopen((od / "list.txt").string().c_str(), "w");
     if (lf) {
-        for (int k = 0; k < N; ++k) fprintf(lf, "%s %.17g %.17g %.17g %.17g\n", paths[k].string().c_str(), zr[k].real(), zr[k].imag(), tr[k].real(), tr[k].imag());
+        for (int k = 0; k < N; ++k) fprintf(lf, "%s %.17g %.17g %.17g %.17g\n", A.paths[k].string().c_str(), A.T[k].zr, A.T[k].zi, A.T[k].tx, A.T[k].ty);
         fclose(lf);
     }
-    printf("  report.json + list.txt -> %s (rect %d,%d,%d,%d); total %.2f s\n", out.c_str(), rect[0], rect[1], rect[2], rect[3],
-           std::chrono::duration<double>(std::chrono::steady_clock::now() - t_all).count());
+    printf("  report.json + list.txt -> %s (rect %d,%d,%d,%d)\n", od.string().c_str(), rect[0], rect[1], rect[2], rect[3]);
+}
+
+static int cmd_align(int argc, char** argv) {
+    if (argc < 3) return usage();
+    AlignOptions ao;
+    ao.dir = argv[2];
+    for (int i = 3; i + 1 < argc; i += 2) {
+        std::string a = argv[i], v = argv[i + 1];
+        if (a == "--out") ao.out = v;
+        else if (!parse_align_option(a, v, ao)) return usage();
+    }
+    if (ao.out.empty()) return usage();
+    AlignOut A;
+    if (int r = run_align(ao, A)) return r;
+    if (!ao.pairs_sel.empty()) return 0;
+    write_report(ao, A, ao.out);
+    return 0;
+}
+
+// ----------------------------------------------------------------------------- run: folder in, stack out
+
+static int cmd_run(int argc, char** argv) {
+    if (argc < 3) return usage();
+    AlignOptions ao;
+    ao.dir = argv[2];
+    StackOptions so;
+    so.po.opt.streams_per_gpu = 2;
+    std::string out;
+    for (int i = 3; i + 1 < argc; i += 2) {
+        std::string a = argv[i], v = argv[i + 1];
+        if (a == "--out") out = v;
+        else if (parse_align_option(a, v, ao)) continue;
+        else if (parse_stack_option(a, v, so)) continue;
+        else return usage();
+    }
+    if (out.empty()) out = (ao.dir.parent_path() / (ao.dir.filename().string() + "_stacker")).string();
+    if (so.po.opt.devices.empty()) so.po.opt.devices = ao.devs; else if (ao.devs.empty()) ao.devs = so.po.opt.devices;
+    so.po.opt.readers = ao.readers;
+    ao.out = out;
+    ao.pairs_sel.clear();
+    auto t_all = std::chrono::steady_clock::now();
+    AlignOut A;
+    if (int r = run_align(ao, A)) return r;
+    write_report(ao, A, out);
+    so.po.paths = A.paths;
+    so.po.T = A.T;
+    so.po.g.x0 = A.rect[0]; so.po.g.y0 = A.rect[1]; so.po.g.x1 = A.rect[2]; so.po.g.y1 = A.rect[3];
+    so.out = out;
+    if (int r = run_stack(so)) return r;
+    printf("run: %zu frames aligned and stacked in %.2f s -> %s\n", A.paths.size(),
+           std::chrono::duration<double>(std::chrono::steady_clock::now() - t_all).count(), out.c_str());
     return 0;
 }
 
@@ -1294,6 +1430,10 @@ int main(int argc, char** argv) {
     if (cmd == "align") {
         try { return cmd_align(argc, argv); }
         catch (const std::exception& e) { fprintf(stderr, "align failed: %s\n", e.what()); return 1; }
+    }
+    if (cmd == "run") {
+        try { return cmd_run(argc, argv); }
+        catch (const std::exception& e) { fprintf(stderr, "run failed: %s\n", e.what()); return 1; }
     }
     return usage();
 }

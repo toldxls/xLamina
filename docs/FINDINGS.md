@@ -740,6 +740,25 @@ points.
   per-frame (z, t) and can stay in Python for now (`report.json` is
   compatible) or be ported with M1.
 
+## 23. `stackcli run DIR`: folder in, stack out (2026-11-06)
+
+The end-user command chains the alignment (§22) and the fusion (§21) with
+the transforms kept in memory: `stackcli run Q:\TIFF --fov-mm 0.98
+--outputs B,C,Cn` writes `report.json` (the prototype's format, now with
+the calibration block: µm/px, its range over depth, FOV, corner shift) and
+the chosen 16-bit TIFFs into `DIR_stacker` or `--out`. `--lock-scale 1`,
+`--ref`, `--scale 0.5`, `--gpus` pass through. 163 frames at full res:
+**27.7 s** (alignment 10 s, fusion 17.6 s), the report identical to the
+Mac's including the geometry numbers.
+
+- A CUDA trap worth knowing: a kernel with a large per-thread local array
+  (the B-spline prefilter's `double[4096]` line) makes the driver reserve
+  local memory for every thread that could be resident (80 SMs × 2048 ×
+  32 KB ≈ 5 GB on the 3080 Ti) and never return it; the fusion after the
+  alignment then ran out of slots and the depth stage took 4.5 s instead of
+  0.9 s. Lines now live in a global scratch buffer. (`k_curve_stats` keeps a
+  2 KB local array: 335 MB reserved, tolerable.)
+
 ## Open items
 
 - **Residual flat-target roll bias**: a smooth hump of ±17 mdeg RMS per frame on far-defocused frames, antisymmetric about focus (the fitted rate is fine: 52 vs 50 mdeg/mm). Also ε reads −2.4 % (≈ 6σ). Cause unknown.
