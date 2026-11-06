@@ -255,6 +255,31 @@ Results:
 Residual: a faint lighter, ghosted zone in the background just right of the
 specimen; crystal-fan needles are slightly less crisp than Helicon B at 1:1.
 
+## 10. "Glare spots" in Cn, and Helicon's post-processing (2026-11-06)
+
+- **Helicon's B and C are darker than EVERY source frame on ~50-55 % of the
+  image** (local means vs the per-pixel min over all 163 frames). No composite
+  can do that, so Helicon applies a tone curve: fitted Helicon ≈ 1.06–1.10 ×
+  ours − 0.028 (lower black point, more contrast). Ours stays within the
+  frames' range. A large part of "less glare" is this global curve: our shadows
+  sit ~0.02–0.03 higher (veiling haze).
+- Sparkle count (small bright peaks, tone-matched): Helicon B = Helicon C =
+  878/Mpx; ours 1150–1280, **including our B**, which is built from single
+  frames. So the sparkles are in the source frames, and Helicon's two methods
+  share a common post-process. It is not denoising: background fine-noise std
+  is the same (Helicon 0.0021, ours Cn 0.0022).
+- Real Cn-specific glare: a milky glow by the clear crystal. Its source is
+  max-energy selection at COARSE pyramid levels, which picks large defocused
+  bright blobs.
+- Tried: Cg (coarse levels from B) and Cd (fine levels locked to ±6 frames of
+  B's depth, against specular glints from other depths). Neither reduced the
+  sparkle count. Kept as variants for visual comparison.
+- **B ↔ C slider** (`fusion.blend_bc`; CLI `fuse --save-pyramids` then `blend
+  DIR t…`): per-level blend of the B and noise-aware-C pyramids, crossing
+  over fine-first. 0 = pure B, 0.5 = B tones/coarse + C fine detail, 1 = Cn.
+  It re-renders from stored pyramids without re-fusing, so in the GUI it is a
+  live slider on the GPU.
+
 ## Open items
 
 - **Residual flat-target roll bias**: a smooth hump of ±17 mdeg RMS per frame on far-defocused frames, antisymmetric about focus (the fitted rate is fine: 52 vs 50 mdeg/mm). Also ε reads −2.4 % (≈ 6σ). Cause unknown.
@@ -263,5 +288,7 @@ specimen; crystal-fan needles are slightly less crisp than Helicon B at 1:1.
   2. a specimen stack (how big is the relief bias in reality?);
   3. the same specimen with scale locked vs free.
 - Test the reversal protocol.
-- B depth estimator: largely fixed (see 8). Remaining: the radius trade-off;
-  maybe a two-radius cost (small for edges + large for fill).
+- B: ghosted lighter zone right of the specimen; fan needles a touch less crisp
+  than Helicon B at 1:1 (see 9).
+- Optional output tone stage (black point / contrast) to match Helicon's look,
+  and optional highlight/sparkle suppression (see 10).

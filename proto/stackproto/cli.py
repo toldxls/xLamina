@@ -126,6 +126,13 @@ def main(argv=None):
     fu.add_argument("--workers", type=int, default=6)
     fu.add_argument("--smoothing", type=int, default=8, help="depth smoothing radius, full-res px")
     fu.add_argument("--radius", type=float, default=6.0, help="focus window, full-res px")
+    fu.add_argument("--save-pyramids", action="store_true",
+                    help="keep the B and C pyramids so 'blend' can re-render the B<->C slider instantly")
+
+    bl = sub.add_parser("blend", help="B<->C slider from a fuse run's saved pyramids "
+                                      "(0 = pure B, 0.5 = B tones + C fine detail, 1 = noise-aware C)")
+    bl.add_argument("fusion_dir")
+    bl.add_argument("t", type=float, nargs="+", help="slider position(s) in [0, 1]")
 
     a = ap.parse_args(argv)
     if a.cmd == "synth":
@@ -178,8 +185,21 @@ def main(argv=None):
         for k, img in out.items():
             write_rgb16(od / f"{k}.tif", img)
         np.save(od / "depth.npy", info["depth"])
+        if a.save_pyramids:
+            import pickle
+            pickle.dump(info["pyramids"], open(od / "pyramids.pkl", "wb"), protocol=4)
         print(f"fused {len(paths)} frames onto {grid.size[0]}x{grid.size[1]} in "
               f"{time.time() - t0:.0f}s -> {od}")
+    elif a.cmd == "blend":
+        import pickle
+        from . import fusion
+        from .frames import write_rgb16
+        pyr = pickle.load(open(Path(a.fusion_dir) / "pyramids.pkl", "rb"))
+        for tv in a.t:
+            tv = min(1.0, max(0.0, tv))
+            path = Path(a.fusion_dir) / f"slider_{tv:.2f}.tif"
+            write_rgb16(path, fusion.blend_bc(pyr["B"], pyr["Cn"], tv))
+            print(path)
     elif a.cmd == "validate":
         truth = json.loads((Path(a.folder) / "truth.json").read_text())
         p = truth["params"]

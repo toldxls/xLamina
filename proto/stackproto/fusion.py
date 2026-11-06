@@ -305,7 +305,8 @@ def fold_b2(acc: BCompose, k, img, depth, soft_sigma=None):
 
 # ----------------------------------------------------------------------------- finalize + variants
 
-def finalize(st: State, depth_s, b_img, agree=3.0, dominance=4.0, noise_k=3.0):
+def finalize(st: State, depth_s, b_img, agree=3.0, dominance=4.0, noise_k=3.0, coarse_b_level=3,
+             glint_agree=6.0):
     out = {}
     out["A"] = (st.a_num / np.maximum(st.a_den, 1e-30)[:, :, None]).astype(np.float32)
     out["B"] = b_img
@@ -339,9 +340,60 @@ def finalize(st: State, depth_s, b_img, agree=3.0, dominance=4.0, noise_k=3.0):
         lv.append(lapB[-1])            # base from B: no averaged-in defocus haze
         out[name] = collapse(lv)
         maps[name] = replaced
+        if name == "Cn":
+            pyr_cn = lv
+    # Cd: depth-locked pyramid -- fine-level coefficients only from frames
+    # within +-glint_agree of B's depth (specular glints are virtual images of
+    # the lamp at OTHER depths; unrestricted max-selection collects them from
+    # every frame as sparkle), noise-aware rule otherwise, coarse levels from B.
+    lv = []
+    for l in range(len(lapC) - 1):
+        cC, cB = lapC[l], lapB[l]
+        if l >= coarse_b_level:
+            lv.append(cB)
+            continue
+        dl = cv2.resize(depth_s, (cC.shape[1], cC.shape[0]), interpolation=cv2.INTER_AREA)
+        far = (np.abs(st.c_idx[l].astype(np.float32) - dl) > glint_agree).astype(np.float32)
+        r = np.abs(cC @ LUMA) / (noise_k * st.noise_mad[l] + 1e-12)
+        wb = np.maximum(far, np.clip(1.5 - r, 0.0, 1.0))
+        wb = cv2.GaussianBlur(wb, (0, 0), 1.0)[:, :, None]
+        lv.append(wb * cB + (1 - wb) * cC)
+    lv.append(lapB[-1])
+    out["Cd"] = collapse(lv)
+    # Cg: glare-safe pyramid. Coarse levels (>= coarse_b_level) come from B --
+    # max-energy selection there picks large DEFOCUSED bright blobs (big
+    # blurry highlights carry the most low-frequency energy), i.e. glow/glare
+    # from every frame; fine levels keep the noise-aware selection (Cn rule).
+    for L0, name in ((coarse_b_level, "Cg"), (coarse_b_level - 1, "Cg2")):
+        lv = []
+        for l in range(len(lapC) - 1):
+            if l >= L0:
+                lv.append(lapB[l])
+                continue
+            cC, cB = lapC[l], lapB[l]
+            r = np.abs(cC @ LUMA) / (noise_k * st.noise_mad[l] + 1e-12)
+            wb = cv2.GaussianBlur(np.clip(1.5 - r, 0.0, 1.0), (0, 0), 1.0)[:, :, None]
+            lv.append(wb * cB + (1 - wb) * cC)
+        lv.append(lapB[-1])
+        out[name] = collapse(lv)
     # hybrid: luma from CBn, chroma from B (BT.709 on the encoded values)
     out["H"] = _swap_chroma(out["CBn"], b_img)
-    return out, maps
+    return out, maps, {"B": lapB, "Cn": pyr_cn}
+
+
+def blend_bc(pyr_b, pyr_c, t):
+    """The B <-> C slider. t = 0: pure B; t = 1: pure (noise-aware) C. Levels
+    cross over FINE-FIRST: at t = 0.5 the finest detail is all C while the
+    coarsest levels and base are still B (B's glare-free tones + C's detail).
+    Pyramids are linear, so this re-renders instantly from the two stored
+    pyramids -- no re-fusion (a live GUI slider on the GPU)."""
+    n = len(pyr_b)
+    lv = []
+    for l in range(n):
+        frac = l / max(n - 1, 1)                  # 0 finest ... 1 base
+        w = float(np.clip(2.0 * t - frac, 0.0, 1.0))
+        lv.append((1 - w) * pyr_b[l] + w * pyr_c[l])
+    return collapse(lv)
 
 
 _M = np.array([[0.2126, 0.7152, 0.0722], [-0.1146, -0.3854, 0.5], [0.5, -0.4542, -0.0458]],
@@ -666,5 +718,6 @@ def run(paths, z, t, grid: Grid, workers=None, radius_px=6.0, power=4.0, smoothi
     st.noise_mad = [float(1.4826 * np.median(np.abs((pa[l] - pb[l]) @ LUMA)) / math.sqrt(2))
                     for l in range(levels - 1)]
     log(f"  noise sigma per level: {[round(v * 1e4, 2) for v in st.noise_mad]} (x1e-4)")
-    out, maps = finalize(st, depth_s, b_img)
-    return out, {"depth": depth_s, "conf": conf, "replaced": maps, "levels": levels, "state": st}
+    out, maps, pyrs = finalize(st, depth_s, b_img)
+    return out, {"depth": depth_s, "conf": conf, "replaced": maps, "levels": levels, "state": st,
+                 "pyramids": pyrs}

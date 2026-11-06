@@ -30,3 +30,13 @@ def test_split_and_merge_order_do_not_change_the_result(steps):
         assert np.array_equal(one[k], three[k]), k
     # A sums in a different order: equal to float rounding
     assert np.max(np.abs(one["A"] - three["A"])) < 1e-6
+
+
+def test_bc_slider_endpoints(steps):
+    _, z, t = load_truth(steps)
+    z, t = sim.rebase(z, t, 0)
+    grid = fusion.Grid(320, 220, (0, 0, 319, 219), scale=1.0)
+    out, info = fusion.run(list_frames(steps), z, t, grid, workers=2, log=lambda *_: None)
+    pb, pc = info["pyramids"]["B"], info["pyramids"]["Cn"]
+    assert np.allclose(fusion.blend_bc(pb, pc, 0.0), out["B"], atol=1e-5)
+    assert np.allclose(fusion.blend_bc(pb, pc, 1.0), out["Cn"], atol=1e-5)
