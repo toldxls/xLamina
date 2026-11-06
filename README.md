@@ -1,54 +1,55 @@
 # xLamina
 
-Multi-GPU focus stacker for photomicroscopy. CUDA engine, Windows, 16-bit TIFF in and out.
-Command line for now; a GUI is planned.
+Multi-GPU focus stacker for photomicroscopy. Windows, NVIDIA GPUs, 16-bit TIFF in and out.
 
-Methods: A (weighted average), B (regularised depth map: focus volume, semi-global
-matching, fine refinement, soft-label composition), C (Laplacian pyramid) and the
-variants CB, Cn, CBn, Cd, Cg, Cg2, H. Every run also writes a geometry report:
-per-frame similarity transforms, the reference frame, the crop and the effective
-µm/px over the stack depth.
+Open a folder of frames, choose the outputs, press Render, watch the stack build, save.
+163 frames of 6960 x 4640 on an RTX 3080 Ti + RTX 3070: 10 s to align, 17 s to fuse.
 
-163 frames of 6960 x 4640 on an RTX 3080 Ti + RTX 3070: alignment 10 s, fusion
-17 s for all outputs.
+Methods: B (regularised depth map: focus volume, semi-global matching, fine refinement,
+soft-label composition), C (Laplacian pyramid), Cn (noise-aware pyramid), A (weighted
+average) and the variants B0, CB, CBn, Cd, Cg, Cg2, H. Every render also writes a
+geometry report: per-frame similarity transforms, the reference frame, the crop and the
+effective µm/px over the stack depth.
 
 ## Install
 
-Download `xLamina-<version>-win64.zip` from the Releases page and unzip it anywhere.
-It needs a 64-bit Windows with an NVIDIA GPU (Ampere or newer) and a current driver;
-nothing else.
+Download `xLamina-<version>-win64.zip` from the Releases page, unzip it anywhere and run
+`xLamina.exe`. Requirements: 64-bit Windows, an NVIDIA GPU (Ampere or newer) with a
+current driver. Nothing else.
 
 ## Use
 
-Open a terminal in the unzipped folder:
+Open a folder (or drop one onto the window). Every TIFF of the stack's image size is a
+frame; other TIFFs in the folder are listed greyed out and left alone. Tick the outputs
+you want, set the field of view if you know it (it gives the report its µm/px), press
+Render. The viewer shows the stack building, then the depth map, then the result; the
+tabs under it switch between the outputs. Save as… writes the current one as a 16-bit
+TIFF, JPEG or PNG; the full set plus `report.json` is also written to `<folder>_stacker`.
 
-    stackcli run <folder> [--out DIR] [--outputs B,C,Cn] [--fov-mm X | --um-per-px X]
-                 [--prefix IMG_] [--scale 1|0.5] [--ref middle] [--lock-scale 1] [--gpus 0,1]
+The same engine runs from the command line:
 
-Every `.tif` in the folder is a frame (or only those whose name starts with `--prefix`).
-The frames are aligned, the reference and crop chosen, and `report.json` plus the
-requested outputs (default: all) are written as 16-bit TIFFs to `<folder>_stacker`.
-`--fov-mm` is the horizontal field of view of one frame; it gives the report its µm/px.
-`stackcli` without arguments lists the developer commands, one per pipeline stage.
+    stackcli run <folder> [--out DIR] [--outputs B,C,Cn] [--fov-mm X] [--scale 0.5] ...
 
 ## Build
 
-Visual Studio 2022 (Build Tools with the C++ workload suffice), CUDA 13.x.
+Visual Studio 2022 (Build Tools with the C++ workload suffice), CUDA 13.x, and for the
+GUI Qt 6.8 for MSVC 2022 (`pip install aqtinstall` then
+`aqt install-qt windows desktop 6.8.3 win64_msvc2022_64 -O C:\Qt`).
 
-    tools\build.cmd        builds build\cli\stackcli.exe
+    tools\build.cmd        builds build\gui\xLamina.exe and build\cli\stackcli.exe
     tools\package.cmd      builds and zips a release into dist\
 
 ## Layout
 
-    core/     stackcore, the C++/CUDA engine
+    core/     stackcore, the C++/CUDA engine and the pipeline
+    gui/      xLamina, the Qt application
     cli/      stackcli
     tools/    build and packaging scripts, the M0 hardware benchmark
     docs/     DESIGN.md and FINDINGS.md (the evidence behind every decision)
 
-The engine was ported stage by stage from a Python reference implementation and
-checked against it (bit-exact ingest, byte-identical fold across GPU splits, depth
-identical at 99.999 %, end-to-end scores equal to the reference's); the record is in
-docs/FINDINGS.md.
+The engine was ported stage by stage from a Python reference implementation and checked
+against it (bit-exact ingest, byte-identical fold across GPU splits, depth identical at
+99.999 %, end-to-end scores equal to the reference's); the record is in docs/FINDINGS.md.
 
 ## License
 

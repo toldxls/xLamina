@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <list>
+#include <map>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -757,6 +758,27 @@ int run_align(AlignOptions& ao, AlignOut& A) {
         if (e.is_regular_file() && (ext == ".tif" || ext == ".tiff") && name.rfind(prefix, 0) == 0) paths.push_back(e.path());
     }
     std::sort(paths.begin(), paths.end());
+    // frames are the TIFFs of the most common size; anything else in the folder (a previous stack's
+    // outputs, say) is left out and reported
+    {
+        std::vector<TiffInfo> infos;
+        std::map<std::pair<unsigned, unsigned>, int> sizes;
+        for (auto& p : paths) {
+            infos.push_back(tiff_probe(p));
+            if (infos.back().ok()) ++sizes[{infos.back().width, infos.back().height}];
+        }
+        std::pair<unsigned, unsigned> best{0, 0};
+        int bestn = 0;
+        for (auto& [sz, n] : sizes) if (n > bestn) { best = sz; bestn = n; }
+        std::vector<fs::path> keep;
+        for (size_t i = 0; i < paths.size(); ++i) {
+            if (infos[i].ok() && infos[i].width == best.first && infos[i].height == best.second) keep.push_back(paths[i]);
+            else logf("  skipping %s (%s)", paths[i].filename().string().c_str(),
+                      infos[i].ok() ? (std::to_string(infos[i].width) + " x " + std::to_string(infos[i].height) + ", not the stack's size").c_str()
+                                    : infos[i].error.c_str());
+        }
+        paths.swap(keep);
+    }
     const int N = (int)paths.size();
     if (N < 3) { logf("need >= 3 frames, found %d\n", N); return 1; }
     int ndev = 0;

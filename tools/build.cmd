@@ -15,7 +15,10 @@ if "%CUDA_PATH%"=="" ( echo CUDA toolkit not found; set CUDA_PATH & exit /b 11 )
 call "%VS%\VC\Auxiliary\Build\vcvars64.bat" >nul
 if errorlevel 1 exit /b 10
 set "PATH=%VS%\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;%VS%\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;%CUDA_PATH%\bin;%PATH%"
+if "%QT_DIR%"=="" (
+  for /d %%d in ("C:\Qt\6.*") do if exist "%%d\msvc2022_64\lib\cmake\Qt6" set "QT_DIR=%%d\msvc2022_64"
+)
 cd /d "%~dp0.."
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="%QT_DIR%"
 if errorlevel 1 exit /b 20
 cmake --build build
