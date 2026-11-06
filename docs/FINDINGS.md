@@ -308,6 +308,35 @@ Travis: "our B has too much glare around edges."
   (`~/Desktop/stacker_B_edges_fullres.jpg`).
 - Residual: a few small dark specks in the far background.
 
+## 12. B: out-of-range regions, blend width, doubled edges (2026-11-06)
+
+Travis: "still a lot of glare and doubled edges in the crystal fan and edges;
+background edges look way worse compared to Helicon."
+
+- **The "background edges" were regions out of focus in EVERY frame**, beyond
+  the stack's depth range: 11 % of this image, mostly peaking at the first frames.
+  - Their focus curves are monotonic ramps. A high peak-vs-median "contrast"
+    fooled the confidence, and the refinement turned noise into a mottled, lacy
+    patchwork.
+  - Fix: a curve peaking within 3 frames of either end gets zero focus
+    confidence plus a pull toward that end frame (the least-defocused view;
+    Helicon shows those regions as soft but structured grains). The darkness
+    prior is limited to featureless pixels: the two priors fought and made
+    "bubbles".
+- **Blend width now follows fine detail actually present** in the narrow
+  composite (output-res |Laplacian| vs its own noise floor). Blurry regions use
+  a CONTINUOUS smoothed depth, interpolating the two bracketing frames, so blur
+  changes gradually and label seams cannot draw outlines. Quarter-res texture
+  had counted defocused blobs as texture.
+- **Doubled needle edges** persist even with hard labels, so they are not a
+  blending artefact. A defocused thin bright needle images as two parallel
+  lines; the chosen frame is slightly off that needle's focus.
+  - Trusting strong fine-scale peaks at any depth did not fix it.
+  - Locking scale did not fix it (near the image centre registration is not the cause).
+  - Still open: a smaller white glint blob remains, and one needle edge is still doubled.
+- Metrics vs Helicon B (tone-matched, half res): edge-band glare 3.7 % → 3.3 %;
+  sharpness 1.05–1.16. The out-of-range background now looks like Helicon's.
+
 ## Open items
 
 - **Residual flat-target roll bias**: a smooth hump of ±17 mdeg RMS per frame on far-defocused frames, antisymmetric about focus (the fitted rate is fine: 52 vs 50 mdeg/mm). Also ε reads −2.4 % (≈ 6σ). Cause unknown.
