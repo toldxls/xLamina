@@ -18,9 +18,9 @@ def _natural_key(s: str):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
 
 
-def list_frames(folder) -> list[Path]:
+def list_frames(folder, pattern: str = "*") -> list[Path]:
     folder = Path(folder)
-    files = [p for p in folder.iterdir()
+    files = [p for p in folder.glob(pattern)
              if p.suffix.lower() in IMG_EXT and not p.name.startswith(".")
              and not p.stem.startswith("_")]          # _truth_*.tif etc. are not frames
     return sorted(files, key=lambda p: _natural_key(p.name))

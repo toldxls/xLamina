@@ -108,6 +108,32 @@ not the optical axis. The two coincide only if the rail is parallel to the axis.
   error was 642 ppm RMS before the fix and 37 after.
 - **Defocus is now exact**: a frequency-domain Gaussian per layer, one inverse FFT per frame.
 
+## 6. First real stack (2026-11-05): mineral specimen, 163 frames
+
+- Setup: Canon EOS M6 II, 6960 × 4640, 16-bit Adobe RGB TIFF, 0.468 µm steps
+  (76 µm of travel), 0.98 mm FOV (0.1408 µm/px, ~23×, presumably 20× NA ~0.42).
+  Higher frame numbers move the camera **away** from the subject.
+- Alignment: 637/637 pairs usable, NCC ≥ 0.992. Runtime 3 min on the Mac
+  (luma at 1740 × 1160).
+- Measured: scale **+2.5 % across the stack** (+153 ppm/frame, growing as the
+  camera moves away), "rail tilt" 7° x / 18° y, y drift ~175 px, roll −0.49°.
+- **The scale ramp has the wrong sign for perspective.** Moving away should
+  shrink the image with a normal (entocentric) lens; it grew. Real perspective
+  would need a pupil 3 mm away, on the far side of the specimen. The size fits
+  the specimen-relief bias (NA² is ~2× the synthetic case; steep crystal relief).
+  **Probably not real geometry.** Needs a flat-target stack with the same setup
+  to confirm.
+- **Helicon applied the same ~2.5 % ramp**, referenced to the FIRST frame (its
+  B output's scale matches frame 0 to 0.007 %).
+  - Frame 0 is the least zoomed-in frame here, the reference choice with the
+    largest crop: 6960 × 4640 → 6714 × 4404. The 246 px width loss needs the
+    scale term; drift alone is ~60 px.
+  - Helicon output µm/px over depth: **0.1408 (first frame's depth) to 0.1443
+    (last frame's depth)**, 0.1424 mid. AutoFOV's single calibrated number is
+    right only for the deepest content.
+- Our native-crop with the middle reference: 6840 × 4429 (L29 R91 T88 B123).
+- Command: `stackproto compare <analysis_dir> <helicon.tif> ...`.
+
 ## Open items
 
 - **Residual flat-target roll bias**: a smooth hump of ±17 mdeg RMS per frame on far-defocused frames, antisymmetric about focus (the fitted rate is fine: 52 vs 50 mdeg/mm). Also ε reads −2.4 % (≈ 6σ). Cause unknown.

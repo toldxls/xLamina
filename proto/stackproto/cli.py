@@ -65,6 +65,7 @@ def _add_analyze_opts(ap):
     ap.add_argument("--tag", action="append", help="history tag key=value (objective, lock, ...)")
     ap.add_argument("--no-history", action="store_true")
     ap.add_argument("--workers", type=int, default=None)
+    ap.add_argument("--glob", default="*", help="frame filename pattern, e.g. 'IMG_*.tif'")
     ap.add_argument("--lock-scale", action="store_true",
                     help="apply s = 1 in the output geometry (telecentric optics)")
     ap.add_argument("--target", default="specimen", choices=["specimen", "flat"],
@@ -79,7 +80,7 @@ def _analyze(a, folder, step_um=None, fov_mm=None):
         raise SystemExit("--step-um is required")
     axis = tuple(float(v) for v in a.axis_px.split(","))
     if a.axis_pct:
-        first = cv2.imread(str(list_frames(folder)[0]), cv2.IMREAD_UNCHANGED)
+        first = cv2.imread(str(list_frames(folder, a.glob)[0]), cv2.IMREAD_UNCHANGED)
         H, W = first.shape[:2]
         px, py = (float(v) for v in a.axis_pct.split(","))
         axis = (px / 100 * W / 2, py / 100 * H / 2)
@@ -88,7 +89,8 @@ def _analyze(a, folder, step_um=None, fov_mm=None):
         align_scale=a.align_scale, baselines=tuple(int(b) for b in a.baselines.split(",")),
         ref=a.ref, policy=a.policy, axis_px=axis, direction=a.direction, out_dir=a.out,
         png_path=a.png, history_csv=None if a.no_history else ROOT / "history" / "diagnostics.csv",
-        tags=_tags(a.tag), workers=a.workers, lock_scale=a.lock_scale, target=a.target)
+        tags=_tags(a.tag), workers=a.workers, lock_scale=a.lock_scale, target=a.target,
+        pattern=a.glob)
 
 
 def main(argv=None):
@@ -108,6 +110,11 @@ def main(argv=None):
     v.add_argument("folder")
     _add_analyze_opts(v)
 
+    c = sub.add_parser("compare", help="measure an external stacker's output (e.g. Helicon) "
+                                       "against a previous 'analyze' run")
+    c.add_argument("analysis_dir", help="the <stack>_stacker folder from analyze")
+    c.add_argument("outputs", nargs="+", help="external stacked TIFF/JPEG files")
+
     a = ap.parse_args(argv)
     if a.cmd == "synth":
         params = SynthParams(**{**PRESETS[a.preset], **_parse_set(a.set)})
@@ -115,6 +122,20 @@ def main(argv=None):
         generate(a.out, params)
     elif a.cmd == "analyze":
         _analyze(a, a.folder)
+    elif a.cmd == "compare":
+        import glob
+        import numpy as np
+        from . import compare
+        rep = json.loads((Path(a.analysis_dir) / "report.json").read_text())
+        npy = sorted(glob.glob(str(Path(a.analysis_dir) / "cache" / "luma_*.npy")))[-1]
+        st = np.load(npy, mmap_mode="r")
+        W, H = rep["geometry"]["input"]["width"], rep["geometry"]["input"]["height"]
+        res = []
+        for f in a.outputs:
+            out, _, _ = compare.register_external(f, st, rep, (st.shape[2] / W, st.shape[1] / H))
+            res.append(out)
+            print(json.dumps(out, indent=1))
+        (Path(a.analysis_dir) / "compare.json").write_text(json.dumps(res, indent=1))
     elif a.cmd == "validate":
         truth = json.loads((Path(a.folder) / "truth.json").read_text())
         p = truth["params"]

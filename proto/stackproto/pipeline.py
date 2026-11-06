@@ -28,8 +28,8 @@ def _clean(o):
 
 
 def run_alignment(folder, align_scale=0.25, baselines=(1, 2, 4, 8), workers=None,
-                  cache_dir=None, log=print):
-    paths = list_frames(folder)
+                  cache_dir=None, log=print, pattern="*"):
+    paths = list_frames(folder, pattern)
     if len(paths) < 3:
         raise SystemExit(f"need >= 3 frames in {folder}, found {len(paths)}")
     t0 = time.time()
@@ -62,11 +62,11 @@ def analyze_folder(folder, step_um, fov_mm=None, um_per_px=None, align_scale=0.2
                    baselines=(1, 2, 4, 8), ref="middle", policy="native-crop",
                    axis_px=(0.0, 0.0), direction="unknown", out_dir=None, png_path=None,
                    history_csv=None, tags=None, workers=None, log=print, lock_scale=False,
-                   target="specimen"):
+                   target="specimen", pattern="*"):
     folder = Path(folder)
     out_dir = Path(out_dir) if out_dir else folder.parent / f"{folder.name}_stacker"
     out_dir.mkdir(parents=True, exist_ok=True)
-    A = run_alignment(folder, align_scale, baselines, workers, out_dir / "cache", log)
+    A = run_alignment(folder, align_scale, baselines, workers, out_dir / "cache", log, pattern)
     W, H, z0, t0 = A["W"], A["H"], A["z0"], A["t0"]
     upp = um_per_px if um_per_px else (fov_mm * 1000.0 / W if fov_mm else None)
 
