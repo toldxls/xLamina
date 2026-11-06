@@ -70,3 +70,13 @@ def build_fullres(fusion_dir, externals, methods, out_path, ext_origin, rois, si
         rows.append(np.vstack([band, r]))
     cv2.imwrite(out_path, np.vstack(rows), [cv2.IMWRITE_JPEG_QUALITY, 95])
     return hel
+
+
+def sharpness_ratio(img, ref, rois, size=440):
+    """Mean |Laplacian| of img / ref per ROI (1.0 = as sharp as the reference)."""
+    def lap(x):
+        y = x @ np.array([0.2126, 0.7152, 0.0722], np.float32)
+        return np.abs(cv2.Laplacian(cv2.GaussianBlur(y, (0, 0), 0.7), cv2.CV_32F, ksize=3))
+    la, lb = lap(img), lap(ref)
+    return {name: round(float(la[y:y + size, x:x + size].mean() / (lb[y:y + size, x:x + size].mean() + 1e-12)), 3)
+            for x, y, name in rois}

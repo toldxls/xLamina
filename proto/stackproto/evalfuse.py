@@ -48,6 +48,15 @@ def evaluate(folder, out_dir, workers=None, scale=1.0, **kw):
                    "psnr_plateaus": psnr(img, tr, plate),
                    "added_noise_rms": float(np.sqrt(np.mean(hp[plate] ** 2)))}
         write_rgb16(out_dir / f"{k}.tif", img)
+    # depth accuracy (frames) vs truth
+    dt = dp / d["params"]["step_um"]
+    dm = cv2.resize(info["depth"], (dt.shape[1], dt.shape[0]), interpolation=cv2.INTER_NEAREST) \
+        if info["depth"].shape != dt.shape else info["depth"]
+    err = np.abs(dm - dt)
+    rows["_depth"] = {"median_abs_err_frames": float(np.median(err)),
+                      "within_1_frame_pct": float(100 * np.mean(err <= 1.0)),
+                      "within_1_frame_halo_pct": float(100 * np.mean(err[halo] <= 1.0)),
+                      "within_1_frame_plateau_pct": float(100 * np.mean(err[plate] <= 1.0))}
     rows["_replaced_fraction_per_level"] = info["replaced"]
     (out_dir / "scores.json").write_text(json.dumps(rows, indent=1))
     return rows, out, tr, halo

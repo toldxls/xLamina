@@ -429,6 +429,128 @@ def depth_cvf(ctx, chunks, workers, order=None):
     return cv2.medianBlur(idx.astype(np.float32), 5), best
 
 
+def _w_fmvol(chunk):
+    """Normalised focus measure of each frame at the depth resolution."""
+    g = _CTX["grid"]
+    dw, dh = _CTX["dsize"]
+    out = {}
+    for k in chunk:
+        img = load_aligned(_CTX["paths"][k], _CTX["z"][k], _CTX["t"][k], g)
+        fm = focus_measure_rgb(img, _CTX["fm_radius"], normalized=True)
+        lum = cv2.GaussianBlur(img @ LUMA, (0, 0), 2.0 * _CTX["fm_radius"])
+        out[k] = (cv2.resize(fm, (dw, dh), interpolation=cv2.INTER_AREA).astype(np.float16),
+                  cv2.resize(lum, (dw, dh), interpolation=cv2.INTER_AREA).astype(np.float16))
+    return out
+
+
+def sgm_from_volume(V, Lv, guide_full, ctx):
+    """Cost from the focus (V) and brightness (Lv) volumes -> SGM -> depth on the
+    output grid. Confidence = contrast of the pixel's focus curve, ramped from
+    ``sgm_c_lo`` (0) to ``sgm_c_hi`` (1). Low-confidence pixels follow the
+    darkness prior: measured on the real stack, Helicon's background is the
+    darkest frame 70 % of the time vs 11 % for the focus argmax, and background
+    contrast is 0.39-0.51 against 0.66-0.69 in texture."""
+    from .sgm import argmin_subpixel, sgm
+    dh, dw, K = V.shape
+    V = np.sqrt(V)
+    vmax = V.max(axis=2, keepdims=True)
+    vmed = np.median(V, axis=2, keepdims=True)
+    contrast = (vmax - vmed) / np.maximum(vmax, 1e-12)
+    lo, hi = ctx.get("sgm_c_lo", 0.45), ctx.get("sgm_c_hi", 0.60)
+    w = np.clip((contrast - lo) / (hi - lo), 0.0, 1.0)
+    C = w * (1.0 - V / np.maximum(vmax, 1e-12))
+    del V
+    lam = ctx.get("dark_prior", 0.0)
+    if lam > 0:
+        lmin = Lv.min(axis=2, keepdims=True)
+        lmax = Lv.max(axis=2, keepdims=True)
+        C = C + (1.0 - w) * lam * (Lv - lmin) / np.maximum(lmax - lmin, 0.01)
+    C = C.astype(np.float32)
+    g = cv2.resize(guide_full, (dw, dh), interpolation=cv2.INTER_AREA)
+    gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3) / 8
+    gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3) / 8
+    grad = np.sqrt(gx * gx + gy * gy)
+    P2 = (ctx["sgm_p2"] / (1.0 + grad / ctx["sgm_edge"])).astype(np.float32)
+    P2 = np.maximum(P2, 2 * ctx["sgm_p1"])
+    S = sgm(C, ctx["sgm_p1"], P2, ctx["sgm_dirs"])
+    d = argmin_subpixel(S)
+    del S, C
+    oh, ow = guide_full.shape
+    up = cv2.resize(d, (ow, oh), interpolation=cv2.INTER_LINEAR)
+    up = guided_filter(guide_full, up, max(2, int(round(2 * ow / dw))), 1e-4)
+    return (cv2.medianBlur(np.rint(up).astype(np.float32), 3),
+            cv2.resize(w[:, :, 0].astype(np.float32), (ow, oh), interpolation=cv2.INTER_LINEAR))
+
+
+def depth_sgm(ctx, chunks, workers, guide_full, log=print):
+    """Regularised depth: focus cost volume at reduced resolution -> SGM ->
+    sub-frame argmin -> edge-guided upsampling to the output grid."""
+    from .sgm import argmin_subpixel, sgm
+    dw, dh = ctx["dsize"]
+    cache = ctx.get("vol_cache")
+    if cache and os.path.exists(cache):
+        z_ = np.load(cache)
+        V, Lv = z_["fm"].astype(np.float32), z_["lum"].astype(np.float32)
+    else:
+        with ProcessPoolExecutor(max_workers=workers, initializer=_w_init, initargs=(ctx,)) as ex:
+            parts = list(ex.map(_w_fmvol, chunks))
+        vol = {}
+        for p in parts:
+            vol.update(p)
+        K = len(vol)
+        V = np.empty((dh, dw, K), np.float32)
+        Lv = np.empty((dh, dw, K), np.float32)
+        for k in range(K):
+            V[:, :, k], Lv[:, :, k] = vol[k]
+        del vol, parts
+        if cache:
+            np.savez(cache, fm=V.astype(np.float16), lum=Lv.astype(np.float16))
+    d_up, conf = sgm_from_volume(V, Lv, guide_full, ctx)
+    log(f"  depth: SGM on {dw}x{dh}x{V.shape[2]}, {ctx['sgm_dirs']} directions")
+    return d_up, conf
+
+
+def _w_refine(chunk):
+    """Fine-scale argmax restricted to +-R frames around the regularised depth."""
+    g = _CTX["grid"]
+    ow, oh = g.size
+    D, R = _CTX["depth"], _CTX["refine_r"]
+    best = np.full((oh, ow), -np.inf, np.float32)
+    idx = np.zeros((oh, ow), np.int16)
+    for k in chunk:
+        win = np.abs(D - k) <= R
+        if not win.any():
+            continue
+        img = load_aligned(_CTX["paths"][k], _CTX["z"][k], _CTX["t"][k], g)
+        fm = focus_measure_rgb(img, _CTX["refine_fm_r"], normalized=True)
+        fm = np.where(win, fm, -np.inf)
+        m = fm > best
+        best[m] = fm[m]
+        idx[m] = k
+    return best, idx
+
+
+def _w_b2dual(chunk):
+    """Soft-label composition with a narrow AND a wide label blur (mixed later
+    by confidence: crisp in texture, smooth in featureless regions)."""
+    g = _CTX["grid"]
+    ow, oh = g.size
+    D = _CTX["depth"]
+    s1, s2 = _CTX["soft_sigma"], _CTX["soft_sigma_wide"]
+    acc = [np.zeros((oh, ow, 3), np.float64), np.zeros((oh, ow), np.float64),
+           np.zeros((oh, ow, 3), np.float64), np.zeros((oh, ow), np.float64)]
+    for k in chunk:
+        lab = (np.abs(D - k) < 0.5).astype(np.float32)
+        if not lab.any():
+            continue
+        img = load_aligned(_CTX["paths"][k], _CTX["z"][k], _CTX["t"][k], g)
+        for (num, den), sg in (((acc[0], acc[1]), s1), ((acc[2], acc[3]), s2)):
+            w = cv2.GaussianBlur(lab, (0, 0), sg)
+            num += w[:, :, None] * img
+            den += w
+    return acc
+
+
 def _chunks(n, parts):
     """Contiguous frame chunks (one per worker / GPU)."""
     edges = np.linspace(0, n, parts + 1).astype(int)
@@ -436,8 +558,11 @@ def _chunks(n, parts):
 
 
 def run(paths, z, t, grid: Grid, workers=None, radius_px=6.0, power=4.0, smoothing_px=8,
-        log=print, order=None, depth_method="cvf", agg_radius_px=24.0, agg_eps=1e-4,
-        fm_radius_px=2.0, guide="C", soft_px=3.0):
+        log=print, order=None, depth_method="sgm", agg_radius_px=24.0, agg_eps=1e-4,
+        fm_radius_px=2.0, guide="C", soft_px=3.0, depth_scale=0.5, sgm_p1=0.03,
+        sgm_p2=0.4, sgm_edge=0.02, sgm_c_lo=0.45, sgm_c_hi=0.60, sgm_dirs=8, dark_prior=1.0,
+        vol_cache=None, refine_r=6, refine_fm_px=1.5, soft_wide_px=40.0, wide_lo=0.4,
+        wide_hi=0.7, tex_lo=0.025, tex_hi=0.045):
     """Full fusion. Window sizes are in FULL-RES sensor pixels (scaled to the grid
     so results don't depend on the working scale). ``order`` permutes the merge
     order of partial states (tests)."""
@@ -459,7 +584,33 @@ def run(paths, z, t, grid: Grid, workers=None, radius_px=6.0, power=4.0, smoothi
     for i in idx[1:]:
         st = merge(st, parts[i])
     log(f"  pass 1 (A, B-depth, C) folded {n} frames in {len(parts)} parts, {levels} pyramid levels")
-    if depth_method == "cvf":
+    if depth_method == "sgm":
+        g_img = collapse(st.c_coef + [(st.c_base / max(st.count, 1)).astype(np.float32)])
+        guide_full = np.clip(g_img @ LUMA, 0, 1).astype(np.float32)
+        ctx.update(dsize=(max(16, int(round(ow * depth_scale))), max(16, int(round(oh * depth_scale)))),
+                   fm_radius=max(0.8, fm_radius_px * grid.scale), sgm_p1=sgm_p1, sgm_p2=sgm_p2,
+                   sgm_edge=sgm_edge, sgm_c_lo=sgm_c_lo, sgm_c_hi=sgm_c_hi, sgm_dirs=sgm_dirs,
+                   dark_prior=dark_prior, vol_cache=vol_cache)
+        depth_s, conf = depth_sgm(ctx, chunks, workers, guide_full, log)
+        ctx["soft_sigma"] = max(0.8, soft_px * grid.scale)
+        ctx["soft_sigma_wide"] = max(2.0, soft_wide_px * grid.scale)
+        if refine_r:
+            # fine-scale refinement inside +-refine_r frames of the SGM depth,
+            # only where the focus evidence is confident (texture)
+            ctx.update(depth=depth_s, refine_r=refine_r,
+                       refine_fm_r=max(0.6, refine_fm_px * grid.scale))
+            with ProcessPoolExecutor(max_workers=workers, initializer=_w_init, initargs=(ctx,)) as ex:
+                rparts = list(ex.map(_w_refine, chunks))
+            rb, ri = rparts[0][0].copy(), rparts[0][1].copy()
+            for b2, i2 in rparts[1:]:
+                m = _take(rb, ri, b2, i2)
+                rb[m] = b2[m]
+                ri[m] = i2[m]
+            confs = cv2.GaussianBlur(conf, (0, 0), max(1.0, 6 * grid.scale))
+            refined = np.where(np.isfinite(rb), ri.astype(np.float32), depth_s)
+            depth_s = np.where(confs > 0.5, cv2.medianBlur(refined, 3), depth_s).astype(np.float32)
+            log(f"  refine pass (+-{refine_r} frames, fine FM) done")
+    elif depth_method == "cvf":
         if guide == "C":     # crisp edges stop aggregation crossing depth steps
             g_img = collapse(st.c_coef + [(st.c_base / max(st.count, 1)).astype(np.float32)])
         else:
@@ -474,12 +625,36 @@ def run(paths, z, t, grid: Grid, workers=None, radius_px=6.0, power=4.0, smoothi
     else:
         depth_s, conf = smooth_depth_map(st, smoothing, fill_sigmas=fill)
     ctx["depth"] = depth_s
-    with ProcessPoolExecutor(max_workers=workers, initializer=_w_init, initargs=(ctx,)) as ex:
-        accs = list(ex.map(_w_b2, chunks))
-    num = sum(a.num for a in accs)
-    den = sum(a.den for a in accs)
-    b_img = (num / np.maximum(den, 1e-12)[:, :, None]).astype(np.float32)
-    b_img = np.where((den > 1e-6)[:, :, None], b_img, st.b_col)
+    if depth_method == "sgm":
+        with ProcessPoolExecutor(max_workers=workers, initializer=_w_init, initargs=(ctx,)) as ex:
+            accs = list(ex.map(_w_b2dual, chunks))
+        n1 = sum(a[0] for a in accs); d1 = sum(a[1] for a in accs)
+        n2 = sum(a[2] for a in accs); d2 = sum(a[3] for a in accs)
+        b1 = n1 / np.maximum(d1, 1e-12)[:, :, None]
+        b2 = n2 / np.maximum(d2, 1e-12)[:, :, None]
+        # decisive mix: any real texture -> narrow blend (a soft mix leaked the
+        # 40 px wide blend into textured areas as haze); wide only where the
+        # focus evidence is clearly absent
+        # Wide blend only where BOTH signals say "nothing here": weak focus
+        # evidence AND no texture in the composed image. Measured texture
+        # (brightness-normalised |Laplacian| of C): background 0.015-0.021,
+        # matrix 0.046-0.113, smooth crystal faces 0.012-0.03 (those keep the
+        # narrow blend through their high focus confidence).
+        cs = cv2.GaussianBlur(conf, (0, 0), max(2.0, 10 * grid.scale))
+        lap = np.abs(cv2.Laplacian(cv2.GaussianBlur(guide_full, (0, 0), 1.0), cv2.CV_32F, ksize=3))
+        tex = cv2.GaussianBlur(lap, (0, 0), max(2.0, 12 * grid.scale)) / (
+            cv2.GaussianBlur(guide_full, (0, 0), max(2.0, 12 * grid.scale)) + 0.02)
+        c_focus = np.clip((cs - wide_lo) / (wide_hi - wide_lo), 0, 1)
+        c_tex = np.clip((tex - tex_lo) / (tex_hi - tex_lo), 0, 1)
+        cm = (1.0 - (1.0 - c_focus) * (1.0 - c_tex))[:, :, None]
+        b_img = (cm * b1 + (1 - cm) * b2).astype(np.float32)
+    else:
+        with ProcessPoolExecutor(max_workers=workers, initializer=_w_init, initargs=(ctx,)) as ex:
+            accs = list(ex.map(_w_b2, chunks))
+        num = sum(a.num for a in accs)
+        den = sum(a.den for a in accs)
+        b_img = (num / np.maximum(den, 1e-12)[:, :, None]).astype(np.float32)
+        b_img = np.where((den > 1e-6)[:, :, None], b_img, st.b_col)
     log("  B composition pass done")
     # Noise per pyramid level from two ADJACENT middle frames: their coefficient
     # difference is ~sqrt(2) x noise; the MAD ignores the few pixels whose focus

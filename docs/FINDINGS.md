@@ -215,6 +215,46 @@ data (normalisation favours darker frames where texture is weak). 24 is the real
 data default. One faint background boundary remains at half res; the fan centre
 is a touch hazier than Helicon B at 1:1.
 
+## 9. B depth estimator, round 3: regularised depth (2026-11-06), now the default
+
+Travis's verdict on round 2: "B is terrible". The cost-volume filter's single
+radius smeared depth across fine 3D structure (soft matrix, dull crystals) and
+left blotches and terraces in the defocused background.
+
+**Reverse-engineering Helicon's depth.** For every region of Helicon's B
+output, find the best-matching source frame. The match residual is 0.0024 RMS,
+about the noise level, so Helicon composes almost purely from single frames.
+- **Background: Helicon picks the DARKEST frame** (70 % within 5 frames vs 11 %
+  for the focus argmax). Defocus spill only adds light, so the darkest frame is
+  the least contaminated.
+- Background focus-curve contrast is 0.39–0.51; texture is 0.66–0.69.
+
+**Pipeline** (`depth_method="sgm"`):
+1. Cached volume of contrast-normalised focus + local brightness per frame, at
+   1/2 of the output grid.
+2. Data cost = w·(1 − FM/FMmax) + (1 − w)·darkness, with w ramped over focus-curve
+   contrast 0.45 → 0.60.
+3. **Semi-global matching**: 8 directions, P1 = 0.03, P2 = 0.4 reduced across
+   image edges.
+4. Edge-guided upsampling, then a **refinement pass**: fine-scale focus argmax
+   within ±6 frames of the SGM depth, where confident.
+5. **Dual soft-label composition**: 3 px and 40 px label blurs. The wide blend
+   applies only where focus confidence AND image texture are both low (texture
+   = brightness-normalised |Laplacian| of C: background 0.015–0.021, matrix
+   0.046–0.113; smooth crystal faces keep the narrow blend through their focus
+   confidence).
+
+Results:
+- Background agreement with Helicon depth: 8 % → 69 %.
+- Sharpness (mean |Laplacian|) vs Helicon B: crystal fan 0.96, crystal edge
+  1.05, matrix 1.11. Helicon C reads 0.97–1.00 on the same measure.
+- Synthetic B: 36.3 / halo 32.0 / plateaus 44.4 (best yet).
+- Depth experiments run from the cache in ~6 s (`depthlab.depth_only`); a full
+  half-res fusion takes ~2.5 min on the Mac.
+
+Residual: a faint lighter, ghosted zone in the background just right of the
+specimen; crystal-fan needles are slightly less crisp than Helicon B at 1:1.
+
 ## Open items
 
 - **Residual flat-target roll bias**: a smooth hump of ±17 mdeg RMS per frame on far-defocused frames, antisymmetric about focus (the fitted rate is fine: 52 vs 50 mdeg/mm). Also ε reads −2.4 % (≈ 6σ). Cause unknown.
