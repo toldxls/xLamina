@@ -688,6 +688,44 @@ needs ~3.5 min for the half-res run on this CPU.
   (`score_b`) needs the Python reference run on this stack (~10 min of
   CPU); pending Travis's go.
 
+## 22. Port step 7: alignment on the GPU (2026-11-06)
+
+`core/src/align.cu`, `stackcli align DIR --out DIR`: pass 0 streams the
+frames and keeps each one's luma at the align scale (INTER_AREA ×¼) on the
+host; then every GPU pulls pairs from a shared counter, each with an LRU
+cache of 24 frame pyramids (blur 0.8 + INTER_AREA halving to 4 levels,
+Sobel-1 gradients, level-0 cubic B-spline coefficients). Per pair: phase
+correlation at the top level (Hanning window, OpenCV's padding and 5 × 5
+centroid; the DFT is two twiddle matmuls, since Windows has no static
+cuFFT), Gauss-Newton per level with the OpenCV-style bicubic warp
+(replicate border, exact positions), then 4 iterations at level 0 with the
+exact B-spline warp (scipy `spline_filter` / `map_coordinates`, mirror).
+The 6 × 6 normal equations come from a fixed-order block reduction
+(deterministic); the host solves, iterates, and computes the covariance
+and NCC from the last iteration's sums like the prototype. The global solve
+(`solve_global`, IRLS, Huber 3), the reference choice, the rebase and
+`common_rect` are ported on the host; the output is `report.json` in the
+prototype's format plus `list.txt` for `stack`.
+
+Against the Mac's report on the 163-frame stack: **max shift difference
+3e-6 px, scale 2e-9, rotation 1e-4 mdeg, corner error 1e-5 px**; the same
+crop (6840 × 4429, L29 R91 T88 B123), 637/637 pairs, 0 outliers, identical
+NCC min / median, scale spread 2.5109 % both. That is the Mac-vs-PC-Python
+level of agreement (§15), so the GPU pairs converge to the prototype's fixed
+points.
+
+- Time: luma pass 2.7 s, 637 pairs 6.3 s on both GPUs (10 ms per pair,
+  393 / 244 split), solve + report < 0.1 s: **12 s**, against ~6 min for
+  the prototype's multiprocess alignment on this CPU.
+- One trap: the mirror initial condition of the B-spline prefilter divides
+  z^(n-1) by z^i, which underflows to 0 / 0 on 1740-sample lines; Unser's
+  truncation at the precision horizon (27 terms for the cubic pole) is what
+  scipy does too, and fixed the NaNs.
+- Not ported: the optical-train diagnostics (`diagnostics.py`: ε, tilt,
+  FOE, jitter, lead-screw) and the plot. They are statistics on the
+  per-frame (z, t) and can stay in Python for now (`report.json` is
+  compatible) or be ported with M1.
+
 ## Open items
 
 - **Residual flat-target roll bias**: a smooth hump of ±17 mdeg RMS per frame on far-defocused frames, antisymmetric about focus (the fitted rate is fine: 52 vs 50 mdeg/mm). Also ε reads −2.4 % (≈ 6σ). Cause unknown.

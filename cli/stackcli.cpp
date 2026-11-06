@@ -30,7 +30,14 @@
 #include <string>
 #include <vector>
 
+#include "stackcore/align.h"
 #include "stackcore/compose.h"
+
+#include <atomic>
+#include <list>
+#include <mutex>
+#include <thread>
+#include <unordered_map>
 
 #include "stackcore/convert.h"
 #include "stackcore/depth.h"
@@ -68,7 +75,9 @@ static int usage() {
             "                [--frames 0,5,9] [--gpus 0,1] [--streams 2] [--readers 16] [--volume]\n"
             "  stackcli depth VOLDIR --out DIR [--crop X0,Y0,W,H] [--gpu N] [--dirs 8]\n"
             "  stackcli stack LIST.txt --rect X0,Y0,X1,Y1 --out DIR [--scale 1|0.5] [--gpus 0,1] [--streams 2]\n"
-            "                 [--refine-r 12] [--refine-fm-px 9] [--soft-px 3]      the whole fusion -> 16-bit TIFFs\n");
+            "                 [--refine-r 12] [--refine-fm-px 9] [--soft-px 3]      the whole fusion -> 16-bit TIFFs\n"
+            "  stackcli align DIR --out DIR [--prefix IMG_] [--align-scale 0.25] [--baselines 1,2,4,8] [--ref middle]\n"
+            "                 [--gpus 0,1] [--pairs i:j,...]      alignment -> report.json + list.txt (+ per-pair dump)\n");
     return 2;
 }
 
@@ -1071,6 +1080,204 @@ static int cmd_stack(int argc, char** argv) {
     return 0;
 }
 
+// ----------------------------------------------------------------------------- align
+
+static int cmd_align(int argc, char** argv) {
+    if (argc < 3) return usage();
+    fs::path dir = argv[2];
+    std::string out, prefix = "IMG_", ref_rule = "middle", pairs_sel;
+    double align_scale = 0.25;
+    std::vector<int> baselines = {1, 2, 4, 8}, devs;
+    int readers = 16;
+    for (int i = 3; i + 1 < argc; i += 2) {
+        std::string a = argv[i], v = argv[i + 1];
+        if (a == "--out") out = v;
+        else if (a == "--prefix") prefix = v;
+        else if (a == "--align-scale") align_scale = atof(v.c_str());
+        else if (a == "--baselines") baselines = parse_list(v);
+        else if (a == "--ref") ref_rule = v;
+        else if (a == "--gpus") devs = parse_list(v);
+        else if (a == "--pairs") pairs_sel = v;
+        else if (a == "--readers") readers = atoi(v.c_str());
+        else return usage();
+    }
+    if (out.empty()) return usage();
+    std::vector<fs::path> paths;
+    for (auto& e : fs::directory_iterator(dir)) {
+        auto name = e.path().filename().string();
+        auto ext = e.path().extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        if (e.is_regular_file() && (ext == ".tif" || ext == ".tiff") && name.rfind(prefix, 0) == 0) paths.push_back(e.path());
+    }
+    std::sort(paths.begin(), paths.end());
+    const int N = (int)paths.size();
+    if (N < 3) { fprintf(stderr, "need >= 3 frames, found %d\n", N); return 1; }
+    int ndev = 0;
+    CK(cudaGetDeviceCount(&ndev));
+    if (devs.empty()) for (int i = 0; i < ndev; ++i) devs.push_back(i);
+    TiffInfo t0 = tiff_probe(paths[0]);
+    if (!t0.ok()) { fprintf(stderr, "%s: %s\n", paths[0].string().c_str(), t0.error.c_str()); return 1; }
+    const int W = (int)t0.width, H = (int)t0.height;
+    const int w = std::max(16, (int)std::nearbyint(W * align_scale)), h = std::max(16, (int)std::nearbyint(H * align_scale));
+    const double fx = (double)w / W, fy = (double)h / H;
+    auto t_all = std::chrono::steady_clock::now();
+
+    // ---- pass 0: luma at the align scale, for every frame, to the host
+    std::vector<float> luma_stack((size_t)N * w * h);
+    {
+        struct Slot { float *d_rgb = nullptr, *d_y = nullptr, *d_small = nullptr; AreaResizer rz; };
+        std::vector<std::vector<Slot>> slots(ndev);
+        StreamerOptions opt;
+        opt.devices = devs;
+        opt.streams_per_gpu = 3;
+        opt.readers = readers;
+        for (int d : devs) {
+            CK(cudaSetDevice(d));
+            slots[d].resize(opt.streams_per_gpu);
+            for (auto& S : slots[d]) {
+                CK(cudaMalloc(&S.d_rgb, (size_t)W * H * 3 * sizeof(float)));
+                CK(cudaMalloc(&S.d_y, (size_t)W * H * sizeof(float)));
+                CK(cudaMalloc(&S.d_small, (size_t)w * h * sizeof(float)));
+                S.rz.build(W, H, w, h);
+            }
+        }
+        auto on_frame = [&](const DeviceFrame& f) {
+            auto& S = slots[f.dev][f.slot];
+            convert_to_rgb_f32(f.d_pixels(), *f.info, S.d_rgb, nullptr, f.stream);
+            luma(S.d_rgb, S.d_y, (size_t)W * H, f.stream);
+            S.rz.run(S.d_y, S.d_small, 1, f.stream);
+            cudaMemcpyAsync(luma_stack.data() + (size_t)f.k * w * h, S.d_small, (size_t)w * h * sizeof(float), cudaMemcpyDeviceToHost, f.stream);
+        };
+        StreamerStats st = stream_frames(paths, opt, on_frame);
+        for (auto& e : st.errors) fprintf(stderr, "  error: %s\n", e.c_str());
+        for (int d : devs) {
+            CK(cudaSetDevice(d));
+            CK(cudaDeviceSynchronize());
+            for (auto& S : slots[d]) { cudaFree(S.d_rgb); cudaFree(S.d_y); cudaFree(S.d_small); S.rz.free(); }
+        }
+        printf("align: %d frames %dx%d -> luma %dx%d in %.2f s\n", N, W, H, w, h, st.seconds);
+    }
+
+    // ---- pairs, dynamically shared by the GPUs, each with an LRU cache of pyramids
+    std::vector<std::pair<int, int>> pairs;
+    if (pairs_sel.empty()) pairs = make_pairs(N, baselines);
+    else {
+        size_t i = 0;
+        while (i < pairs_sel.size()) {
+            size_t j = pairs_sel.find(',', i);
+            if (j == std::string::npos) j = pairs_sel.size();
+            std::string tok = pairs_sel.substr(i, j - i);
+            size_t c = tok.find(':');
+            if (c != std::string::npos) pairs.push_back({atoi(tok.substr(0, c).c_str()), atoi(tok.substr(c + 1).c_str())});
+            i = j + 1;
+        }
+    }
+    std::vector<PairResult> results(pairs.size());
+    std::atomic<int> next{0};
+    auto t_pairs = std::chrono::steady_clock::now();
+    std::vector<std::thread> workers;
+    std::vector<std::string> worker_err(ndev);
+    std::vector<int> per_dev(ndev, 0);
+    for (int d : devs)
+        workers.emplace_back([&, d] {
+            try {
+                CK_THROW(cudaSetDevice(d));
+                cudaStream_t s;
+                CK_THROW(cudaStreamCreate(&s));
+                AlignWork wk;
+                wk.alloc(w, h);
+                std::unordered_map<int, AlignPyramid> cache;
+                std::list<int> lru;
+                float* d_luma;
+                CK_THROW(cudaMalloc(&d_luma, (size_t)w * h * sizeof(float)));
+                auto get = [&](int k) -> AlignPyramid& {
+                    auto it = cache.find(k);
+                    if (it != cache.end()) { lru.remove(k); lru.push_back(k); return it->second; }
+                    if (cache.size() >= 24) { int old = lru.front(); lru.pop_front(); cache[old].free(); cache.erase(old); }
+                    CK_THROW(cudaMemcpyAsync(d_luma, luma_stack.data() + (size_t)k * w * h, (size_t)w * h * sizeof(float), cudaMemcpyHostToDevice, s));
+                    AlignPyramid& P = cache[k];
+                    P.build(d_luma, w, h, s);
+                    lru.push_back(k);
+                    return P;
+                };
+                AlignParams ap;
+                for (;;) {
+                    int e = next++;
+                    if (e >= (int)pairs.size()) break;
+                    auto [i, j] = pairs[e];
+                    AlignPyramid& Pi = get(i);
+                    AlignPyramid& Pj = get(j);
+                    results[e] = align_pair(Pi, Pj, i, j, wk, ap, s);
+                    ++per_dev[d];
+                }
+                for (auto& kv : cache) kv.second.free();
+                wk.free();
+                cudaFree(d_luma);
+                cudaStreamDestroy(s);
+            } catch (const std::exception& ex) { worker_err[d] = ex.what(); }
+        });
+    for (auto& t : workers) t.join();
+    for (int d : devs) if (!worker_err[d].empty()) { fprintf(stderr, "GPU %d: %s\n", d, worker_err[d].c_str()); return 1; }
+    double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_pairs).count();
+    printf("  %zu pairs in %.2f s (%.1f ms/pair)", pairs.size(), secs, 1000 * secs / pairs.size());
+    for (int d : devs) printf("%s GPU %d %d", d == devs[0] ? ";" : ",", d, per_dev[d]);
+    printf("\n");
+    fs::create_directories(out);
+    fs::path od(out);
+    if (!pairs_sel.empty()) {   // per-pair dump for validation
+        FILE* f = fopen((od / "pairs.txt").string().c_str(), "w");
+        for (auto& r : results) {
+            printf("  pair %d:%d  z %.9f%+.9fi  t %.5f %.5f  gain %.5f  ncc %.5f  n %d  iters %d  var %.3e %.3e %.3e %.3e  %s\n", r.i, r.j,
+                   r.z.real(), r.z.imag(), r.t.real(), r.t.imag(), r.gain, r.ncc, r.n_px, r.iters, r.var_a, r.var_b, r.var_tx, r.var_ty,
+                   r.ok ? "ok" : "BAD");
+            if (f) fprintf(f, "%d %d %.17g %.17g %.17g %.17g %.17g %.17g %d %d %.17g %.17g %.17g %.17g %d\n", r.i, r.j, r.z.real(), r.z.imag(),
+                           r.t.real(), r.t.imag(), r.gain, r.ncc, r.n_px, r.iters, r.var_a, r.var_b, r.var_tx, r.var_ty, r.ok ? 1 : 0);
+        }
+        if (f) fclose(f);
+        return 0;
+    }
+
+    // ---- global solve, reference, geometry, report
+    GlobalSolve G = solve_global(N, results);
+    std::vector<std::complex<double>> z0 = G.z, tf(N);
+    for (int k = 0; k < N; ++k) tf[k] = {G.t[k].real() / fx, G.t[k].imag() / fy};   // work px -> full-res px
+    int ref = choose_reference(z0, ref_rule);
+    std::vector<std::complex<double>> zr = z0, tr = tf;
+    rebase(zr, tr, ref);
+    int rect[4];
+    common_rect(zr, tr, W, H, rect);
+    double smin = 1e300, smax = -1e300;
+    for (auto& z : zr) { smin = std::min(smin, std::abs(z)); smax = std::max(smax, std::abs(z)); }
+    printf("  solve: %d/%d pairs usable, %d outliers, ncc min %.4f median %.4f; ref #%d; native crop %dx%d (L%d R%d T%d B%d); scale spread %.3f%%\n",
+           G.pairs_used, G.pairs_total, G.outliers, G.ncc_min, G.ncc_median, ref, rect[2] - rect[0] + 1, rect[3] - rect[1] + 1, rect[0],
+           W - 1 - rect[2], rect[1], H - 1 - rect[3], 100 * (smax / smin - 1));
+    FILE* f = fopen((od / "report.json").string().c_str(), "w");
+    if (!f) { fprintf(stderr, "cannot write %s\n", (od / "report.json").string().c_str()); return 1; }
+    fprintf(f, "{\n \"stack\": \"%s\",\n \"alignment\": {\"align_scale\": %g, \"baselines\": [", dir.filename().string().c_str(), align_scale);
+    for (size_t i = 0; i < baselines.size(); ++i) fprintf(f, "%s%d", i ? ", " : "", baselines[i]);
+    fprintf(f, "], \"scale_locked\": false, \"pairs_used\": %d, \"pairs_total\": %d, \"outliers\": %d, \"ncc_min\": %.17g, \"ncc_median\": %.17g},\n",
+            G.pairs_used, G.pairs_total, G.outliers, G.ncc_min, G.ncc_median);
+    fprintf(f, " \"geometry\": {\n  \"input\": {\"width\": %d, \"height\": %d, \"frames\": %d},\n  \"reference\": {\"index\": %d, \"rule\": \"%s\"},\n"
+               "  \"selected_policy\": \"native-crop\",\n  \"policies\": {\"native-crop\": {\"width\": %d, \"height\": %d, \"crop_px\": {\"left\": %d, \"right\": %d, \"top\": %d, \"bottom\": %d}}},\n"
+               "  \"scale_spread\": {\"s_min\": %.17g, \"s_max\": %.17g, \"total_pct\": %.17g}\n },\n \"per_frame\": [\n",
+            W, H, N, ref, ref_rule.c_str(), rect[2] - rect[0] + 1, rect[3] - rect[1] + 1, rect[0], W - 1 - rect[2], rect[1], H - 1 - rect[3], smin, smax,
+            100 * (smax / smin - 1));
+    for (int k = 0; k < N; ++k)
+        fprintf(f, "  {\"i\": %d, \"file\": \"%s\", \"s\": %.17g, \"theta_deg\": %.17g, \"tx\": %.17g, \"ty\": %.17g}%s\n", k,
+                paths[k].filename().string().c_str(), std::abs(zr[k]), std::arg(zr[k]) * 180.0 / 3.14159265358979323846, tr[k].real(), tr[k].imag(),
+                k + 1 < N ? "," : "");
+    fprintf(f, " ],\n \"transform_convention\": \"reference-grid centred px -> frame centred px: p_k = s e^{i theta} p + t\"\n}\n");
+    fclose(f);
+    FILE* lf = fopen((od / "list.txt").string().c_str(), "w");
+    if (lf) {
+        for (int k = 0; k < N; ++k) fprintf(lf, "%s %.17g %.17g %.17g %.17g\n", paths[k].string().c_str(), zr[k].real(), zr[k].imag(), tr[k].real(), tr[k].imag());
+        fclose(lf);
+    }
+    printf("  report.json + list.txt -> %s (rect %d,%d,%d,%d); total %.2f s\n", out.c_str(), rect[0], rect[1], rect[2], rect[3],
+           std::chrono::duration<double>(std::chrono::steady_clock::now() - t_all).count());
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) return usage();
     std::string cmd = argv[1];
@@ -1083,6 +1290,10 @@ int main(int argc, char** argv) {
     if (cmd == "stack") {
         try { return cmd_stack(argc, argv); }
         catch (const std::exception& e) { fprintf(stderr, "stack failed: %s\n", e.what()); return 1; }
+    }
+    if (cmd == "align") {
+        try { return cmd_align(argc, argv); }
+        catch (const std::exception& e) { fprintf(stderr, "align failed: %s\n", e.what()); return 1; }
     }
     return usage();
 }
