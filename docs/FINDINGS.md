@@ -179,6 +179,42 @@ and the user's B+C composite; montages: `~/Desktop/stacker_vs_helicon*.jpg`):
   mode), 163 frames → 3420 × 2214 in ~95 s. Helicon on a 3080 Ti: B ~20 s,
   C ~9–10 s at full res.
 
+## 8. B depth estimator, round 2: what fixed it (2026-11-05)
+
+Diagnosis: profiled a dark-gap patch next to the needles over all 163 frames.
+- The gap is darkest (luma 0.083) in frames 0–18, when the needles are in
+  focus and their light stays confined.
+- It brightens steadily to 0.264 by frame 162 as defocused needle light spills in.
+- Its RAW focus measure rose 5.9× over the same range (brightness-dependent
+  shot noise plus glow gradients).
+
+So in a featureless region the raw argmax picks the frame with the MOST spill.
+That is the B halo mechanism.
+
+Fixes, now the default (`depth_method="cvf"`):
+1. **Contrast-normalised focus measure**: Laplacian energy / (local mean² + 0.02²).
+2. **Cost-volume filtering**: each frame's normalised FM is aggregated with a
+   guided filter (guide = pass-1 C luma, radius 24 full-res px) before the
+   running argmax. Evidence spreads within an object; featureless areas
+   inherit a coherent depth. Order-independent, so it fits the multi-GPU fold.
+3. **Soft-label compositing**: integer labels; at boundaries the two SIDES'
+   frames are blended (blurred label indicators, σ 3 full-res px). The old
+   Gaussian blur of the depth passed through intermediate frames with nothing
+   in focus, which drew dark seams.
+
+Result:
+- Real stack: dark gaps stay dark, background patchworks and outlines are
+  gone, and B looks close to Helicon B at half res.
+- **Cn (noise-aware pyramid) is now close to the user's hand-made B+C
+  composite** (`~/Desktop/stacker_vs_helicon.jpg`, `stacker_Cn_halfres.jpg`).
+- Synthetic B: 36.2 / halo 31.8 at radius 6 (was 35.9 / 31.5).
+
+Residual: radius trade-off. Small radii (6–8) are best on synthetic and sharpest
+at depth edges, but leave dark blotches inside bright low-texture crystal on real
+data (normalisation favours darker frames where texture is weak). 24 is the real-
+data default. One faint background boundary remains at half res; the fan centre
+is a touch hazier than Helicon B at 1:1.
+
 ## Open items
 
 - **Residual flat-target roll bias**: a smooth hump of ±17 mdeg RMS per frame on far-defocused frames, antisymmetric about focus (the fitted rate is fine: 52 vs 50 mdeg/mm). Also ε reads −2.4 % (≈ 6σ). Cause unknown.
@@ -187,4 +223,5 @@ and the user's B+C composite; montages: `~/Desktop/stacker_vs_helicon*.jpg`):
   2. a specimen stack (how big is the relief bias in reality?);
   3. the same specimen with scale locked vs free.
 - Test the reversal protocol.
-- **B depth-map estimator** (see 7). Cn depends on B in low-contrast areas.
+- B depth estimator: largely fixed (see 8). Remaining: the radius trade-off;
+  maybe a two-radius cost (small for edges + large for fill).

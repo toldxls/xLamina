@@ -8,9 +8,10 @@ identical however the frames are split (test_fusion checks this).
 Methods
 -------
 A   weighted average: w = (FM + eps)^p, sum(w I) / sum(w).
-B   depth map: argmax of the focus measure -> index map -> despeckle + edge-aware
-    (guided-filter) smoothing -> second pass composes each pixel from the two
-    frames bracketing its smoothed depth.
+B   depth map by cost-volume filtering: each frame's focus measure is aggregated
+    with a guided filter (guide = A), depth = running argmax (pass 2); a third
+    pass composes each pixel from the two frames bracketing its depth. The older
+    confidence-threshold estimator is kept as depth_method="heuristic".
 C   Laplacian pyramid: per level and pixel keep the coefficient with the highest
     local energy (luma, 3x3); base level = mean.
 
@@ -78,10 +79,19 @@ def load_aligned(path, z, t, grid: Grid):
                           borderMode=cv2.BORDER_REFLECT)
 
 
-def focus_measure_rgb(img, radius=3.0):
+def focus_measure_rgb(img, radius=3.0, normalized=False, floor=0.02):
+    """Laplacian energy. ``normalized`` divides by local brightness^2: in a
+    featureless region the raw measure rises with brightness (shot noise, glow
+    gradients), so the argmax picks the frame where defocused neighbours spill
+    the MOST light in -- the B halo. Measured on the real stack: a dark gap's raw
+    FM rose 5.9x from frame 0 to 162 while it brightened 3.2x with needle glow."""
     y = img @ LUMA
     lap = cv2.Laplacian(cv2.GaussianBlur(y, (0, 0), 0.8), cv2.CV_32F, ksize=3)
-    return cv2.GaussianBlur(lap * lap, (0, 0), radius)
+    fm = cv2.GaussianBlur(lap * lap, (0, 0), radius)
+    if normalized:
+        m = cv2.GaussianBlur(y, (0, 0), 3.0 * radius)
+        fm = fm / (m * m + floor * floor)
+    return fm
 
 
 # ----------------------------------------------------------------------------- pyramids
@@ -277,8 +287,17 @@ class BCompose:
     den: np.ndarray
 
 
-def fold_b2(acc: BCompose, k, img, depth):
-    w = np.clip(1.0 - np.abs(depth - k), 0.0, 1.0)
+def fold_b2(acc: BCompose, k, img, depth, soft_sigma=None):
+    if soft_sigma:
+        # soft label compositing: blurred indicator of "label == k" -- the blurred
+        # indicators of a partition stay a partition of unity, and a boundary
+        # blends the two SIDES' frames
+        lab = (np.abs(depth - k) < 0.5).astype(np.float32)
+        if not lab.any():
+            return
+        w = cv2.GaussianBlur(lab, (0, 0), soft_sigma)
+    else:
+        w = np.clip(1.0 - np.abs(depth - k), 0.0, 1.0)
     if w.any():
         acc.num += w[:, :, None] * img
         acc.den += w
@@ -365,9 +384,49 @@ def _w_b2(chunk):
     for k in chunk:
         if k < lo - 1 or k > hi + 1:
             continue
+        if _CTX.get("soft_sigma") and not (np.abs(depth - k) < 0.5).any():
+            continue
         img = load_aligned(_CTX["paths"][k], _CTX["z"][k], _CTX["t"][k], g)
-        fold_b2(acc, k, img, depth)
+        fold_b2(acc, k, img, depth, _CTX.get("soft_sigma"))
     return acc
+
+
+def _w_agg(chunk):
+    """Cost-volume filtering, one worker's frames: edge-aware aggregate of each
+    frame's focus measure, running argmax (ties -> lower index, like merge)."""
+    g = _CTX["grid"]
+    ow, oh = g.size
+    guide, r, eps = _CTX["guide"], _CTX["agg_r"], _CTX["agg_eps"]
+    best = np.full((oh, ow), -np.inf, np.float32)
+    idx = np.zeros((oh, ow), np.int16)
+    for k in chunk:
+        img = load_aligned(_CTX["paths"][k], _CTX["z"][k], _CTX["t"][k], g)
+        agg = guided_filter(guide, focus_measure_rgb(img, _CTX["fm_radius"], normalized=True), r, eps)
+        m = agg > best
+        best[m] = agg[m]
+        idx[m] = k
+    return best, idx
+
+
+def depth_cvf(ctx, chunks, workers, order=None):
+    """Depth by cost-volume filtering (Hosni et al. style, focus instead of stereo
+    cost): no confidence thresholds -- evidence spreads within an object (the
+    guide's edges stop it), so featureless areas inherit their object's depth
+    instead of a noise-driven argmax."""
+    with ProcessPoolExecutor(max_workers=workers, initializer=_w_init, initargs=(ctx,)) as ex:
+        parts = list(ex.map(_w_agg, chunks))
+    ids = list(order) if order is not None else list(range(len(parts)))
+    best, idx = parts[ids[0]]
+    best, idx = best.copy(), idx.copy()
+    for i in ids[1:]:
+        b2, i2 = parts[i]
+        m = _take(best, idx, b2, i2)
+        best[m] = b2[m]
+        idx[m] = i2[m]
+    # integer labels; boundaries are blended in composition (soft labels), NOT by
+    # blurring the depth -- a blurred jump passes through intermediate frames
+    # that have nothing in focus there (dark seams)
+    return cv2.medianBlur(idx.astype(np.float32), 5), best
 
 
 def _chunks(n, parts):
@@ -377,7 +436,8 @@ def _chunks(n, parts):
 
 
 def run(paths, z, t, grid: Grid, workers=None, radius_px=6.0, power=4.0, smoothing_px=8,
-        log=print, order=None):
+        log=print, order=None, depth_method="cvf", agg_radius_px=24.0, agg_eps=1e-4,
+        fm_radius_px=2.0, guide="C", soft_px=3.0):
     """Full fusion. Window sizes are in FULL-RES sensor pixels (scaled to the grid
     so results don't depend on the working scale). ``order`` permutes the merge
     order of partial states (tests)."""
@@ -399,7 +459,20 @@ def run(paths, z, t, grid: Grid, workers=None, radius_px=6.0, power=4.0, smoothi
     for i in idx[1:]:
         st = merge(st, parts[i])
     log(f"  pass 1 (A, B-depth, C) folded {n} frames in {len(parts)} parts, {levels} pyramid levels")
-    depth_s, conf = smooth_depth_map(st, smoothing, fill_sigmas=fill)
+    if depth_method == "cvf":
+        if guide == "C":     # crisp edges stop aggregation crossing depth steps
+            g_img = collapse(st.c_coef + [(st.c_base / max(st.count, 1)).astype(np.float32)])
+        else:
+            g_img = (st.a_num / np.maximum(st.a_den, 1e-30)[:, :, None]).astype(np.float32)
+        ctx.update(guide=np.clip(g_img @ LUMA, 0, 1).astype(np.float32),
+                   agg_r=max(2, int(round(agg_radius_px * grid.scale))), agg_eps=agg_eps,
+                   fm_radius=max(0.8, fm_radius_px * grid.scale),
+                   depth_blur=max(0.8, 2.0 * grid.scale))
+        depth_s, conf = depth_cvf(ctx, chunks, workers, order)
+        ctx["soft_sigma"] = max(0.8, soft_px * grid.scale)
+        log(f"  pass 2 (cost-volume-filtered depth, r={ctx['agg_r']} px) done")
+    else:
+        depth_s, conf = smooth_depth_map(st, smoothing, fill_sigmas=fill)
     ctx["depth"] = depth_s
     with ProcessPoolExecutor(max_workers=workers, initializer=_w_init, initargs=(ctx,)) as ex:
         accs = list(ex.map(_w_b2, chunks))
@@ -407,7 +480,7 @@ def run(paths, z, t, grid: Grid, workers=None, radius_px=6.0, power=4.0, smoothi
     den = sum(a.den for a in accs)
     b_img = (num / np.maximum(den, 1e-12)[:, :, None]).astype(np.float32)
     b_img = np.where((den > 1e-6)[:, :, None], b_img, st.b_col)
-    log("  pass 2 (B composition) done")
+    log("  B composition pass done")
     # Noise per pyramid level from two ADJACENT middle frames: their coefficient
     # difference is ~sqrt(2) x noise; the MAD ignores the few pixels whose focus
     # changed. (Frame 0's own coefficient MAD includes real detail -> sigma too
