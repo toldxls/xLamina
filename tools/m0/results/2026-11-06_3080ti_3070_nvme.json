@@ -1,0 +1,10 @@
+{
+ "frame_bytes": 193766400, "reps": 10,
+ "gpus": [
+  {"dev": 0, "name": "NVIDIA GeForce RTX 3080 Ti", "bus": "0000:01:00.0", "sms": 80, "mem_bytes": 12884377600, "pcie_gen": 1, "pcie_width": 8, "pcie_gen_max": 4, "pcie_width_max": 16, "power_limit_w": 400, "h2d_pinned_gbps": 13.343, "h2d_pageable_gbps": 12.972, "d2h_pinned_gbps": 13.180, "ms": {"luma": 0.396, "warp": 0.319, "focus": 2.241, "pyrdown": 0.198}},
+  {"dev": 1, "name": "NVIDIA GeForce RTX 3070", "bus": "0000:03:00.0", "sms": 46, "mem_bytes": 8589410304, "pcie_gen": 1, "pcie_width": 8, "pcie_gen_max": 3, "pcie_width_max": 16, "power_limit_w": 220, "h2d_pinned_gbps": 6.677, "h2d_pageable_gbps": 6.582, "d2h_pinned_gbps": 6.594, "ms": {"luma": 0.800, "warp": 0.637, "focus": 4.084, "pyrdown": 0.395}}
+ ],
+ "concurrent_h2d_ms": 29.052,
+ "host_memcpy_gbps": {"1": 23.02, "8": 25.93},
+ "read": {"dir": "C:\Users\user\Pictures\2026_10_31", "files": 163, "bytes": 31587659312, "threads": 8, "unbuffered_gbps": 6.499, "buffered_gbps": 6.554}
+}

@@ -394,6 +394,60 @@ The specimen is tyuyamunite: thin plates whose edges, seen edge-on, image as bri
   → 0.0199. The fan's glint blob shrinks to a small highlight like Helicon's;
   plate outlines are closer to single. Matrix and backgrounds unchanged.
 
+## 15. M0 on the PC: measure before optimising (2026-11-06)
+
+Machine: Ryzen 9 7950X3D, 192 GB DDR5, ASUS ProArt X670E-Creator, Windows 11,
+driver 621.01, CUDA 13.5, MSVC 19.44. `tools/m0/m0_bench.cu`, built with
+`tools/build.cmd`; raw numbers in `tools/m0/results/`.
+
+- **Cards.** RTX 3080 Ti in PCIEX16_1 at **Gen4 x8** (the BIOS has PCIEX16_2 set
+  to x8 mode, which halves slot 1). RTX **3070** (plain, 8 GB; not the 3070 Ti in
+  DESIGN.md) in PCIEX16_2 on a riser cable that only links at **Gen3 x8**: the
+  card was invisible on Auto and forced Gen4 and appeared at Gen3.
+- **Python reproduction.** `score_b.py` gave the Mac's numbers exactly (RMSE
+  0.0228 / 0.0199, glare 2.3 %, depth 46 %); alignment transforms agree to
+  3e-6 px. 13 tests pass, 1 xfail. Analysis 6 min, half-res fusion ~3.5 min on
+  the CPU (vs 3 / 2.5 min on the M3 Pro).
+
+Per frame (6960 × 4640 × 16-bit RGB = 193.8 MB), median of 10:
+
+| | 3080 Ti (Gen4 x8) | 3070 (Gen3 x8) |
+|---|---|---|
+| H2D pinned / pageable | 13.3 / 13.0 GB/s (14.5 ms) | 6.7 / 6.6 GB/s (29 ms) |
+| D2H pinned | 13.2 GB/s | 6.6 GB/s |
+| uint16 → luma | 0.40 ms | 0.80 ms |
+| similarity warp (texture) | 0.32 ms | 0.64 ms |
+| focus measure (blur 0.8 → Laplacian² → blur 3) | 2.24 ms | 4.08 ms |
+| pyrDown level | 0.20 ms | 0.40 ms |
+| those four together | 3.2 ms (317 fps) | 5.9 ms (169 fps) |
+
+Host: memcpy 23–26 GB/s whatever the thread count (dual-channel DDR5, one
+crossing). RAM disk (Q:) 16.7 GB/s with 8 reader threads, **20 GB/s with 16**,
+unbuffered; the Windows file cache reads at the same 17–20 GB/s. The NVMe
+source folder reads at 6.5 GB/s. Both GPUs uploading at once: no interference,
+each keeps its own rate (13.3 + 6.7 GB/s).
+
+What it means:
+1. **Both cards are PCIe-bound, by 4–5×.** The 3080 Ti computes a frame's
+   kernels in 3 ms and uploads it in 14.5 ms. A second GPU helps because it adds
+   a link, not because it adds compute. The 3080 Ti at x16 would double its
+   upload rate; that needs the 3070 out of PCIEX16_2.
+2. **Stack upload for 163 frames: ~1.6 s** with both links busy; reading from the
+   RAM disk ~1.6–1.9 s; kernels ~0.4 s. So one pass over the stack is ~2 s if
+   reads, uploads and kernels overlap, ~4 s if they don't. Helicon's B at 20 s
+   and C at 10 s are beatable with room to spare; DESIGN's 3–5 s target for a
+   200-frame two-pass job is tight but plausible.
+3. **Host memory is the next ceiling.** memcpy saturates at ~25 GB/s, so every
+   extra copy of a frame costs ~8 ms, as much as a whole frame's kernels on the
+   3080 Ti. The reader must `ReadFile` **directly into the pinned ring**
+   (unbuffered, page-aligned), not read then copy; and the RAM disk should be
+   read with ≥16 threads.
+4. Uncompressed TIFF decode is a memcpy (DESIGN §3), so it is covered by the
+   memcpy figure; no separate decode benchmark was needed.
+5. Not measured yet: power-limited runs (`nvidia-smi -pl` needs admin) and
+   per-card scaling with 2–3 streams; M2's scheduler gets those from the real
+   fold kernels.
+
 ## Open items
 
 - **Residual flat-target roll bias**: a smooth hump of ±17 mdeg RMS per frame on far-defocused frames, antisymmetric about focus (the fitted rate is fine: 52 vs 50 mdeg/mm). Also ε reads −2.4 % (≈ 6σ). Cause unknown.
