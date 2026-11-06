@@ -582,6 +582,41 @@ warped frame, measure scratch), so the 3070 holds one slot and cannot
 overlap upload with compute; it contributes 47 of 163 frames beside the
 3080 Ti. The slot count is now chosen per GPU from free memory.
 
+## 19. Port step 4: the depth-map input volume (2026-11-06)
+
+`core/src/volume.cu` (+ `imgops.cu`, the shared OpenCV-faithful primitives
+the fold now uses too), `stackcli fold --volume`,
+`tools/validate/check_volume.py`. In the same streaming pass as the fold,
+every warped frame is resized (INTER_AREA) to the fixed depth resolution
+(1710 × 1107 here, whatever the output scale), measured
+(`focus_measure_rgb(normalized=True)`, blurred luma) and kept on its GPU as
+float16 slices. After the merge, the first GPU collapses the merged C
+pyramid into the guide (luma, clipped), resizes it to the depth grid, and
+each GPU aggregates its own slices with the guided filter (r = 8, ε = 1e-4),
+clamps and square-roots them; the host gathers plane-major `V` and `Lv`.
+
+Checked on frames 0 / 54 / 81 / 108 / 162 at half res, each operation on
+the same inputs the prototype would see:
+
+| operation | agreement |
+|---|---|
+| fm, lum slices (float16) | identical at 94–99 % of pixels, max 1 ulp (1e-3) |
+| pyramid collapse (same state) | max 2e-7 |
+| INTER_AREA resize (same guide) | max 6e-8 |
+| guided-filter aggregation (same slice + guide) | max 4e-5, rms 4e-8 |
+| V end to end vs all-Python | rms 1e-5; 0.0001 % of pixels beyond 1e-2 (C near-ties, §18) |
+
+- `cv::resize` INTER_AREA has two paths: integer factors sum the cells
+  (half res: exactly 2 × 2); anything else, e.g. 4429 → 1107 at full res
+  (factor 4.0009), uses weighted overlaps (`computeResizeAreaTab`). Both are
+  reproduced with OpenCV's float summation order.
+- The per-frame slice costs ~0.5 ms on the 3080 Ti and hides inside the
+  ingest budget: pass 1 with the volume on is **2.5 s at half res and 2.6 s
+  at full res** on both GPUs (3.2 s on the 3080 Ti alone), unchanged from
+  the fold without it. Guide + aggregation + gathering the 2.4 GB of volumes
+  to the host adds 0.65–0.9 s, almost all transfers, done serially per slice
+  (an obvious later optimisation; SGM will want `V` on one GPU anyway).
+
 ## Open items
 
 - **Residual flat-target roll bias**: a smooth hump of ±17 mdeg RMS per frame on far-defocused frames, antisymmetric about focus (the fitted rate is fine: 52 vs 50 mdeg/mm). Also ε reads −2.4 % (≈ 6σ). Cause unknown.
