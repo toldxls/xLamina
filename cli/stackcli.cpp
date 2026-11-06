@@ -32,6 +32,7 @@
 
 #include "stackcore/align.h"
 #include "stackcore/compose.h"
+#include "version.h"
 
 #include <atomic>
 #include <list>
@@ -66,10 +67,12 @@ using namespace stackcore;
 
 static int usage() {
     fprintf(stderr,
+            "xLamina " XLAMINA_VERSION " - multi-GPU photomicroscopy stacker\n"
             "usage:\n"
             "  stackcli run DIR [--out DIR] [--prefix IMG_] [--scale 1|0.5] [--outputs B,C,Cn] [--ref middle] [--lock-scale 1]\n"
             "               [--fov-mm X | --um-per-px X] [--gpus 0,1] [--streams 2] [--align-scale 0.25] [--baselines 1,2,4,8]\n"
-            "               align the frames in DIR and fuse them: report.json + 16-bit TIFFs in DIR_stacker (or --out)\n"
+            "               align the TIFF frames in DIR (all of them, or those starting with --prefix) and fuse them:\n"
+            "               report.json + 16-bit TIFFs in DIR_stacker (or --out). Outputs: A B B0 C CB Cn CBn Cd Cg Cg2 H\n"
             "  developer commands:\n"
             "  stackcli probe FILE.tif\n"
             "  stackcli dump FILE.tif OUT.f32 [--gpu N]\n"
@@ -1121,7 +1124,7 @@ static int run_stack(StackOptions& so) {
 
 struct AlignOptions {
     fs::path dir;
-    std::string out, prefix = "IMG_", ref_rule = "middle", pairs_sel;
+    std::string out, prefix, ref_rule = "middle", pairs_sel;   // prefix empty = every TIFF in the folder
     double align_scale = 0.25;
     std::vector<int> baselines = {1, 2, 4, 8}, devs;
     int readers = 16;
@@ -1417,6 +1420,7 @@ static int cmd_run(int argc, char** argv) {
 int main(int argc, char** argv) {
     if (argc < 2) return usage();
     std::string cmd = argv[1];
+    if (cmd == "--version" || cmd == "-v") { printf("xLamina %s\n", XLAMINA_VERSION); return 0; }
     if (cmd == "probe") return cmd_probe(argc, argv);
     if (cmd == "dump") return cmd_dump(argc, argv);
     if (cmd == "stream") return cmd_stream(argc, argv);

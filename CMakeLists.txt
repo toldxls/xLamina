@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
-project(Stacker LANGUAGES CXX CUDA)
+project(xLamina LANGUAGES CXX CUDA)
+
+# static C runtime: the executables depend on nothing but the NVIDIA driver
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,3 +29,6 @@ endif()
 add_subdirectory(core)
 add_subdirectory(cli)
 add_subdirectory(tools/m0)
+
+install(TARGETS stackcli RUNTIME DESTINATION .)
+install(FILES README.md LICENSE DESTINATION .)
