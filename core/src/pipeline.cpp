@@ -780,6 +780,8 @@ static void downsample_preview(const std::vector<float>& img, int w, int h, int 
 }
 
 static int run_stack_once(StackOptions& so);
+static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std::chrono::steady_clock::time_point t_all,
+                           std::vector<float>* noise_cache);
 
 // Returns the GPUs' pooled memory (cudaMallocAsync keeps freed blocks for the process): another xLamina or
 // stackcli on the same cards would otherwise find them short between renders.
@@ -848,16 +850,31 @@ static int run_stack_once(StackOptions& so) {
     struct FreeState { FoldState& s; ~FreeState() { s.free(); } } free_state{P.dst};   // the merged state lives on devs[0] until the end
     if (int r = run_pass1(po, P)) return r;
     if (hooks.cancelled()) return 3;
-    const int K = (int)P.paths.size();
-    const int ow = P.g.out_w(), oh = P.g.out_h();
-    const size_t no = (size_t)ow * oh, nd = (size_t)P.vp.dw * P.vp.dh;
-    const int prim = P.devs[0];
     logf("pass 1: %.2f s setup, %.2f s stream + %.2f s merge + %.2f s volume\n", P.setup_seconds, P.st.seconds, P.merge_seconds, P.vol_seconds);
     if (so.result) {
         so.result->pass1_seconds = since(t_all);
         so.result->frames_per_second = P.st.seconds > 0 ? P.st.frames / P.st.seconds : 0;
     }
 
+    return fuse_from_pass1(so, P, true, t_all, nullptr);
+}
+
+// The fusion from a finished pass 1: the depth map, the refinement, the composition, the finalize and the
+// outputs. run_stack_once calls it once; run_sweep calls it once per parameter set over one pass 1, keeping the
+// pinned host volume (release_volume = false) and the two-frame noise estimate (noise_cache) between variants.
+static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std::chrono::steady_clock::time_point t_all,
+                           std::vector<float>* noise_cache) {
+    Pass1Options& po = so.po;
+    const Hooks& hooks = so.hooks;
+    const std::string& out = so.out;
+    const int refine_r = so.refine_r, streams = so.streams;
+    const double refine_fm_px = so.refine_fm_px, soft_px = so.soft_px;
+    auto since = [](std::chrono::steady_clock::time_point t) { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count(); };
+    auto stage = [&](const char* name, double f) { if (hooks.progress) hooks.progress(name, f); };
+    const int K = (int)P.paths.size();
+    const int ow = P.g.out_w(), oh = P.g.out_h();
+    const size_t no = (size_t)ow * oh, nd = (size_t)P.vp.dw * P.vp.dh;
+    const int prim = P.devs[0];
     // ---- depth (SGM) on the primary GPU
     stage("depth map", 0.0);
     auto t1 = std::chrono::steady_clock::now();
@@ -902,9 +919,7 @@ static int run_stack_once(StackOptions& so) {
             }
             cudaFree(d_stage); cudaFree(d_stage16);
         }
-        P.V_all.release_async();
-        P.fm_all.release_async();
-        P.lum_all.release_async();
+        if (release_volume) { P.V_all.release_async(); P.fm_all.release_async(); P.lum_all.release_async(); }
         DepthParams dp;
         dp.halo_prior = (float)so.halo_prior;
         dp.dark_prior = (float)so.dark_prior;
@@ -1058,7 +1073,8 @@ static int run_stack_once(StackOptions& so) {
     // ---- noise from two adjacent middle frames, then finalize
     auto t4 = std::chrono::steady_clock::now();
     std::vector<float> noise_mad;
-    {
+    if (noise_cache && !noise_cache->empty()) noise_mad = *noise_cache;   // the sweep: the same two frames every variant
+    else {
         int mid = std::max(0, K / 2 - 1);
         float* d_pair[2];
         for (int j = 0; j < 2; ++j) {
@@ -1074,6 +1090,7 @@ static int run_stack_once(StackOptions& so) {
         }
         noise_mad = noise_from_pair(d_pair[0], d_pair[1], ow, oh, P.fp.levels, s);
         cudaFree(d_pair[0]); cudaFree(d_pair[1]);
+        if (noise_cache) *noise_cache = noise_mad;
     }
     FinalParams fpar;
     fpar.c_smoothing = (float)so.c_smoothing;
@@ -1135,6 +1152,7 @@ static int run_stack_once(StackOptions& so) {
         fprintf(mf, "\noutputs");
         for (auto& nme : F.names) fprintf(mf, " %s", nme.c_str());
         fprintf(mf, "\n");
+        if (!so.note.empty()) fprintf(mf, "options %s\n", so.note.c_str());
         fclose(mf);
     }
     for (auto& t : writers) t.join();
@@ -1149,6 +1167,121 @@ static int run_stack_once(StackOptions& so) {
     stage("done", 1.0);
     return 0;
 }
+
+// ----------------------------------------------------------------------------- sweep: many B's over one pass 1
+
+// Everything in Pass1Options that changes pass 1's result: variants with the same key share one pass 1 + volume.
+static std::string pass1_key(const Pass1Options& po) {
+    char b[512];
+    snprintf(b, sizeof b, "%g|%g|%g|%g|%g|%g|%g|%g|%g|%g|%d,%d,%d,%d|%g|%d", po.radius_px, po.power, po.c_radius_px, po.b_radius_px,
+             po.depth_fraction, po.depth_fm_px, po.vol_agg_px, po.flat_blur_px, po.flat_reach_px, po.flat_min, po.g.x0, po.g.y0, po.g.x1,
+             po.g.y1, po.g.scale, (int)po.frames_sel.size());
+    std::string k = b;
+    for (int f : po.frames_sel) k += "," + std::to_string(f);
+    return k;
+}
+
+static std::string json_str(const std::string& s) {
+    std::string o = "\"";
+    for (char c : s) {
+        if (c == '"' || c == '\\') { o += '\\'; o += c; }
+        else if ((unsigned char)c < 0x20) { char b[8]; snprintf(b, sizeof b, "\\u%04x", c); o += b; }
+        else o += c;
+    }
+    return o + "\"";
+}
+
+int run_sweep(const StackOptions& base, const std::vector<SweepVariant>& variants, const std::string& out_dir) {
+    if (variants.empty()) { logf("sweep: no variants"); return 2; }
+    auto t_all = std::chrono::steady_clock::now();
+    auto since = [](std::chrono::steady_clock::time_point t) { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count(); };
+    // each variant's options on top of the base; group by what pass 1 sees
+    struct Prepared { StackOptions so; std::string key, note; };
+    std::vector<Prepared> prep;
+    for (auto& v : variants) {
+        Prepared p{base, "", ""};
+        for (auto& [a, val] : v.options) {
+            if (!parse_stack_option(a, val, p.so)) { logf("sweep: variant %s: unknown option %s", v.name.c_str(), a.c_str()); return 2; }
+            p.note += (p.note.empty() ? "" : " ") + a + " " + val;
+        }
+        p.key = pass1_key(p.so.po);
+        p.so.note = p.note;
+        p.so.out = (fs::path(out_dir) / v.name).string();
+        p.so.result = nullptr;
+        prep.push_back(std::move(p));
+    }
+    std::vector<std::string> groups;   // pass-1 keys in order of first appearance
+    for (auto& p : prep) if (std::find(groups.begin(), groups.end(), p.key) == groups.end()) groups.push_back(p.key);
+    logf("sweep: %zu variants in %zu pass-1 group(s) -> %s", variants.size(), groups.size(), out_dir.c_str());
+
+    // one frame cache for the whole sweep: the frames are read once and stay pinned across groups
+    std::unique_ptr<FrameCache> own_cache;
+    if (base.cache_frames && !base.po.opt.cache) own_cache = std::make_unique<FrameCache>();
+    FrameCache* cache = base.cache_frames ? (base.po.opt.cache ? base.po.opt.cache : own_cache.get()) : nullptr;
+    if (cache) {
+        std::vector<fs::path> paths = base.po.paths;
+        std::vector<Similarity> T;
+        if (paths.empty() && !base.po.list.empty()) read_list(base.po.list, paths, T);
+        cache->prepare(paths);
+    }
+
+    struct Done { std::string name, dir, note; int group; int rc; double seconds; };
+    std::vector<Done> done;
+    auto write_manifest = [&] {
+        fs::create_directories(out_dir);
+        FILE* f = fopen((fs::path(out_dir) / "sweep.json").string().c_str(), "w");
+        if (!f) return;
+        fprintf(f, "{\n  \"list\": %s,\n  \"base\": %s,\n  \"variants\": [\n", json_str(base.po.list.generic_string()).c_str(), json_str(base.note).c_str());
+        for (size_t i = 0; i < done.size(); ++i) {
+            auto& d = done[i];
+            fprintf(f, "    {\"name\": %s, \"dir\": %s, \"options\": %s, \"pass1_group\": %d, \"rc\": %d, \"seconds\": %.2f}%s\n", json_str(d.name).c_str(),
+                    json_str(d.dir).c_str(), json_str(d.note).c_str(), d.group, d.rc, d.seconds, i + 1 < done.size() ? "," : "");
+        }
+        fprintf(f, "  ]\n}\n");
+        fclose(f);
+    };
+
+    int failed = 0;
+    for (size_t gi = 0; gi < groups.size(); ++gi) {
+        // pass 1 + volume once for the group, from the first variant's pass-1 options
+        size_t first = 0;
+        while (prep[first].key != groups[gi]) ++first;
+        Pass1Options po = prep[first].so.po;
+        po.volume = true;
+        po.hooks = base.hooks;
+        po.opt.cache = cache;
+        po.with_a = false;   // A is never a sweep output
+        auto t_g = std::chrono::steady_clock::now();
+        Pass1 P;
+        struct FreeState { FoldState& s; ~FreeState() { s.free(); } } free_state{P.dst};
+        if (int r = run_pass1(po, P)) {
+            logf("sweep: pass 1 of group %zu failed (rc %d)%s", gi + 1, r, r == 4 ? "; out of GPU memory: put --depth-fraction 0.25 in those variants" : "");
+            for (size_t i = 0; i < prep.size(); ++i)
+                if (prep[i].key == groups[gi]) { done.push_back({variants[i].name, prep[i].so.out, prep[i].note, (int)gi + 1, r, 0.0}); ++failed; }
+            write_manifest();
+            continue;
+        }
+        logf("sweep: group %zu pass 1 + volume %.2f s", gi + 1, since(t_g));
+        std::vector<float> noise;
+        for (size_t i = 0; i < prep.size(); ++i) {
+            if (prep[i].key != groups[gi]) continue;
+            if (base.hooks.cancelled()) return 3;
+            auto t_v = std::chrono::steady_clock::now();
+            StackOptions so = prep[i].so;
+            so.po.volume = true;
+            so.po.hooks = base.hooks;
+            so.po.opt.cache = cache;
+            logf("sweep: %s  [%s]", variants[i].name.c_str(), prep[i].note.empty() ? "base" : prep[i].note.c_str());
+            int rc = fuse_from_pass1(so, P, false, t_v, &noise);
+            if (rc) ++failed;
+            done.push_back({variants[i].name, so.out, prep[i].note, (int)gi + 1, rc, since(t_v)});
+            write_manifest();
+        }
+    }
+    logf("sweep: %zu variants, %d failed, %.1f s total -> %s", done.size(), failed, since(t_all), (fs::path(out_dir) / "sweep.json").string().c_str());
+    return failed ? 1 : 0;
+}
+
 
 // ----------------------------------------------------------------------------- align
 

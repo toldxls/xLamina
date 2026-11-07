@@ -88,6 +88,9 @@ static int usage() {
             "  stackcli depth VOLDIR --out DIR [--crop X0,Y0,W,H] [--gpu N] [--dirs 8]\n"
             "  stackcli stack LIST.txt --rect X0,Y0,X1,Y1 --out DIR [--scale 1|0.5] [--gpus 0,1] [--streams 2]\n"
             "                 [--refine-r 12] [--refine-fm-px 9] [--soft-px 3] [--smoothing 0] [--c-radius 0]   the whole fusion -> 16-bit TIFFs\n"
+            "  stackcli sweep LIST.txt --rect X0,Y0,X1,Y1 --out DIR --grid GRID.txt [stack options as the base]   one pass 1, then a B per variant\n"
+            "                 GRID.txt: one line per set, '--sgm-p1 0.03,0.06 --dark-prior 0,1' = every combination of the comma lists;\n"
+            "                 a line 'base' = the base options alone; # comments. Variants write DIR\\<name>\\B.tif; DIR\\sweep.json lists them\n"
             "  stackcli align DIR --out DIR [--prefix IMG_] [--align-scale 0.25] [--baselines 1,2,4,8] [--ref middle]\n"
             "                 [--gpus 0,1] [--pairs i:j,...]      alignment -> report.json + list.txt (+ per-pair dump)\n");
     return 2;
@@ -537,6 +540,76 @@ static int cmd_stack(int argc, char** argv) {
     return run_stack(so);
 }
 
+// ----------------------------------------------------------------------------- sweep: one pass 1, many B's
+
+#include <fstream>
+#include <sstream>
+
+// The grid file: one line per set of alternatives, "--opt v1,v2 --opt2 v3" expands to every combination; a line
+// "base" is the base options alone; # starts a comment. Variants are named from their options ("sgm-p1-0.06_dark-prior-0").
+static std::vector<SweepVariant> read_grid(const fs::path& file) {
+    std::ifstream in(file);
+    if (!in) throw std::runtime_error("cannot read the grid file " + file.string());
+    std::vector<SweepVariant> all;
+    std::string line;
+    int lineno = 0;
+    while (std::getline(in, line)) {
+        ++lineno;
+        if (size_t h = line.find('#'); h != std::string::npos) line = line.substr(0, h);
+        std::istringstream ss(line);
+        std::string a, v;
+        std::vector<std::pair<std::string, std::vector<std::string>>> opts;
+        while (ss >> a) {
+            if (a == "base" && opts.empty()) { all.push_back({"base", {}}); break; }
+            if (a.rfind("--", 0) != 0) throw std::runtime_error("grid line " + std::to_string(lineno) + ": expected an option, got " + a);
+            if (!(ss >> v)) throw std::runtime_error("grid line " + std::to_string(lineno) + ": " + a + " has no value");
+            std::vector<std::string> vals;
+            std::istringstream vs(v);
+            for (std::string x; std::getline(vs, x, ',');) if (!x.empty()) vals.push_back(x);
+            if (vals.empty()) throw std::runtime_error("grid line " + std::to_string(lineno) + ": " + a + " has no value");
+            opts.push_back({a, vals});
+        }
+        if (opts.empty()) continue;
+        std::vector<SweepVariant> vars(1);   // the cartesian product of the line's lists
+        for (auto& [opt, vals] : opts) {
+            std::vector<SweepVariant> next;
+            for (auto& b : vars)
+                for (auto& val : vals) { SweepVariant s = b; s.options.push_back({opt, val}); next.push_back(s); }
+            vars.swap(next);
+        }
+        for (auto& s : vars) {
+            for (auto& [opt, val] : s.options) s.name += (s.name.empty() ? "" : "_") + opt.substr(2) + "-" + val;
+            all.push_back(s);
+        }
+    }
+    return all;
+}
+
+static int cmd_sweep(int argc, char** argv) {
+    if (argc < 3) return usage();
+    StackOptions so;
+    so.po.list = argv[2];
+    so.po.opt.streams_per_gpu = 2;
+    so.outputs = {"B"};
+    bool have_rect = false;
+    std::string out, grid;
+    Grid& g = so.po.g;
+    int i = 3;
+    for (; i + 1 < argc; i += 2) {
+        std::string a = argv[i], v = argv[i + 1];
+        if (a == "--rect") { auto d = parse_doubles(v); if (d.size() != 4) return usage(); g.x0 = (int)d[0]; g.y0 = (int)d[1]; g.x1 = (int)d[2]; g.y1 = (int)d[3]; have_rect = true; }
+        else if (a == "--out") out = v;
+        else if (a == "--grid") grid = v;
+        else if (parse_stack_option(a, v, so)) so.note += (so.note.empty() ? "" : " ") + a + " " + v;   // the base, for sweep.json
+        else return usage();
+    }
+    if (i < argc) { fprintf(stderr, "option %s has no value\n", argv[i]); return usage(); }
+    if (out.empty() || grid.empty() || !have_rect) return usage();
+    std::vector<SweepVariant> variants = read_grid(grid);
+    if (variants.empty()) { fprintf(stderr, "the grid file has no variants\n"); return 2; }
+    return run_sweep(so, variants, out);
+}
+
 static int cmd_align(int argc, char** argv) {
     if (argc < 3) return usage();
     AlignOptions ao;
@@ -585,6 +658,10 @@ int main(int argc, char** argv) {
     if (cmd == "stack") {
         try { return cmd_stack(argc, argv); }
         catch (const std::exception& e) { fprintf(stderr, "stack failed: %s\n", e.what()); return 1; }
+    }
+    if (cmd == "sweep") {
+        try { return cmd_sweep(argc, argv); }
+        catch (const std::exception& e) { fprintf(stderr, "sweep failed: %s\n", e.what()); return 1; }
     }
     if (cmd == "align") {
         try { return cmd_align(argc, argv); }

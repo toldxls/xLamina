@@ -175,9 +175,20 @@ struct StackOptions {
         double frames_per_second = 0;             // pass 1's streaming rate
     };
     Result* result = nullptr;
+    std::string note;                  // free text recorded in stack.txt as "options ...": the sweep's variant options
 };
 bool parse_stack_option(const std::string& a, const std::string& v, StackOptions& so);
 int run_stack(StackOptions& so);
+
+// ---- the sweep: one alignment, one pass 1 + volume per group of pass-1 settings, then the depth map, refinement,
+// composition and B for every variant (about 6 s each against 12 s for a whole `stack`). Variants are the base
+// StackOptions with their options applied through parse_stack_option; each writes to out_dir/<name>/ and the
+// sweep writes out_dir/sweep.json (name, dir, options, pass-1 group, rc, seconds) after every variant.
+struct SweepVariant {
+    std::string name;
+    std::vector<std::pair<std::string, std::string>> options;   // ("--sgm-p1", "0.06"), ...
+};
+int run_sweep(const StackOptions& base, const std::vector<SweepVariant>& variants, const std::string& out_dir);
 
 // ---- alignment
 
