@@ -122,7 +122,12 @@ struct AsyncPreview {
     std::chrono::steady_clock::time_point last{};   // when the last preview was enqueued
     // Every preview copy, of any size, costs the uploads about 3 ms of link time (measured: Low and Medium
     // live views cost the same), so views are rate-limited per owner; the eye needs no more than this anyway.
-    bool due(int min_ms) const { return std::chrono::steady_clock::now() - last >= std::chrono::milliseconds(min_ms); }
+    // Large views (Full: 365 MB each) are limited further, to about 1 GB/s per owner, or the GUI thread drowns.
+    bool due(int min_ms) const {
+        int ms = std::max(min_ms, (int)(bytes_ / 1000000));
+        return std::chrono::steady_clock::now() - last >= std::chrono::milliseconds(ms);
+    }
+    size_t bytes_ = 0;
     int k = -1, pw = 0, ph = 0;
     const char* name = nullptr;   // a "building" preview's name; null = a frame view (hooks.frame)
 
@@ -130,6 +135,7 @@ struct AsyncPreview {
         int pw_, ph_;
         preview_size(w, hgt, down, pw_, ph_);
         size_t bytes = (size_t)pw_ * ph_ * 3 * sizeof(float);
+        bytes_ = bytes;
         // (not mapped host memory: a kernel writing the preview over the link made the fusion 4x slower)
         CK_THROW(cudaMalloc(&d, bytes));
         CK_THROW(cudaHostAlloc((void**)&h, bytes, cudaHostAllocPortable));
@@ -301,6 +307,8 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
     size_t npx_full = (size_t)g.W * g.H, npx_out = (size_t)ow * oh;
     opt.streams_by_device.clear();
     auto t_setup = std::chrono::steady_clock::now();
+    std::vector<int> dropped;   // cards that cannot hold the volume slices beside their state (the 3070 at 1/2 resolution)
+    std::vector<int> caps;      // per kept card: the most frames it may take (0 = any number)
     for (int d : devs) {
         auto& D = ctx[d];
         D.dev = d;
@@ -318,12 +326,38 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         size_t per_slot = slot_bytes + t0.pixel_bytes() + 2 * kReadAlign;
         size_t fr, tot;
         CK(cudaMemGetInfo(&fr, &tot));
-        // the depth-volume slices stay on the GPU until the aggregation: budget for every frame landing here
-        size_t margin = (512u << 20) + (volume ? (size_t)K * vp.dw * vp.dh * 4 : 0);
-        int fit = fr > margin ? (int)((fr - margin) / per_slot) : 0;
-        int S = std::max(1, std::min(opt.streams_per_gpu, fit));
-        if (fit < 1) logf("GPU %d: not enough memory for the state plus one slot (%.2f GB free)\n", d, fr / 1e9);
+        // the depth-volume slices stay on the GPU until the aggregation (4 bytes per depth pixel per frame). A
+        // card keeps as many slots as leave room for every frame's slice. Failing that, the first card runs on
+        // one slot regardless (the depth stage needs it), and another card takes a capped share of the frames
+        // (what its slice room allows beside one slot) or, if that is under a quarter of the stack, sits the
+        // job out rather than run out of memory mid-pass (the 3070 at 1/2 resolution; FINDINGS 32)
+        const size_t slice = volume ? (size_t)vp.dw * vp.dh * 4 : 0;
+        const size_t avail = fr > (512u << 20) ? fr - (512u << 20) : 0;
+        int S = 0, cap = 0;
+        for (int s = opt.streams_per_gpu; s >= 1 && S == 0; --s)
+            if (avail >= (size_t)s * per_slot + slice * K) S = s;
+        if (S == 0) {
+            size_t room = avail > per_slot ? avail - per_slot : 0;
+            int frames_fit = slice ? (int)std::min<size_t>((size_t)K, room / slice) : K;
+            if (d == devs[0] || devs.size() - dropped.size() == 1) {
+                S = 1;
+                if (frames_fit < K) logf("GPU %d: short of memory for the volume slices (%.2f GB free): %d of %d frames fit\n", d, fr / 1e9, frames_fit, K);
+            } else if (frames_fit >= K / 4) {
+                S = 1;
+                cap = frames_fit;
+                logf("GPU %d: takes at most %d of %d frames (%.2f GB of room for the volume slices beside one slot)\n", d, cap, K, room / 1e9);
+            } else {
+                logf("GPU %d: left out of this job, not enough memory for the volume slices plus one slot (%.2f GB free)\n", d, fr / 1e9);
+                D.st.free();
+                cudaStreamDestroy(D.fold_s);
+                D.fold_s = nullptr;
+                dropped.push_back(d);
+                continue;
+            }
+        }
+        const int fit = S;
         opt.streams_by_device.push_back(S);
+        caps.push_back(cap);
         D.slots.resize(S);
         for (auto& S : D.slots) {
             CK(cudaMalloc(&S.d_rgb, npx_full * 3 * sizeof(float)));
@@ -340,6 +374,14 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         logf("GPU %d: state %.2f GB + %d slot(s) x %.2f GB (%d requested, %d fit); %.2f of %.2f GB free after allocation\n", d,
                D.st.bytes() / 1e9, S, per_slot / 1e9, opt.streams_per_gpu, fit, fr / 1e9, tot / 1e9);
     }
+    if (!dropped.empty()) {   // the rest of the job (merge, depth, passes 2 and 3) runs on the cards that stayed
+        std::vector<int> keep;
+        for (int d : devs) if (std::find(dropped.begin(), dropped.end(), d) == dropped.end()) keep.push_back(d);
+        devs = keep;
+        P.devs = devs;
+    }
+    opt.devices = devs;   // streams_by_device and the caps are parallel to this list
+    opt.max_frames_by_device = caps;
 
     auto on_frame = [&](const DeviceFrame& f) {
         auto& D = ctx[f.dev];
@@ -667,7 +709,43 @@ static void downsample_preview(const std::vector<float>& img, int w, int h, int 
         }
 }
 
+static int run_stack_once(StackOptions& so);
+
+// Returns the GPUs' pooled memory (cudaMallocAsync keeps freed blocks for the process): another xLamina or
+// stackcli on the same cards would otherwise find them short between renders.
+static void trim_pools() {
+    int n = 0;
+    if (cudaGetDeviceCount(&n) != cudaSuccess) return;
+    for (int d = 0; d < n; ++d) {
+        cudaMemPool_t pool;
+        if (cudaDeviceGetDefaultMemPool(&pool, d) == cudaSuccess) cudaMemPoolTrimTo(pool, 0);
+    }
+    cudaGetLastError();
+}
+
+// The fusion, with a fallback: when the GPU memory runs short for the depth volume (the 1/2-resolution default
+// needs ~5 GB beside the state; another process may hold part of the card), the render is repeated at 1/4
+// instead of failing (FINDINGS 32).
 int run_stack(StackOptions& so) {
+    int rc;
+    try {
+        rc = run_stack_once(so);
+    } catch (const std::exception& e) {
+        if (!strstr(e.what(), "memory")) throw;
+        logf("%s", e.what());
+        rc = 4;
+    }
+    if (rc == 4 && so.po.depth_fraction > 0.25) {
+        logf("GPU memory ran short at depth resolution %g: rendering again at 1/4", so.po.depth_fraction);
+        trim_pools();
+        so.po.depth_fraction = 0.25;
+        rc = run_stack_once(so);
+    }
+    trim_pools();
+    return rc;
+}
+
+static int run_stack_once(StackOptions& so) {
     Pass1Options& po = so.po;
     po.volume = true;
     po.hooks = so.hooks;
@@ -721,10 +799,19 @@ int run_stack(StackOptions& so) {
     {
         float *d_V, *d_ga;
         void* d_L16;
-        CK(cudaMalloc(&d_V, nd * K * sizeof(float)));
-        CK(cudaMalloc(&d_L16, nd * K * 2));
+        struct DevFree { std::vector<void*> p; ~DevFree() { for (void* q : p) cudaFree(q); } } dfree;   // freed on any exit, a throw included
+        cudaError_t ev = cudaMalloc(&d_V, nd * K * sizeof(float));
+        if (ev == cudaSuccess) dfree.p.push_back(d_V);
+        cudaError_t el = ev == cudaSuccess ? cudaMalloc(&d_L16, nd * K * 2) : cudaErrorMemoryAllocation;
+        if (el == cudaSuccess) dfree.p.push_back(d_L16);
+        if (ev != cudaSuccess || el != cudaSuccess) {
+            cudaGetLastError();
+            logf("depth: not enough GPU memory for the %.1f GB volume", nd * K * 6.0 / 1e9);
+            return 4;   // run_stack retries at 1/4 resolution
+        }
         CK(cudaMalloc(&d_guide, no * sizeof(float)));
         CK(cudaMalloc(&d_ga, nd * sizeof(float)));
+        dfree.p.push_back(d_ga);
         CK(cudaMemcpy(d_guide, P.guide.data(), no * sizeof(float), cudaMemcpyHostToDevice));
         CK(cudaMemcpy(d_ga, P.ga.data(), nd * sizeof(float), cudaMemcpyHostToDevice));
         // plane-major host volumes -> k-fastest device volumes, a few planes at a time through a staging buffer
@@ -753,7 +840,7 @@ int run_stack(StackOptions& so) {
         dp.dark_prior = (float)so.dark_prior;
         dp.depth_full_fraction = (float)po.depth_fraction;   // the spill-zone radii are in sensor px
         R = depth_from_volume(d_V, d_L16, d_guide, d_ga, P.vp.dw, P.vp.dh, K, ow, oh, dp, s);
-        cudaFree(d_V); cudaFree(d_L16); cudaFree(d_ga);
+        // d_V, d_L16 and d_ga are freed here by dfree going out of scope
     }
     logf("depth: %.2f s (cost %.0f ms, SGM %.0f ms%s, post %.0f ms); end-peaked %.1f%%\n", since(t1), R.ms_cost, R.ms_sgm,
          R.sgm_bands > 1 ? (" in " + std::to_string(R.sgm_bands) + " bands").c_str() : "", R.ms_post, 100 * R.end_fraction);

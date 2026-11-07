@@ -1172,6 +1172,36 @@ phase is the parameter search: many B runs over the depth resolution, window,
 aggregation, the priors (rescaled with the resolution) and SGM's P1 / P2 (not
 yet on the CLI), scored per region and judged at 1:1.
 
+## 32. The depth volume at 1/2 resolution becomes the default (2026-11-07, late)
+
+Travis rendered the stack with Advanced ticked and Depth resolution 1/2 (the
+other Advanced values at their defaults: window 6, aggregation 32, dark prior
+1, halo prior 2) and found the ghost outline of the plate in his screenshot
+gone at 1:1, where every 1/4-resolution variant of sec. 31 (C radius 0 or 64,
+B radius 16 or 48, halo prior 4, dark prior 2, refinement range 4, soft
+labels 1.5, aggregation 64) still showed it. The 1:1 sheet of that crystal's
+edge across all of them, with the reference B beside, is
+`helicon_B_analysis/report_real/ghost_crystal.png` (outside the repo).
+
+The per-region scores of sec. 31a had this variant within noise of the default
+in the image and *worse* in depth agreement with the reference on the plates
+(whole plates placed on frames 11 away), which the image did not show. Depth
+agreement with another stacker's map is evidently not the criterion; the
+eye at 1:1 is, and the doubled plate edge is the artefact Travis has flagged
+since sec. 25. So 0.6.1 makes 1/2 the default depth resolution (engine and
+GUI; `--depth-fraction 0.25` or the Advanced panel give the 0.5.x reference
+B back). The prior weights are still those tuned at 1/4; rescaling them with
+the resolution is part of the parameter search to come.
+
+Costs: the depth stage 0.9 -> 2.8 s and the volume aggregation 0.6 -> 1.8 s,
+about +3 s on a 163-frame render; 4.9 GB of focus measure and 2.5 GB of luma
+in host and device memory. Memory: a card that cannot hold its share of the
+slices beside its state (the 3070 at 1/2 resolution, when another process
+holds part of it) now sits the job out instead of running out of memory
+mid-pass, and the slice budget assumes 70 % of the frames per card when the
+queue is shared. The archive's `score_b.py` baseline numbers refer to the 1/4
+reference and no longer describe the default B.
+
 ## Open items
 
 - **B: doubled plate edge / glow** (§25a): the C-style aggregation does not

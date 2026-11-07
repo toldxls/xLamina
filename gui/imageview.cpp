@@ -49,6 +49,31 @@ void ImageView::setImage(const QImage& img, bool keepView) {
     emit zoomChanged(z);
 }
 
+void ImageView::setLabel(const QString& text) {
+    if (label_ == text) return;
+    label_ = text;
+    viewport()->update();
+}
+
+// the image's name in the top-left corner, in viewport coordinates, over a translucent plate
+void ImageView::drawForeground(QPainter* p, const QRectF&) {
+    if (label_.isEmpty() || image_.isNull()) return;
+    p->save();
+    p->resetTransform();
+    QFont f = p->font();
+    f.setPointSize(13);
+    f.setBold(true);
+    p->setFont(f);
+    QFontMetrics fm(f);
+    QRect r(10, 8, fm.horizontalAdvance(label_) + 20, fm.height() + 10);
+    p->setPen(Qt::NoPen);
+    p->setBrush(QColor(0, 0, 0, 150));
+    p->drawRoundedRect(r, 6, 6);
+    p->setPen(QColor(235, 235, 235));
+    p->drawText(r, Qt::AlignCenter, label_);
+    p->restore();
+}
+
 void ImageView::fit() {
     if (image_.isNull()) return;
     fitInView(item_, Qt::KeepAspectRatio);

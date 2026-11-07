@@ -158,8 +158,9 @@ StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, con
                     CK(cudaMalloc(&dbuf[j], max_px));
                 }
                 int n = 0;
+                const int cap = opt.max_frames_by_device.size() == devs.size() ? opt.max_frames_by_device[di] : 0;
                 Ready r;
-                while (q.pop(r)) {
+                while ((cap <= 0 || n < cap) && q.pop(r)) {   // a capped card leaves the rest to the others
                     int j = n++ % S;
                     if (n > S) {                    // the upload from S frames ago must be done (S frames in flight)
                         CK(cudaEventSynchronize(uploaded[j]));
@@ -192,7 +193,10 @@ StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, con
                 }
                 return;
             }
-            --live_workers;
+            if (--live_workers == 0) {   // the last worker (a capped one, the others gone) drains what is left
+                Ready r;
+                while (q.pop(r)) if (r.pooled) pool.release(r.buf);
+            }
         });
 
     for (auto& t : readers) t.join();

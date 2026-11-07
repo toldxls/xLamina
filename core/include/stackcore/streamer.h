@@ -35,6 +35,7 @@ struct StreamerOptions {
     std::vector<int> devices;      // empty = all
     int streams_per_gpu = 3;
     std::vector<int> streams_by_device;   // optional, parallel to `devices`: per-GPU stream count (memory)
+    std::vector<int> max_frames_by_device;   // optional, parallel to `devices`: a GPU stops taking frames after this many (0 = no cap)
     int readers = 16;
     int pool = 0;                  // pinned buffers; 0 = readers + 2 * streams * gpus
     std::atomic<bool>* cancel = nullptr;   // when set, readers stop taking frames and the pass ends early

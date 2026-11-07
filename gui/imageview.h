@@ -16,6 +16,7 @@ public:
     void actualSize();
     double zoom() const { return transform().m11(); }
     QImage image() const { return image_; }
+    void setLabel(const QString& text);   // the image's name, drawn in the corner so the active output is never in doubt
 
 signals:
     void zoomChanged(double z);
@@ -26,11 +27,13 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent* e) override;
     void mouseMoveEvent(QMouseEvent* e) override;
     void resizeEvent(QResizeEvent* e) override;
+    void drawForeground(QPainter* p, const QRectF& rect) override;
 
 private:
     QGraphicsScene scene_;
     QGraphicsPixmapItem* item_ = nullptr;
     QImage image_;
+    QString label_;
     bool fitted_ = true;
 };
 

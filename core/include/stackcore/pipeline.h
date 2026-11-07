@@ -65,7 +65,9 @@ struct Pass1Options {
     bool volume = false;
     bool with_a = true;                           // accumulate A (off when A is not an output)
     bool host_state = false;                      // also download the merged state into Pass1::merged (the fold command)
-    double depth_fraction = 0.25, depth_fm_px = 6.0, vol_agg_px = 32.0;
+    // the depth volume's resolution as a fraction of the sensor: 1/2 since 0.6.1 (FINDINGS 32: the doubled plate
+    // edges of 1/4 are gone at 1:1); --depth-fraction 0.25 gives the 0.5.x reference B
+    double depth_fraction = 0.5, depth_fm_px = 6.0, vol_agg_px = 32.0;
     Hooks hooks;
 };
 

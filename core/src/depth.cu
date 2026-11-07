@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 
@@ -447,6 +448,11 @@ DepthResult depth_from_volume(const float* d_V_in, const void* d_Lv16, const flo
     auto t1 = std::chrono::steady_clock::now();
     const int ov = 64;
     size_t S_bytes = (size_t)n * K * sizeof(float);
+    {   // the stream-ordered allocator keeps pass 1's freed slices in its pool: hand them back before measuring
+        int dev = 0;
+        cudaMemPool_t pool;
+        if (cudaGetDevice(&dev) == cudaSuccess && cudaDeviceGetDefaultMemPool(&pool, dev) == cudaSuccess) cudaMemPoolTrimTo(pool, 0);
+    }
     size_t fr = 0, tot = 0;
     CK(cudaMemGetInfo(&fr, &tot));
     size_t budget = fr > (768u << 20) ? fr - (768u << 20) : 0;   // room for the post stage's maps
@@ -454,7 +460,11 @@ DepthResult depth_from_volume(const float* d_V_in, const void* d_Lv16, const flo
     if (S_bytes > budget) {
         size_t row_bytes = (size_t)dw * K * sizeof(float);
         int rows_fit = (int)(budget / row_bytes);
-        if (rows_fit <= 2 * ov + 16) throw std::runtime_error("depth: not enough GPU memory for the SGM volume");
+        if (rows_fit <= 2 * ov + 16) {
+            char msg[200];
+            snprintf(msg, sizeof msg, "depth: not enough GPU memory for the SGM volume (%.2f GB free, %d rows of %d fit)", fr / 1e9, rows_fit, dh);
+            throw std::runtime_error(msg);
+        }
         bands = (int)((dh + (rows_fit - 2 * ov) - 1) / (rows_fit - 2 * ov));
     }
     const int band_rows = (dh + bands - 1) / bands;

@@ -48,9 +48,14 @@ stacker's output as a tab beside xLamina's, so the two flip at the same zoom and
 PgUp / PgDown step through the tabs.
 
 Advanced (depth and composition), unticked by default, exposes the parameters of B's depth
-pipeline and of the composition (focus window and power, depth window, volume aggregation,
-refinement range and window, label softness, halo and dark priors) at their validated
-defaults, for one-at-a-time experiments against a 1:1 comparison.
+pipeline and of the composition (depth resolution, focus window and power, depth window,
+volume aggregation, refinement range and window, label softness, halo and dark priors) at
+their defaults, for one-at-a-time experiments against a 1:1 comparison. The depth volume is
+estimated at 1/2 of the sensor resolution since 0.6.1 (1/4 left doubled outlines on bright
+plates); it needs about 5 GB of GPU memory for 163 full-size frames.
+
+Cn is C at smoothing 3; with the panel's C smoothing at 2 the two differ on about 3 % of
+pixels, so tick Cn only when C's smoothing is lower.
 
 Performance holds the hardware settings: which GPUs, streams per GPU, reader threads,
 alignment pairs in flight, and whether the frames stay resident. None of them changes the

@@ -203,6 +203,9 @@ void MainWindow::buildUi() {
     tabs_ = new QTabBar;
     tabs_->setExpanding(false);
     tabs_->setDrawBase(false);
+    // the active output must be unmistakable: the selected tab in the accent colour, and the viewer names its image
+    tabs_->setStyleSheet("QTabBar::tab { padding: 6px 16px; margin-right: 2px; }"
+                         "QTabBar::tab:selected { background: #7a2fc9; color: white; font-weight: bold; }");
     tabs_->setToolTip("The outputs of the last render and any comparison images; PgUp / PgDown step through them at the same zoom.");
     cl->addWidget(split_, 1);
     cl->addWidget(tabs_);
@@ -338,11 +341,12 @@ void MainWindow::buildUi() {
     focusPower_ = dspin(1, 8, 0.5, 4, 1, "", "Exponent on the focus measure when the frames compete. Default 4.");
     al->addRow("Focus power", focusPower_);
     depthRes_ = new QComboBox;
-    depthRes_->addItem("1/4 of the sensor (default)", 0.25);
-    depthRes_->addItem("1/2 of the sensor", 0.5);
+    depthRes_->addItem("1/4 of the sensor (fast)", 0.25);
+    depthRes_->addItem("1/2 of the sensor (default)", 0.5);
     depthRes_->addItem("Full (small stacks only)", 1.0);
-    depthRes_->setToolTip("Resolution of the depth volume. 1/2 needs about 5 GB for 163 full frames and makes the edge of a bright object\n"
-                          "tighter (FINDINGS 31); full resolution needs 20 GB for such a stack and is for small ones.");
+    depthRes_->setCurrentIndex(1);
+    depthRes_->setToolTip("Resolution of the depth volume. 1/2 (the default since 0.6.1) removes the doubled edges of bright plates that 1/4\n"
+                          "left; it needs about 5 GB of GPU memory for 163 full frames and costs about 3 s. Full needs 20 GB for such a stack.");
     al->addRow("Depth resolution", depthRes_);
     depthFmPx_ = dspin(1, 30, 1, 6, 0, " px", "Window of the normalised Laplacian in the depth volume, in depth-volume pixels. Default 6;\n"
                                                "3 at 1/2 resolution gave the tightest edges on the synthetic stack (FINDINGS 31).");
@@ -367,7 +371,7 @@ void MainWindow::buildUi() {
     QPushButton* resetAdv = new QPushButton("Defaults");
     resetAdv->setToolTip("Put every advanced parameter back to its validated default.");
     connect(resetAdv, &QPushButton::clicked, this, [this] {
-        depthRes_->setCurrentIndex(0);
+        depthRes_->setCurrentIndex(1);
         focusRadius_->setValue(6); focusPower_->setValue(4); depthFmPx_->setValue(6); volAggPx_->setValue(32);
         refineR_->setValue(12); refineFmPx_->setValue(9); softPx_->setValue(3); haloPrior_->setValue(2); darkPrior_->setValue(1);
     });
@@ -489,7 +493,7 @@ void MainWindow::loadSettings() {
     s.endGroup();
     s.beginGroup("advanced");
     advanced_->setChecked(s.value("enabled", false).toBool());
-    depthRes_->setCurrentIndex(s.value("depthRes", 0).toInt());
+    depthRes_->setCurrentIndex(s.value("depthRes", 1).toInt());
     focusRadius_->setValue(s.value("focusRadius", 6.0).toDouble());
     focusPower_->setValue(s.value("focusPower", 4.0).toDouble());
     depthFmPx_->setValue(s.value("depthFmPx", 6.0).toDouble());
@@ -547,7 +551,7 @@ void MainWindow::resetSettings() {
     cradius_->setValue(32);
     bradius_->setValue(0);
     advanced_->setChecked(false);
-    depthRes_->setCurrentIndex(0);
+    depthRes_->setCurrentIndex(1);
     focusRadius_->setValue(6); focusPower_->setValue(4); depthFmPx_->setValue(6); volAggPx_->setValue(32);
     refineR_->setValue(12); refineFmPx_->setValue(9); softPx_->setValue(3); haloPrior_->setValue(2); darkPrior_->setValue(1);
     perfToUi(PerfSettings());
@@ -752,7 +756,9 @@ void MainWindow::frameMenu(const QPoint& pos) {
 // and the right pane what is being built from them.
 void MainWindow::onFrame(int k, FloatImage rgb, int w, int h) {
     if (!rgb) return;
-    bool show = !(bench_ && bench_->running()) && k >= 0 && k < jobItems_.size() && (!lastView_.isValid() || lastView_.elapsed() >= 33);
+    // at most ~30 views a second, fewer when they are large (Full: 30 Mpx to convert, ~300 ms each)
+    const qint64 minMs = std::max<qint64>(33, (qint64)w * h / 100000);
+    bool show = !(bench_ && bench_->running()) && k >= 0 && k < jobItems_.size() && (!lastView_.isValid() || lastView_.elapsed() >= minMs);
     QImage image = show ? toQImage(rgb->data(), w, h) : QImage();
     worker_.viewShown(std::move(rgb));   // the buffer goes back to the pool
     if (k >= 0 && k < jobItems_.size()) liveItem_ = jobItems_[k];   // the job's frame -> its row (rows may be reordered or duplicated)
@@ -785,6 +791,7 @@ void MainWindow::onFullFrame(int index, QImage image) {
     if (index != 0 || pendingFrame_ < 0 || pendingFrame_ >= frames_.size() || worker_.running()) return;
     current_ = "frame";
     view_->setImage(forDisplay(image), true);
+    view_->setLabel(QFileInfo(frames_[pendingFrame_]).fileName());
     statusBar()->showMessage(QString("%1 — %2 x %3 (full resolution)").arg(QFileInfo(frames_[pendingFrame_]).fileName()).arg(image.width()).arg(image.height()));
 }
 
@@ -977,10 +984,12 @@ void MainWindow::onPreview(QString name, FloatImage rgb, int w, int h) {
         }
         liveView_->setImage(image, true);
         liveView_->setToolTip(name);
+        liveView_->setLabel(name);
         return;
     }
     current_ = name;
     view_->setImage(image, true);
+    view_->setLabel(name + "  (preview)");
     statusBar()->showMessage(QString("Preview: %1").arg(name));
 }
 
@@ -1113,6 +1122,7 @@ void MainWindow::showOutput(int tab) {
     if (img.isNull()) return;
     current_ = name;
     view_->setImage(img, true);   // the zoomed area carries over from the live view / the other outputs
+    view_->setLabel(compare_.contains(name) ? name + "  (comparison)" : name);
     statusBar()->showMessage(QString("%1 — %2 x %3%4").arg(name).arg(img.width()).arg(img.height()).arg(compare_.contains(name) ? " (comparison image)" : ""));
 }
 
