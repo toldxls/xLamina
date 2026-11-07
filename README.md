@@ -2,22 +2,21 @@
 
 ![xLamina](gui/icon/xlamina-128.png)
 
-Multi-GPU focus stacker for photomicroscopy. Windows, NVIDIA GPUs, 16-bit TIFF in and out.
+A photo stacker that can utilize multiple GPUs for rapidly stacking uncompresssed 16-bit TIFF/raw photos. It is a Windows VB program built on CUDA for NVIDIA GPUs. 
 
-Open a folder of frames, choose the outputs, press Render, watch the stack build, save.
-163 frames of 6960 x 4640 on an RTX 3080 Ti + RTX 3070: 10 s to align, 17 s to fuse.
+Open a folder of TIFF frames, choose the output algorithms, press Render, watch the stacks build in parallel for each method, and save. The program performs best when paired with RAM File System with 36+ GB of RAM available for the fastest possible reading and processing. 
 
-Methods: B (regularised depth map: focus volume, semi-global matching, fine refinement,
+Methods: B (a regularised depth map: focus volume, semi-global matching, fine refinement,
 soft-label composition), C (Laplacian pyramid), Cn (noise-aware pyramid), A (weighted
-average) and the variants B0, CB, CBn, Cd, Cg, Cg2, H. Every render also writes a
-geometry report: per-frame similarity transforms, the reference frame, the crop and the
-effective µm/px over the stack depth.
+average) and several variants combining these in different ways; B0, CB, CBn, Cd, Cg, Cg2, H. Every render also writes a
+geometry report: per-frame similarity transforms, the reference frame, the cropped values and the
+effective µm/px over the stack depth when FOV and step size are known. 
 
 ## Install
 
 Download `xLamina-<version>-win64.zip` from the Releases page, unzip it anywhere and run
 `xLamina.exe`. Requirements: 64-bit Windows, an NVIDIA GPU (Ampere or newer) with a
-current driver. Nothing else.
+current driver. 
 
 ## Use
 
