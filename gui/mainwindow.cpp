@@ -70,6 +70,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(&tick_, &QTimer::timeout, this, [this] {
         stage_->setText(QString("%1 — %2 s").arg(stageText_).arg(elapsed_.elapsed() / 1000.0, 0, 'f', 1));
     });
+    listTick_.setInterval(250);
+    connect(&listTick_, &QTimer::timeout, this, [this] {
+        if (liveItem_ == markedItem_) return;
+        if (markedItem_) markedItem_->setBackground(QBrush());
+        markedItem_ = liveItem_;
+        if (markedItem_) {
+            markedItem_->setBackground(QColor(70, 130, 170, 90));   // a calm blue-grey, unlike the selection
+            frameList_->scrollToItem(markedItem_, QAbstractItemView::EnsureVisible);
+        }
+    });
     QStringList g;
     for (const GpuInfo& gi : gpus_) g << QString("%1 (%2 GB)").arg(QString(gi.name).remove("NVIDIA ").remove("GeForce ")).arg(gi.memory / 1073741824.0, 0, 'f', 0);
     statusBar()->showMessage(gpus_.isEmpty() ? "No CUDA GPU found: rendering is not possible on this machine."
@@ -252,13 +262,15 @@ void MainWindow::buildUi() {
     lockScale_->setToolTip("Apply no scale change between frames; use for telecentric objectives.");
     fl->addRow("", lockScale_);
     liveRes_ = new QComboBox;
+    liveRes_->addItem("Off (fastest)", 0);
     liveRes_->addItem("Low (1/12)", 12);
     liveRes_->addItem("Medium (1/6)", 6);
     liveRes_->addItem("High (1/3)", 3);
     liveRes_->addItem("Full", 1);
-    liveRes_->setCurrentIndex(1);
+    liveRes_->setCurrentIndex(2);
     liveRes_->setToolTip("Resolution of the live view while rendering, as a fraction of the output.\n"
-                         "Each frame shown is copied from the GPU; Full copies 365 MB per frame and slows the render.");
+                         "Every image copied off a GPU costs its uploads about 3 ms, so the views are rate-limited; the live view\n"
+                         "still adds about a second to a 163-frame render. Off shows only the finished outputs.");
     fl->addRow("Live view", liveRes_);
     smoothing_ = new QDoubleSpinBox;
     smoothing_->setRange(0, 6);
@@ -460,7 +472,7 @@ void MainWindow::loadSettings() {
     scale_->setCurrentIndex(s.value("scale", 0).toInt());
     ref_->setCurrentIndex(s.value("ref", 0).toInt());
     lockScale_->setChecked(s.value("lockScale", false).toBool());
-    liveRes_->setCurrentIndex(s.value("liveRes", 1).toInt());
+    liveRes_->setCurrentIndex(s.value("liveRes", 2).toInt());
     smoothing_->setValue(s.value("smoothing", 2.0).toDouble());
     cradius_->setValue(s.value("cradius", 32.0).toDouble());
     bradius_->setValue(s.value("bradius", 0.0).toDouble());
@@ -519,7 +531,7 @@ void MainWindow::resetSettings() {
     scale_->setCurrentIndex(0);
     ref_->setCurrentIndex(0);
     lockScale_->setChecked(false);
-    liveRes_->setCurrentIndex(1);
+    liveRes_->setCurrentIndex(2);
     smoothing_->setValue(2);
     cradius_->setValue(32);
     bradius_->setValue(0);
@@ -588,6 +600,7 @@ void MainWindow::openFolder(const QString& dir) {
         return;
     }
     thumbs_.stop();
+    thumbsDone_.clear();
     folder_ = dir;
     frames_.clear();
     jobItems_.clear();
@@ -649,8 +662,19 @@ void MainWindow::openFolder(const QString& dir) {
     updateRecent();
 }
 
+// The thumbnail loader reads every frame from disk; it is stopped for the duration of a render (it
+// competed with the engine's readers for the disk and the frames' memory) and resumed afterwards.
+void MainWindow::resumeThumbnails() {
+    QStringList files;
+    QList<int> idx;
+    for (int i = 0; i < frames_.size(); ++i)
+        if (!thumbsDone_.contains(i)) { files << frames_[i]; idx << i; }
+    if (!files.isEmpty()) thumbs_.start(files, 144, idx);
+}
+
 void MainWindow::onThumbnail(int index, QImage image) {
     if (index < 0 || index >= frames_.size()) return;
+    thumbsDone_.insert(index);
     QIcon icon(QPixmap::fromImage(forDisplay(image)));
     for (int r = 0; r < frameList_->count(); ++r)   // every row showing this frame (a frame can be listed more than once)
         if (frameList_->item(r)->data(Qt::UserRole).toInt() == index) frameList_->item(r)->setIcon(icon);
@@ -714,13 +738,15 @@ void MainWindow::frameMenu(const QPoint& pos) {
 // pass 3 forward) the left pane shows each frame as it is processed (raw while
 // reading, so the stack's wobble is visible, then warped onto the output grid)
 // and the right pane what is being built from them.
-void MainWindow::onFrame(int k, QImage image) {
-    if ((bench_ && bench_->running()) || k < 0 || k >= jobItems_.size()) return;
-    QListWidgetItem* item = jobItems_[k];   // the job's frame -> its row (rows may have been reordered or duplicated)
-    k = item->data(Qt::UserRole).toInt();   // the folder's frame
-    selecting_ = true;
-    frameList_->setCurrentItem(item);
-    selecting_ = false;
+void MainWindow::onFrame(int k, FloatImage rgb, int w, int h) {
+    if (!rgb) return;
+    bool show = !(bench_ && bench_->running()) && k >= 0 && k < jobItems_.size() && (!lastView_.isValid() || lastView_.elapsed() >= 33);
+    QImage image = show ? toQImage(rgb->data(), w, h) : QImage();
+    worker_.viewShown(std::move(rgb));   // the buffer goes back to the pool
+    if (k >= 0 && k < jobItems_.size()) liveItem_ = jobItems_[k];   // the job's frame -> its row (rows may be reordered or duplicated)
+    if (image.isNull()) return;
+    lastView_.start();
+    k = liveItem_->data(Qt::UserRole).toInt();   // the folder's frame
     bool raw = stageText_.startsWith("reading");
     current_ = "frame";
     view_->setImage(forDisplay(image), true);
@@ -863,6 +889,7 @@ void MainWindow::render() {
     JobOptions jo;
     if (!buildJob(jo, true)) return;
     if (!jo.stack.cache_frames) worker_.releaseCache();
+    thumbs_.stop();   // resumed in onFinished
     cache_.clear();
     result_.reset();
     rebuildTabs();
@@ -873,7 +900,11 @@ void MainWindow::render() {
     stageText_ = "starting";
     elapsed_.start();
     tick_.start();
-    worker_.start(jo, liveRes_->currentData().toInt());
+    liveItem_ = markedItem_ = nullptr;
+    lastView_.invalidate();
+    listTick_.start();
+    int live = liveRes_->currentData().toInt();
+    worker_.start(jo, live > 0 ? live : 12, live == 0);
 }
 
 void MainWindow::cancel() {
@@ -906,8 +937,22 @@ void MainWindow::onProgress(QString stage, double fraction) {
     progress_->setValue((int)std::lround(std::clamp(fraction, 0.0, 1.0) * 1000));
 }
 
-void MainWindow::onPreview(QString name, QImage image) {
-    if (bench_ && bench_->running()) return;
+void MainWindow::onPreview(QString name, FloatImage rgb, int w, int h) {
+    if (!rgb) return;
+    if (bench_ && bench_->running()) { worker_.previewShown(std::move(rgb)); return; }
+    float gain = 1.f;
+    if (name.startsWith("focus")) {   // the focus measure has no fixed scale: show it up to its 99th percentile
+        std::vector<float> v;
+        v.reserve((size_t)w * h / 4 + 1);
+        for (size_t i = 0; i < (size_t)w * h; i += 4) v.push_back((*rgb)[i * 3]);
+        if (!v.empty()) {
+            size_t q = v.size() * 99 / 100;
+            std::nth_element(v.begin(), v.begin() + q, v.end());
+            gain = v[q] > 1e-9f ? 1.f / v[q] : 1.f;
+        }
+    }
+    QImage image = toQImage(rgb->data(), w, h, gain);
+    worker_.previewShown(std::move(rgb));   // the buffer goes back to the pool
     bool grey = name.startsWith("depth") || name.startsWith("focus");
     if (!grey) image = forDisplay(image);
     if (name.endsWith("(building)") || name.startsWith("depth map")) {   // the right pane: what the render is building
@@ -1011,9 +1056,13 @@ void MainWindow::dropFlagged() {
 void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
     if (bench_ && bench_->running()) return;   // the benchmark's runs are its own
     tick_.stop();
+    listTick_.stop();
+    if (markedItem_) markedItem_->setBackground(QBrush());
+    liveItem_ = markedItem_ = nullptr;
     result_ = data;
     setBusy(false);
     liveView_->hide();
+    resumeThumbnails();
     labelWobble(data->align);
     if (data->rc == 3) { stage_->setText("Cancelled."); return; }
     if (data->rc != 0) { stage_->setText("Failed; see the log."); QMessageBox::warning(this, "xLamina", "The render failed. The log has the details."); return; }

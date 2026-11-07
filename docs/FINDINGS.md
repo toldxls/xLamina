@@ -1035,6 +1035,67 @@ What is left: the alignment (6 s: 3.1 s read + pin, 2.75 s pairs), pass 1's
 kernels (1.7 s), the compose mix (0.7 s of host-visible GPU work), and the
 depth stage (0.85 s).
 
+## 30. The hardware sweep, and what the live view costs (2026-11-07)
+
+The GUI's Tools > Benchmark (thorough mode) ran the 163-frame stack at full
+resolution, outputs B C Cn, under every hardware setting varied one at a time
+from the defaults (both GPUs, 2 streams/GPU, 16 readers, 3 pairs in flight,
+frames resident). Total = alignment + fusion + report, no TIFFs written:
+
+| run | total s | align | fusion | pass 1 | refine | compose |
+|---|---|---|---|---|---|---|
+| defaults, frames read from disk (cold) | 15.78 | 7.69 | 8.04 | 2.83 | 1.79 | 2.11 |
+| defaults | 12.54 | 4.50 | 7.99 | 2.82 | 1.77 | 2.11 |
+| GPU 0 only (3080 Ti) | 16.94 | 6.80 | 10.09 | 3.26 | 2.72 | 2.82 |
+| GPU 1 only (3070) | 23.03 | 8.20 | 14.78 | 6.36 | 3.40 | 3.49 |
+| 1 stream per GPU | 14.88 | 4.58 | 10.24 | 3.48 | 2.70 | 2.21 |
+| 3 streams per GPU | 12.82 | 4.52 | 8.25 | 2.90 | 1.84 | 2.18 |
+| 8 / 32 reader threads | 12.74 / 12.73 | | | | | |
+| 2 / 4 pairs in flight | 12.92 / 12.51 | | | | | |
+| frames streamed from disk every pass | 17.86 | 5.92 | 11.88 | 3.91 | 3.10 | 3.49 |
+
+What it says: the two cards together stream pass 1 at 93 frames/s against
+66 (3080 Ti alone) and 29 (3070 alone), the ideal sum; passes 2 and 3 run at
+116 frames/s = 22.5 GB/s of uploads, the PCIe ceiling of two Gen4 x8 links.
+Readers and pairs in flight make no difference once the frames are resident;
+one stream per GPU loses the upload/compute overlap (+2.3 s); a third stream
+gains nothing. So the defaults stand, and the only choices that matter on a
+machine are *which GPUs* and *resident or not*, which is what the quick
+benchmark (20 s: up to 40 frames at half resolution) now tests.
+
+The GUI, though, took 13.0 s of fusion for the same stack with the Medium
+live view, against 8.0 s quiet. The previews were the cause, in layers, each
+measured on the GUI render (fusion seconds):
+
+| the live view's plumbing | fusion |
+|---|---|
+| previews synchronise the slot stream inside the streamer callback (0.5.5; against the callback's own contract) | 13.0 |
+| asynchronous: event per preview, delivered at the slot's next turn, blocking wait there | 10.8 |
+| non-blocking: a frame whose predecessor is still in flight gets no view | 10.0 |
+| 8-bit conversion moved to the GUI thread; pooled buffers; GUI-side 30 fps cap | 10.0 (no change) |
+| preview kernel and copy on their own stream, only the kernel guarded | 10.0 (no change) |
+| host hooks replaced by no-ops (GPU-side work kept) | 9.7 |
+| Low (1/12) instead of Medium (1/6) | same as Medium |
+| preview written by the kernel into mapped host memory (no copy engine) | 32.7 |
+| views rate-limited: one per slot per 60 ms, one building map per 150 ms | **9.5** |
+
+So the cost is on the GPU side and per copy, not per byte: any D2H copy
+while the uploads saturate the link costs the uploads about 3 ms, whatever
+its size, and nothing on the host side mattered. Rate-limiting is the right
+tool (the eye does not need 90 frames a second); what remains (~1.3 s) is the
+price of the live view, and "Off" is now a live-view setting for when the
+time matters more than the show.
+
+Two more savings on the way, both bit-identical (B, C, Cn compared byte for
+byte against the 0.5.5 outputs after every step): the depth volume is
+collected into page-locked host memory without the per-slice stream sync and
+without the raw focus measure the fusion never reads (volume 0.59 -> 0.50 s;
+the 1.8 GB is unpinned on a side thread, since unpinning took 0.2 s on the
+critical path), and the output TIFFs are written on one thread each (0.68 ->
+0.25 s). CLI fusion 8.65 -> 8.1 s. And the GUI's thumbnail loader, which read
+the whole stack from disk while pass 0 was reading it too, is paused during
+a render: alignment in the GUI 8.1 -> 6.5 s.
+
 ## Open items
 
 - **B: doubled plate edge / glow** (§25a): the C-style aggregation does not

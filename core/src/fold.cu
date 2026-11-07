@@ -294,30 +294,22 @@ __global__ void k_preview_focus(const float* __restrict__ best, int w, int h, in
     for (int c = 0; c < 3; ++c) out[((size_t)y * pw + x) * 3 + c] = v;
 }
 
-void fold_focus_preview(const FoldState& st, int down, std::vector<float>& rgb, int& pw, int& ph, cudaStream_t s) {
-    down = std::max(1, down);
-    pw = std::max(1, st.w / down);
-    ph = std::max(1, st.h / down);
-    float* d;
-    CK(cudaMallocAsync(&d, (size_t)pw * ph * 3 * sizeof(float), s));
-    k_preview_focus<<<dim3((pw + 31) / 32, (ph + 7) / 8), dim3(32, 8), 0, s>>>(st.b_best, st.w, st.h, down, d, pw, ph);
-    rgb.resize((size_t)pw * ph * 3);
-    CK(cudaMemcpyAsync(rgb.data(), d, rgb.size() * sizeof(float), cudaMemcpyDeviceToHost, s));
-    CK(cudaFreeAsync(d, s));
-    CK(cudaStreamSynchronize(s));
-}
-
-void image_preview(const float* d_rgb, int w, int h, int down, std::vector<float>& rgb, int& pw, int& ph, cudaStream_t s) {
+void preview_size(int w, int h, int down, int& pw, int& ph) {
     down = std::max(1, down);
     pw = std::max(1, w / down);
     ph = std::max(1, h / down);
-    float* d;
-    CK(cudaMallocAsync(&d, (size_t)pw * ph * 3 * sizeof(float), s));
-    k_preview_img<<<dim3((pw + 31) / 32, (ph + 7) / 8), dim3(32, 8), 0, s>>>(d_rgb, w, h, down, d, pw, ph);
-    rgb.resize((size_t)pw * ph * 3);
-    CK(cudaMemcpyAsync(rgb.data(), d, rgb.size() * sizeof(float), cudaMemcpyDeviceToHost, s));
-    CK(cudaFreeAsync(d, s));
-    CK(cudaStreamSynchronize(s));
+}
+
+void fold_focus_preview_kernel(const FoldState& st, int down, float* d_out, int& pw, int& ph, cudaStream_t s) {
+    down = std::max(1, down);
+    preview_size(st.w, st.h, down, pw, ph);
+    k_preview_focus<<<dim3((pw + 31) / 32, (ph + 7) / 8), dim3(32, 8), 0, s>>>(st.b_best, st.w, st.h, down, d_out, pw, ph);
+}
+
+void image_preview_kernel(const float* d_rgb, int w, int h, int down, float* d_out, int& pw, int& ph, cudaStream_t s) {
+    down = std::max(1, down);
+    preview_size(w, h, down, pw, ph);
+    k_preview_img<<<dim3((pw + 31) / 32, (ph + 7) / 8), dim3(32, 8), 0, s>>>(d_rgb, w, h, down, d_out, pw, ph);
 }
 
 // ----------------------------------------------------------------------------- host side

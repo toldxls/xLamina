@@ -6,9 +6,12 @@
 
 #include <atomic>
 #include <complex>
+#include <cstring>
 #include <filesystem>
 #include <functional>
+#include <new>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "stackcore/align.h"
@@ -28,8 +31,10 @@ void logf(const char* fmt, ...);
 // progress(stage, fraction 0..1); preview(name, rgb float interleaved, w, h);
 // frame(k, rgb, w, h): the frame just processed (warped onto the output grid, small)
 using ProgressFn = std::function<void(const std::string& stage, double fraction)>;
-using PreviewFn = std::function<void(const std::string& name, const std::vector<float>& rgb, int w, int h)>;
-using FrameViewFn = std::function<void(int k, const std::vector<float>& rgb, int w, int h)>;
+// rgb points at w x h x 3 floats that are valid only during the call: copy what is needed. (The hooks
+// run on the GPU worker threads; a fresh 10 MB vector per call cost ~3 ms of page faults each, FINDINGS 30.)
+using PreviewFn = std::function<void(const std::string& name, const float* rgb, int w, int h)>;
+using FrameViewFn = std::function<void(int k, const float* rgb, int w, int h)>;
 
 struct Hooks {
     ProgressFn progress;
@@ -39,6 +44,9 @@ struct Hooks {
     int preview_down = 8;        // preview images are 1/preview_down of the output grid
     int preview_every = 8;       // frames between pass-1 previews
     int frame_down = 16;         // per-frame views are 1/frame_down of the output grid
+    // at most one frame view per slot and one building preview per device within this many ms: every copy
+    // off a GPU costs its uploads ~3 ms of link time whatever its size (FINDINGS 30)
+    int frame_min_ms = 60, preview_min_ms = 150;
     bool cancelled() const { return cancel && cancel->load(); }
 };
 
@@ -61,6 +69,45 @@ struct Pass1Options {
     Hooks hooks;
 };
 
+// Page-locked host array: GPU copies to and from it run asynchronously at the link rate (a pageable
+// destination is staged by the driver and is effectively synchronous).
+template <class T>
+class PinnedVec {
+public:
+    PinnedVec() = default;
+    ~PinnedVec() { clear(); }
+    PinnedVec(const PinnedVec&) = delete;
+    PinnedVec& operator=(const PinnedVec&) = delete;
+    PinnedVec(PinnedVec&& o) noexcept : p_(o.p_), n_(o.n_) { o.p_ = nullptr; o.n_ = 0; }
+    PinnedVec& operator=(PinnedVec&& o) noexcept {
+        if (this != &o) { clear(); p_ = o.p_; n_ = o.n_; o.p_ = nullptr; o.n_ = 0; }
+        return *this;
+    }
+    void resize(size_t n) {   // NOT zeroed (a memset of 1.8 GB costs 0.15 s); the caller fills every element
+        clear();
+        if (!n) return;
+        if (cudaHostAlloc((void**)&p_, n * sizeof(T), cudaHostAllocPortable) != cudaSuccess) throw std::bad_alloc();
+        n_ = n;
+    }
+    void clear() { if (p_) cudaFreeHost(p_); p_ = nullptr; n_ = 0; }
+    // unpinning 1.8 GB takes ~0.2 s: hand the buffer to a thread that frees it off the critical path
+    void release_async() {
+        if (!p_) return;
+        T* p = p_;
+        p_ = nullptr;
+        n_ = 0;
+        std::thread([p] { cudaFreeHost(p); }).detach();
+    }
+    T* data() { return p_; }
+    const T* data() const { return p_; }
+    size_t size() const { return n_; }
+    bool empty() const { return n_ == 0; }
+
+private:
+    T* p_ = nullptr;
+    size_t n_ = 0;
+};
+
 struct Pass1 {
     Grid g;
     FoldParams fp;
@@ -72,8 +119,8 @@ struct Pass1 {
     HostFoldState merged;          // only when host_state
     double merge_seconds = 0, setup_seconds = 0;
     std::vector<float> guide, ga;
-    std::vector<uint16_t> fm_all, lum_all;
-    std::vector<float> V_all;
+    PinnedVec<uint16_t> fm_all, lum_all;   // fm_all only when host_state (the fold command writes it; the fusion never reads it)
+    PinnedVec<float> V_all;
     int slices = 0;
     StreamerStats st;
     double vol_seconds = 0;

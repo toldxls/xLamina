@@ -7,9 +7,16 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
+#include <vector>
 
 #include "stackcore/frame_cache.h"
 #include "stackcore/pipeline.h"
+
+// A live-view image as the engine hands it over: float RGB, interleaved, [0, 1]. The 8-bit conversion
+// happens on the GUI thread, and the buffers come from a small pool the GUI hands back after converting
+// (a fresh 10 MB vector per frame cost ~3 ms of page faults on the GPU's worker thread, FINDINGS 30).
+using FloatImage = std::shared_ptr<std::vector<float>>;
 
 struct JobResultData {
     stackcore::StackOptions::Result result;
@@ -30,18 +37,28 @@ public:
     void start(const stackcore::JobOptions& jo, int liveDown = 6, bool quiet = false);
     void cancel() { cancel_.store(true); }
     void releaseCache();                                 // frees the resident frames (when the cache is turned off)
-    const stackcore::FrameCache& cache() const { return cache_; }
+    bool resident(const QStringList& files);             // true when every file is pinned in the cache already
+    // Live views are dropped while two are still waiting for the GUI thread, so a slow display never
+    // queues up frames (at Full, 365 MB each) and the engine never waits for the screen. The GUI returns
+    // each buffer once it has converted it.
+    void viewShown(FloatImage img) { --viewsInFlight_; recycle(std::move(img)); }
+    void previewShown(FloatImage img) { --previewsInFlight_; recycle(std::move(img)); }
 
 signals:
     void progress(QString stage, double fraction);
-    void preview(QString name, QImage image);
-    void frame(int k, QImage image);
+    void preview(QString name, FloatImage rgb, int w, int h);
+    void frame(int k, FloatImage rgb, int w, int h);
     void logLine(QString line);
     void finished(std::shared_ptr<JobResultData> data);
 
 private:
     QThread thread_;
+    FloatImage take(const float* rgb, size_t n);   // a pooled buffer holding a copy of rgb[0..n)
+    void recycle(FloatImage img);
     std::atomic<bool> cancel_{false};
+    std::atomic<int> viewsInFlight_{0}, previewsInFlight_{0};
+    std::mutex poolMutex_;
+    std::vector<FloatImage> pool_;
     bool running_ = false;
     stackcore::FrameCache cache_;   // the stack stays pinned in host memory between runs (FINDINGS 26)
 };
@@ -52,7 +69,8 @@ class ThumbLoader : public QObject {
 public:
     explicit ThumbLoader(QObject* parent = nullptr);
     ~ThumbLoader() override;
-    void start(const QStringList& files, int width);
+    // emits thumbnail(i, image) per file, or thumbnail(indices[i], image) when indices are given (a partial list)
+    void start(const QStringList& files, int width, const QList<int>& indices = {});
     void stop();
 
 signals:

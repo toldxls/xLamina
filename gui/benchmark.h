@@ -1,10 +1,11 @@
-// Tools > Benchmark: runs a stack through the engine under a sweep of hardware
-// settings (each GPU alone and all together, streams per GPU, reader threads,
-// alignment pairs in flight, frames resident or streamed), one setting varied
-// at a time from the current ones, then the best value of each combined; times
-// every run and offers to apply the fastest. Like Helicon's benchmark it can
-// also run a built-in synthetic stack, so machines can be compared. None of
-// these settings changes the result (B and C are bit-identical across them).
+// Tools > Benchmark. Quick (the default, about 20 s): up to 40 frames of the
+// open stack at half resolution under the current settings, then each GPU
+// alone, then with the frames streamed from disk instead of resident; the
+// fastest can be applied. Thorough (minutes): the whole stack at the Render
+// panel's resolution, every hardware setting varied in turn, then the best of
+// each combined. A built-in synthetic stack stands in when no folder is open,
+// or to compare machines. None of these settings changes the result (B and C
+// are bit-identical across them).
 #pragma once
 
 #include <QDialog>
@@ -18,7 +19,6 @@
 #include "prefs.h"
 #include "worker.h"
 
-class QCheckBox;
 class QComboBox;
 class QLabel;
 class QProgressBar;
@@ -63,6 +63,9 @@ private:
         int rc = -1;
         double align = 0, fusion = 0, total = 0, fps = 0, pass1 = 0, depth = 0, refine = 0, compose = 0, finalize = 0;
     };
+    bool quick() const;
+    bool useSample() const;
+    QStringList runFrames() const;   // the frames a run uses: the quick subset or the whole stack
     void updatePlan();
     void buildConfigs();
     void beginSweep();
@@ -72,7 +75,6 @@ private:
     int bestRow() const;
     QString reportText() const;
     void setRunning(bool on);
-    bool useSample() const;
     void makeSample();
 
     Worker& worker_;
@@ -85,19 +87,14 @@ private:
     QList<Row> rows_;
     int next_ = 0;
     bool running_ = false, stopping_ = false, combinedDone_ = false;
-    QElapsedTimer clock_;
+    QElapsedTimer clock_, sweepClock_;
     std::thread sampleThread_;
     QStringList sample_;        // the synthetic frames, once generated
     QString sampleDir_;
     QString autoReport_;        // set by autoRun
 
     QComboBox* stack_ = nullptr;
-    QComboBox* res_ = nullptr;
-    QCheckBox* varyGpus_ = nullptr;
-    QCheckBox* varyStreams_ = nullptr;
-    QCheckBox* varyReaders_ = nullptr;
-    QCheckBox* varyPairs_ = nullptr;
-    QCheckBox* varyCache_ = nullptr;
+    QComboBox* mode_ = nullptr;
     QLabel* info_ = nullptr;
     QLabel* plan_ = nullptr;
     QLabel* stage_ = nullptr;

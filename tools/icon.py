@@ -1,10 +1,10 @@
 """The xLamina icon: a stack of five thin slabs (the frames) with the name on
-every one, as a focus stack sees it. The middle slab is in focus: a crisp purple
-xLamina. Above it the name is red and out of focus, blurrier on the top slab
-than on the second; below it blue, blurrier on the bottom slab than on the
-fourth. One light neutral slab colour carries all three inks. Writes the master
-SVGs and a preview sheet; rasterise with ImageMagick (librsvg renders the blur
-filters):
+every one, as a focus stack sees it, on a transparent background. The middle
+slab is in focus: a crisp purple xLamina. Above it the name is red and out of
+focus, blurrier on the top slab than on the second; below it blue, blurrier on
+the bottom slab than on the fourth. One light neutral slab colour carries all
+three inks. Writes the master SVGs; rasterise with ImageMagick (librsvg renders
+the blur filters):
   python tools/icon.py gui/icon
   magick -background none -density 384 gui/icon/xlamina.svg -resize 256x256 gui/icon/xlamina-256.png   (64..256)
   magick -background none -density 384 gui/icon/xlamina_small.svg -resize 48x48 gui/icon/xlamina-48.png  (16..48, no text)
@@ -16,13 +16,13 @@ import math
 import os
 import sys
 
-BG = "#262626"
 SLAB, SLAB_EDGE = "#dcdcdc", "#a6a6a6"          # one neutral slab colour: red, blue and purple all read on it
 RED, BLUE, PURPLE = "#d6262c", "#2457d8", "#7a2fc9"
 W, D, O = 84, 11, 26                             # half-width, half-depth, perspective offset of a slab's top face
 SHEAR = math.degrees(math.atan(O / (2 * D)))
 FONT = 'font-family="Segoe UI, Arial, sans-serif" font-weight="600" font-size="31" letter-spacing="0.5"'
 SIGMA_END, SIGMA_MID = 3.0, 1.8                  # blur of the end slabs' text and of the two next to the middle
+SCALE = 1.38                                     # the stack fills the 256 px tile (no background square any more)
 
 
 def face(y, fill):
@@ -53,22 +53,23 @@ def sigma(k):
     return 0.0 if k == 0 else SIGMA_MID if abs(k) == 1 else SIGMA_END
 
 
-def icon(label=True, rounded=True, n=5, pitch=36, th=8):
-    """n slabs, `pitch` px apart, `th` px thick; the middle one in focus."""
+def icon(label=True, n=5, pitch=36, th=8, scale=SCALE):
+    """n slabs, `pitch` px apart, `th` px thick; the middle one in focus; transparent background."""
     half = n // 2
-    bg = f'<rect width="256" height="256" rx="{40 if rounded else 0}" fill="{BG}"/>'
     sigmas = sorted({round(sigma(k), 1) for k in range(-half, half + 1)} - {0.0})
     defs = "<defs>" + "".join(
         f'<filter id="b{s:.1f}" x="-30%" y="-80%" width="160%" height="260%"><feGaussianBlur stdDeviation="{s}"/></filter>'
         for s in sigmas) + "</defs>"
-    g = f'<g transform="translate(128,{128 + (th + 2 * D) // 2})">'
+    # the stack spans y = -half*pitch - D .. half*pitch + D + th; centre it in the tile, then scale about the centre
+    cy = (th) / 2
+    g = f'<g transform="translate(128,128) scale({scale}) translate(0,{-cy:.1f})">'
     body = ""
     for k in range(half, -half - 1, -1):   # bottom to top, so each slab paints over the one below
         y = k * pitch
         body += face(y, SLAB) + front(y, th, SLAB_EDGE)
         if label:
             body += blurred(text(y, ink(k), "xLamina"), sigma(k))
-    return bg + defs + g + body + "</g>"
+    return defs + g + body + "</g>"
 
 
 def svg(body, w, h):
@@ -79,16 +80,3 @@ out = sys.argv[1]
 os.makedirs(out, exist_ok=True)
 open(f"{out}/xlamina.svg", "w", encoding="utf-8").write(svg(icon(True), 256, 256))
 open(f"{out}/xlamina_small.svg", "w", encoding="utf-8").write(svg(icon(False, n=5, pitch=34, th=10), 256, 256))
-# sheet: 256 with text, then 128 / 64 / 48 with text, 32 / 24 / 16 without
-sheet = '<rect width="760" height="330" fill="#1c1c1c"/>'
-sheet += f'<g transform="translate(30,30)">{icon(True)}</g>'
-x = 320
-for s in (128, 64, 48):
-    sheet += f'<g transform="translate({x},{30 + 128 - s}) scale({s/256})">{icon(True)}</g>'
-    x += s + 16
-x = 320
-for s in (32, 24, 16):
-    sheet += f'<g transform="translate({x},{200 + 32 - s}) scale({s/256})">{icon(False, n=5, pitch=34, th=10)}</g>'
-    x += s + 16
-sheet += '<text x="320" y="300" font-family="Segoe UI, Arial" font-size="14" fill="#bbb">128 / 64 / 48 with the name; 32 / 24 / 16 without</text>'
-open(f"{out}/sheet.svg", "w", encoding="utf-8").write(svg(sheet, 760, 330))

@@ -231,17 +231,11 @@ __global__ void k_compose_preview(const double* __restrict__ num, const double* 
     for (int c = 0; c < 3; ++c) out[((size_t)y * pw + x) * 3 + c] = d > 0 ? (float)(num[i * 3 + c] / d) : 0.f;
 }
 
-void compose_preview(const ComposeState& st, int down, std::vector<float>& rgb, int& pw, int& ph, cudaStream_t s) {
+void compose_preview_kernel(const ComposeState& st, int down, float* d_out, int& pw, int& ph, cudaStream_t s) {
     down = std::max(1, down);
     pw = std::max(1, st.w / down);
     ph = std::max(1, st.h / down);
-    float* d;
-    CK(cudaMallocAsync(&d, (size_t)pw * ph * 3 * sizeof(float), s));
-    k_compose_preview<<<dim3((pw + 31) / 32, (ph + 7) / 8), dim3(32, 8), 0, s>>>(st.n1, st.d1, st.w, st.h, down, d, pw, ph);
-    rgb.resize((size_t)pw * ph * 3);
-    CK(cudaMemcpyAsync(rgb.data(), d, rgb.size() * sizeof(float), cudaMemcpyDeviceToHost, s));
-    CK(cudaFreeAsync(d, s));
-    CK(cudaStreamSynchronize(s));
+    k_compose_preview<<<dim3((pw + 31) / 32, (ph + 7) / 8), dim3(32, 8), 0, s>>>(st.n1, st.d1, st.w, st.h, down, d_out, pw, ph);
 }
 
 // the refined depth so far: the frame index that holds the best fine focus (grey, / (K-1)); -inf = nothing yet -> 0
@@ -254,17 +248,11 @@ __global__ void k_refine_preview(const float* __restrict__ bw, const int16_t* __
     for (int c = 0; c < 3; ++c) out[((size_t)y * pw + x) * 3 + c] = v;
 }
 
-void refine_preview(const RefineState& st, int K, int down, std::vector<float>& rgb, int& pw, int& ph, cudaStream_t s) {
+void refine_preview_kernel(const RefineState& st, int K, int down, float* d_out, int& pw, int& ph, cudaStream_t s) {
     down = std::max(1, down);
     pw = std::max(1, st.w / down);
     ph = std::max(1, st.h / down);
-    float* d;
-    CK(cudaMallocAsync(&d, (size_t)pw * ph * 3 * sizeof(float), s));
-    k_refine_preview<<<dim3((pw + 31) / 32, (ph + 7) / 8), dim3(32, 8), 0, s>>>(st.bw, st.iw, st.w, st.h, down, 1.f / (float)std::max(K - 1, 1), d, pw, ph);
-    rgb.resize((size_t)pw * ph * 3);
-    CK(cudaMemcpyAsync(rgb.data(), d, rgb.size() * sizeof(float), cudaMemcpyDeviceToHost, s));
-    CK(cudaFreeAsync(d, s));
-    CK(cudaStreamSynchronize(s));
+    k_refine_preview<<<dim3((pw + 31) / 32, (ph + 7) / 8), dim3(32, 8), 0, s>>>(st.bw, st.iw, st.w, st.h, down, 1.f / (float)std::max(K - 1, 1), d_out, pw, ph);
 }
 
 void RefineState::alloc(int dev_, int w_, int h_) {

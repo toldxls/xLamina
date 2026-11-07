@@ -16,6 +16,7 @@
 #include <QPointer>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QSet>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QTabBar>
@@ -57,8 +58,8 @@ private slots:
     void showOutput(int tab);
     void stepOutput(int delta);
     void onProgress(QString stage, double fraction);
-    void onPreview(QString name, QImage image);
-    void onFrame(int k, QImage image);
+    void onPreview(QString name, FloatImage rgb, int w, int h);
+    void onFrame(int k, FloatImage rgb, int w, int h);
     void onThumbnail(int index, QImage image);
     void onFullFrame(int index, QImage image);
     void onComparison(int index, QImage image);
@@ -73,6 +74,7 @@ private:
     void loadSettings();
     void saveSettings();
     void updateRecent();
+    void resumeThumbnails();
     void labelWobble(const stackcore::AlignOut& A);
     void setBusy(bool busy);
     void setStatusGeometry(const JobResultData& d);
@@ -104,6 +106,7 @@ private:
     ImageView* liveView_ = nullptr;        // right pane while rendering
     QSplitter* split_ = nullptr;
     ThumbLoader thumbs_;
+    QSet<int> thumbsDone_;                 // frames whose thumbnail has arrived (the loader pauses during a render)
     ThumbLoader frameLoader_;              // one frame at full resolution
     ThumbLoader compareLoader_;            // a comparison image (another stacker's output) at full resolution
     QString pendingCompare_;
@@ -116,6 +119,12 @@ private:
     QElapsedTimer elapsed_;
     QTimer tick_;
     QString stageText_;
+    // the live view: the frame being processed is marked in the list (a tint, moved 4 times a second, never
+    // the selection, which jumped about and ended on a random frame) and shown at most ~30 times a second
+    QListWidgetItem* liveItem_ = nullptr;
+    QListWidgetItem* markedItem_ = nullptr;
+    QTimer listTick_;
+    QElapsedTimer lastView_;
     QPointer<BenchmarkDialog> bench_;
     QList<GpuInfo> gpus_;
 

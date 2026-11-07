@@ -54,10 +54,15 @@ defaults, for one-at-a-time experiments against a 1:1 comparison.
 
 Performance holds the hardware settings: which GPUs, streams per GPU, reader threads,
 alignment pairs in flight, and whether the frames stay resident. None of them changes the
-result (B and C are bit-identical across all of them). Tools > Benchmark times the open
-stack, or a built-in synthetic one so machines can be compared, under each setting varied
-in turn and then the best of each combined, and applies the fastest; the report can be
-saved or copied.
+result (B and C are bit-identical across all of them). Tools > Benchmark (about 20 s)
+times up to 40 frames of the open stack at half resolution under the current settings,
+each GPU alone, and with the frames streamed instead of resident, and applies the fastest;
+its thorough mode runs the whole stack at full resolution with every setting varied in
+turn and then the best of each combined. A built-in synthetic stack stands in when no
+folder is open, or to compare machines. The report can be saved or copied.
+
+Live view costs a little speed (each image copied off a GPU costs its uploads about 3 ms,
+so views are rate-limited); Off is the fastest setting.
 
 The frames are read once and kept pinned in host memory for the rest of the job (and, in
 the GUI, for the next render of the same folder), as long as they fit in about half the

@@ -38,7 +38,8 @@ void refine_measure(const float* d_img, RefineScratch& sc, cudaStream_t s);
 void refine_accumulate(RefineState& st, int k, const float* d_fm, const float* d_depth, int R, cudaStream_t s);
 
 // the refined depth so far at 1/down (frame index / (K-1), grey x3), for a live view
-void refine_preview(const RefineState& st, int K, int down, std::vector<float>& rgb, int& pw, int& ph, cudaStream_t s);
+// the kernel only: see fold.h image_preview_kernel
+void refine_preview_kernel(const RefineState& st, int K, int down, float* d_out, int& pw, int& ph, cudaStream_t s);
 
 struct HostRefine {
     int w = 0, h = 0;
@@ -82,7 +83,7 @@ void compose_frame(ComposeState& st, int k, const float* d_img, const float* d_D
                    cudaStream_t s);
 
 // the composition so far at 1/down (narrow labels), for a live view
-void compose_preview(const ComposeState& st, int down, std::vector<float>& rgb, int& pw, int& ph, cudaStream_t s);
+void compose_preview_kernel(const ComposeState& st, int down, float* d_out, int& pw, int& ph, cudaStream_t s);
 
 struct HostCompose {
     int w = 0, h = 0;

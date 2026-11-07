@@ -105,12 +105,104 @@ static int load_frame_to_device(const fs::path& in, TiffInfo& info, float*& d_rg
 }
 // ----------------------------------------------------------------------------- fold (pass 1)
 
+// A live-view image copied off the GPU without holding up the work. The preview kernel runs on the
+// preview's own stream once the source stream has produced the image (an event), the 10 MB copy to
+// page-locked memory follows it there, and only the kernel is waited for (guard) before the source
+// buffer is rewritten; the copy itself, slow while the uploads saturate the PCIe link, is nobody's
+// business. The image goes to the hook when its owner (a slot, or the device for the "building" maps)
+// next comes round and the copy has landed, or at the end of the pass; a frame whose predecessor is
+// still in flight gets no view. The previews used to synchronise the slot stream inside the streamer's
+// callback and copied on it: at the GUI's Medium live view the fusion took 13 s instead of 8 (FINDINGS 30).
+struct AsyncPreview {
+    float* d = nullptr;        // device: the small image
+    float* h = nullptr;        // page-locked host copy
+    cudaStream_t ps = nullptr;
+    cudaEvent_t ready = nullptr, kdone = nullptr, ev = nullptr;   // source ready; kernel done; copy done
+    bool pending = false, guarded = false;
+    std::chrono::steady_clock::time_point last{};   // when the last preview was enqueued
+    // Every preview copy, of any size, costs the uploads about 3 ms of link time (measured: Low and Medium
+    // live views cost the same), so views are rate-limited per owner; the eye needs no more than this anyway.
+    bool due(int min_ms) const { return std::chrono::steady_clock::now() - last >= std::chrono::milliseconds(min_ms); }
+    int k = -1, pw = 0, ph = 0;
+    const char* name = nullptr;   // a "building" preview's name; null = a frame view (hooks.frame)
+
+    void alloc(int w, int hgt, int down) {
+        int pw_, ph_;
+        preview_size(w, hgt, down, pw_, ph_);
+        size_t bytes = (size_t)pw_ * ph_ * 3 * sizeof(float);
+        // (not mapped host memory: a kernel writing the preview over the link made the fusion 4x slower)
+        CK_THROW(cudaMalloc(&d, bytes));
+        CK_THROW(cudaHostAlloc((void**)&h, bytes, cudaHostAllocPortable));
+        CK_THROW(cudaStreamCreateWithFlags(&ps, cudaStreamNonBlocking));
+        CK_THROW(cudaEventCreateWithFlags(&ready, cudaEventDisableTiming));
+        CK_THROW(cudaEventCreateWithFlags(&kdone, cudaEventDisableTiming));
+        CK_THROW(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming));
+    }
+    static size_t bytes(int w, int hgt, int down) {
+        int pw_, ph_;
+        preview_size(w, hgt, down, pw_, ph_);
+        return (size_t)pw_ * ph_ * 3 * sizeof(float);
+    }
+    void free() {
+        if (ps) cudaStreamSynchronize(ps);
+        if (d) cudaFree(d);
+        if (h) cudaFreeHost(h);
+        if (ps) cudaStreamDestroy(ps);
+        for (cudaEvent_t e : {ready, kdone, ev}) if (e) cudaEventDestroy(e);
+        d = h = nullptr;
+        ps = nullptr;
+        ready = kdone = ev = nullptr;
+        pending = guarded = false;
+    }
+    // the source stream `src` has the image ready at this point; `launch(d_out, stream, pw, ph)` runs the kernel
+    template <class Launch>
+    void enqueue(cudaStream_t src, int k_, const char* name_, Launch launch) {
+        cudaEventRecord(ready, src);
+        cudaStreamWaitEvent(ps, ready, 0);
+        launch(d, ps, pw, ph);
+        cudaEventRecord(kdone, ps);
+        cudaMemcpyAsync(h, d, (size_t)pw * ph * 3 * sizeof(float), cudaMemcpyDeviceToHost, ps);
+        cudaEventRecord(ev, ps);
+        last = std::chrono::steady_clock::now();
+        pending = guarded = true;
+        k = k_; name = name_;
+    }
+    // before `src` overwrites what the kernel reads: wait for the kernel (not the copy)
+    void guard(cudaStream_t src) {
+        if (guarded) cudaStreamWaitEvent(src, kdone, 0);
+        guarded = false;
+    }
+    // hands the pending image to the hook, waiting for its copy if it is still in flight
+    void flush(const Hooks& hooks) {
+        if (!pending) return;
+        cudaEventSynchronize(ev);
+        deliver(hooks);
+    }
+    // the non-blocking form for the streaming callbacks (which must never wait on the GPU): delivers the
+    // pending image if its copy has landed and says whether the buffer is free for the next one; a frame
+    // whose predecessor is still in flight simply gets no live view
+    bool tryFlush(const Hooks& hooks) {
+        if (!pending) return true;
+        if (cudaEventQuery(ev) != cudaSuccess) return false;
+        deliver(hooks);
+        return true;
+    }
+
+private:
+    void deliver(const Hooks& hooks) {   // straight from the pinned buffer; the hook copies
+        if (name) { if (hooks.preview) hooks.preview(name, h, pw, ph); }
+        else if (hooks.frame) hooks.frame(k, h, pw, ph);
+        pending = false;
+    }
+};
+
 struct FoldSlot {
     float *d_rgb = nullptr, *d_scratch = nullptr, *d_warp = nullptr;
     FoldScratch sc;
     VolumeScratch vsc;
     cudaEvent_t ready = nullptr, done = nullptr;
     bool used = false;
+    AsyncPreview fp;   // the frame view
 };
 
 struct FoldDev {
@@ -119,6 +211,7 @@ struct FoldDev {
     FoldState st;
     std::vector<FoldSlot> slots;
     std::vector<void*> fm16, lum16;   // per frame index: this GPU's volume slices (null = not here)
+    AsyncPreview bp;                  // the detail map being built (first device only)
 };
 
 template <class T>
@@ -221,6 +314,7 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         FoldScratch probe;
         probe.w = ow; probe.h = oh; probe.levels = fp.levels; probe.shapes = pyramid_shapes(ow, oh, fp.levels);
         size_t slot_bytes = npx_full * 12 + (g.scale != 1.0 ? (size_t)g.work_w() * g.work_h() * 12 : 0) + npx_out * 12 + probe.bytes();
+        if (hooks.frame) slot_bytes += AsyncPreview::bytes(ow, oh, hooks.frame_down);
         size_t per_slot = slot_bytes + t0.pixel_bytes() + 2 * kReadAlign;
         size_t fr, tot;
         CK(cudaMemGetInfo(&fr, &tot));
@@ -239,7 +333,9 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
             if (volume) S.vsc.alloc(ow, oh, vp);
             CK(cudaEventCreateWithFlags(&S.ready, cudaEventDisableTiming));
             CK(cudaEventCreateWithFlags(&S.done, cudaEventDisableTiming));
+            if (hooks.frame) S.fp.alloc(ow, oh, hooks.frame_down);
         }
+        if (hooks.preview && d == devs[0]) D.bp.alloc(ow, oh, hooks.preview_down);
         CK(cudaMemGetInfo(&fr, &tot));
         logf("GPU %d: state %.2f GB + %d slot(s) x %.2f GB (%d requested, %d fit); %.2f of %.2f GB free after allocation\n", d,
                D.st.bytes() / 1e9, S, per_slot / 1e9, opt.streams_per_gpu, fit, fr / 1e9, tot / 1e9);
@@ -248,7 +344,9 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
     auto on_frame = [&](const DeviceFrame& f) {
         auto& D = ctx[f.dev];
         auto& S = D.slots[f.slot];
+        const bool view = hooks.frame && S.fp.tryFlush(hooks) && S.fp.due(hooks.frame_min_ms);   // the previous view has landed and it is time
         if (S.used) cudaStreamWaitEvent(f.stream, S.done, 0);   // the fold stream must be done with this slot
+        S.fp.guard(f.stream);                                    // and the previous view's kernel with d_warp
         convert_to_rgb_f32(f.d_pixels(), *f.info, S.d_rgb, nullptr, f.stream);
         int k = ks[f.k];
         load_aligned(S.d_rgb, g, T[k], S.d_scratch, S.d_warp, false, f.stream);
@@ -259,26 +357,19 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
             CK_THROW(cudaMallocAsync(&D.lum16[k], nb, f.stream));
             volume_slice(S.d_warp, vp, S.vsc, D.fm16[k], D.lum16[k], f.stream);
         }
+        if (view)   // the frame just aligned, small, for the GUI's frame view (delivered at the slot's next turn)
+            S.fp.enqueue(f.stream, k, nullptr, [&](float* d, cudaStream_t ps, int& pw, int& ph) { image_preview_kernel(S.d_warp, ow, oh, hooks.frame_down, d, pw, ph, ps); });
         cudaEventRecord(S.ready, f.stream);
         cudaStreamWaitEvent(D.fold_s, S.ready, 0);
+        D.bp.guard(D.fold_s);   // the previous detail-map preview must have read the state before it changes
         fold_accumulate(D.st, k, S.d_warp, fp, S.sc, D.fold_s);
         cudaEventRecord(S.done, D.fold_s);
         S.used = true;
         int done = ++frames_done;
         if (hooks.progress) hooks.progress("pass 1: fold", (double)done / (double)run_paths.size());
-        if (hooks.frame) {   // the frame just aligned, small, for the GUI's frame view
-            std::vector<float> img;
-            int pw, ph;
-            image_preview(S.d_warp, ow, oh, hooks.frame_down, img, pw, ph, f.stream);
-            hooks.frame(k, img, pw, ph);
-        }
         // live preview: this GPU's best focus measure so far at a fraction of the output grid
-        if (hooks.preview && f.dev == devs[0] && (done % hooks.preview_every == 0)) {
-            std::vector<float> img;
-            int pw, ph;
-            fold_focus_preview(D.st, hooks.preview_down, img, pw, ph, D.fold_s);
-            hooks.preview("focus (building)", img, pw, ph);   // the detail map so far
-        }
+        if (hooks.preview && f.dev == devs[0] && (done % hooks.preview_every == 0) && D.bp.tryFlush(hooks) && D.bp.due(hooks.preview_min_ms))
+            D.bp.enqueue(D.fold_s, -1, "focus (building)", [&](float* d, cudaStream_t ps, int& pw, int& ph) { fold_focus_preview_kernel(D.st, hooks.preview_down, d, pw, ph, ps); });
     };
 
     logf("fold: %zu frames, grid %dx%d -> %dx%d at scale %g, %d levels, blur sigma %.2f px, %zu GPU(s)\n",
@@ -291,6 +382,8 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         CK(cudaSetDevice(d));
         CK(cudaStreamSynchronize(ctx[d].fold_s));
         CK(cudaGetLastError());
+        for (auto& S : ctx[d].slots) S.fp.flush(hooks);   // the last frame of every slot
+        ctx[d].bp.flush(hooks);
     }
     logf("%d frames in %.3f s: %.1f frames/s, %.2f GB/s%s\n", st.frames, st.seconds, st.frames / st.seconds,
            st.bytes / st.seconds / 1e9, source_note(st).c_str());
@@ -340,10 +433,16 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         cudaFree(d_base); cudaFree(d_coll); cudaFree(d_t1); cudaFree(d_t2); cudaFree(d_guide); cudaFree(d_ga);
 
         // every GPU aggregates its own slices against the shared guide; the host collects plane-major volumes
-        std::vector<uint16_t>& fm_all = P.fm_all;
-        std::vector<uint16_t>& lum_all = P.lum_all;
-        std::vector<float>& V_all = P.V_all;
-        fm_all.assign(nd * K, 0); lum_all.assign(nd * K, 0); V_all.assign(nd * K, 0.f);
+        // in page-locked memory, so the copies stream behind the kernels instead of staging one slice at a
+        // time (0.59 -> ~0.3 s). The raw measure is only kept for the fold command's validation files.
+        PinnedVec<uint16_t>& fm_all = P.fm_all;
+        PinnedVec<uint16_t>& lum_all = P.lum_all;
+        PinnedVec<float>& V_all = P.V_all;
+        const bool keep_fm = po.host_state;
+        if (keep_fm) fm_all.resize(nd * K);
+        lum_all.resize(nd * K);
+        V_all.resize(nd * K);
+        std::vector<char> filled(K, 0);   // a frame no GPU saw (probe failed) leaves its plane to be zeroed below
         int done = 0;
         for (int d : devs) {
             auto& D = ctx[d];
@@ -367,13 +466,14 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
                 if (vp.agg_r > 0) aggregate_slice(d_g, gs, D.fm16[k], d_V, vp.agg_eps, s);
                 else { f16_to_f32(D.fm16[k], d_V, nd, s); relu_sqrt(d_V, nd, s); }
                 if (b_blur) gaussian_blur(d_V, d_V, d_T, vp.dw, vp.dh, gb, s);
+                // stream order: the copies read d_V and the slices before the next slice's kernels and the frees
                 CK(cudaMemcpyAsync(V_all.data() + nd * k, d_V, nd * sizeof(float), cudaMemcpyDeviceToHost, s));
-                CK(cudaMemcpyAsync(fm_all.data() + nd * k, D.fm16[k], nd * 2, cudaMemcpyDeviceToHost, s));
+                if (keep_fm) CK(cudaMemcpyAsync(fm_all.data() + nd * k, D.fm16[k], nd * 2, cudaMemcpyDeviceToHost, s));
                 CK(cudaMemcpyAsync(lum_all.data() + nd * k, D.lum16[k], nd * 2, cudaMemcpyDeviceToHost, s));
-                CK(cudaStreamSynchronize(s));
                 cudaFreeAsync(D.fm16[k], s);
                 cudaFreeAsync(D.lum16[k], s);
                 D.fm16[k] = D.lum16[k] = nullptr;
+                filled[k] = 1;
                 ++done;
             }
             CK(cudaStreamSynchronize(s));
@@ -382,6 +482,12 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
             cudaFree(d_g);
             cudaFree(d_V);
         }
+        for (int k = 0; k < K; ++k)
+            if (!filled[k]) {
+                memset(V_all.data() + nd * k, 0, nd * sizeof(float));
+                memset(lum_all.data() + nd * k, 0, nd * 2);
+                if (keep_fm) memset(fm_all.data() + nd * k, 0, nd * 2);
+            }
         P.vol_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         P.guide = std::move(guide_h);
         P.ga = std::move(ga_h);
@@ -395,7 +501,9 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
             cudaFree(S.d_rgb); cudaFree(S.d_scratch); cudaFree(S.d_warp); S.sc.free();
             if (volume) S.vsc.free();
             cudaEventDestroy(S.ready); cudaEventDestroy(S.done);
+            S.fp.free();
         }
+        D.bp.free();
         D.st.free();
         cudaStreamDestroy(D.fold_s);
     }
@@ -411,11 +519,13 @@ struct PassSlot {
     cudaEvent_t ready = nullptr, done = nullptr;
     bool used = false;
     int index = 0;   // slot index within its device
+    AsyncPreview fp;   // the frame view
 };
 struct PassDev {
     int dev = -1;
     cudaStream_t fold_s = nullptr;
     std::vector<PassSlot> slots;
+    AsyncPreview bp;   // the map being built (first device only); the accumulate stage enqueues into it
 };
 
 template <class SlotStage, class AccStage>
@@ -447,28 +557,29 @@ static StreamerStats run_pass(const std::vector<fs::path>& run_paths, const std:
             CK_THROW(cudaMalloc(&S.d_warp, npx_out * 3 * sizeof(float)));
             CK_THROW(cudaEventCreateWithFlags(&S.ready, cudaEventDisableTiming));
             CK_THROW(cudaEventCreateWithFlags(&S.done, cudaEventDisableTiming));
+            if (hooks.frame) S.fp.alloc(g.out_w(), g.out_h(), hooks.frame_down);
         }
+        if (hooks.preview && d == devs[0]) D.bp.alloc(g.out_w(), g.out_h(), hooks.preview_down);
     }
     auto on_frame = [&](const DeviceFrame& f) {
         auto& D = ctx[f.dev];
         auto& S = D.slots[f.slot];
+        const bool view = hooks.frame && S.fp.tryFlush(hooks) && S.fp.due(hooks.frame_min_ms);
         if (S.used) cudaStreamWaitEvent(f.stream, S.done, 0);
+        S.fp.guard(f.stream);
         convert_to_rgb_f32(f.d_pixels(), *f.info, S.d_rgb, nullptr, f.stream);
         int k = ks[f.k];
         load_aligned(S.d_rgb, g, T[k], S.d_scratch, S.d_warp, false, f.stream);
         slot_stage(f.dev, S, k, f.stream);
+        if (view)
+            S.fp.enqueue(f.stream, k, nullptr, [&](float* d, cudaStream_t ps, int& pw, int& ph) { image_preview_kernel(S.d_warp, g.out_w(), g.out_h(), hooks.frame_down, d, pw, ph, ps); });
         cudaEventRecord(S.ready, f.stream);
         cudaStreamWaitEvent(D.fold_s, S.ready, 0);
+        D.bp.guard(D.fold_s);   // the previous building preview must have read the state before it changes
         acc_stage(f.dev, S, k, D.fold_s);
         cudaEventRecord(S.done, D.fold_s);
         S.used = true;
         if (hooks.progress) hooks.progress(what, (double)(++done) / (double)run_paths.size());
-        if (hooks.frame) {
-            std::vector<float> img;
-            int pw, ph;
-            image_preview(S.d_warp, g.out_w(), g.out_h(), hooks.frame_down, img, pw, ph, f.stream);
-            hooks.frame(k, img, pw, ph);
-        }
     };
     StreamerStats st = stream_frames(run_paths, opt, on_frame);
     for (auto& e : st.errors) logf("  error: %s\n", e.c_str());
@@ -476,6 +587,8 @@ static StreamerStats run_pass(const std::vector<fs::path>& run_paths, const std:
         CK_THROW(cudaSetDevice(d));
         CK_THROW(cudaStreamSynchronize(ctx[d].fold_s));
         CK_THROW(cudaGetLastError());
+        for (auto& S : ctx[d].slots) S.fp.flush(hooks);
+        ctx[d].bp.flush(hooks);
     }
     std::string split;
     for (size_t i = 0; i < devs.size(); ++i) split += (i ? ", GPU " : "; GPU ") + std::to_string(devs[i]) + " " + std::to_string(st.frames_per_device[i]);
@@ -487,7 +600,9 @@ static StreamerStats run_pass(const std::vector<fs::path>& run_paths, const std:
         for (auto& S : D.slots) {
             cudaFree(S.d_rgb); cudaFree(S.d_scratch); cudaFree(S.d_warp);
             cudaEventDestroy(S.ready); cudaEventDestroy(S.done);
+            S.fp.free();
         }
+        D.bp.free();
         cudaStreamDestroy(D.fold_s);
     }
     return st;
@@ -601,9 +716,9 @@ int run_stack(StackOptions& so) {
         planes_to_kfastest_f16(d_L16p, d_L16, P.vp.dw, P.vp.dh, K, s);
         CK(cudaStreamSynchronize(s));
         cudaFree(d_planes); cudaFree(d_L16p);
-        std::vector<float>().swap(P.V_all);
-        std::vector<uint16_t>().swap(P.fm_all);
-        std::vector<uint16_t>().swap(P.lum_all);
+        P.V_all.release_async();
+        P.fm_all.release_async();
+        P.lum_all.release_async();
         DepthParams dp;
         dp.halo_prior = (float)so.halo_prior;
         dp.dark_prior = (float)so.dark_prior;
@@ -619,7 +734,7 @@ int run_stack(StackOptions& so) {
         for (size_t i = 0; i < no; ++i) { float v = R.depth_s[i] / (float)std::max(K - 1, 1); rgb[i * 3] = rgb[i * 3 + 1] = rgb[i * 3 + 2] = v; }
         std::vector<float> small; int pw, ph;
         downsample_preview(rgb, ow, oh, hooks.preview_down, small, pw, ph);
-        hooks.preview(name, small, pw, ph);
+        hooks.preview(name, small.data(), pw, ph);
     };
     preview_depth("depth map");
     if (hooks.cancelled()) { cudaFree(d_guide); cudaStreamDestroy(s); return 3; }
@@ -652,12 +767,11 @@ int run_stack(StackOptions& so) {
                  [&](int dev, PassSlot& S, int, cudaStream_t ss) { refine_measure(S.d_warp, rsc[dev][S.index], ss); },
                  [&](int dev, PassSlot& S, int k, cudaStream_t fs) {
                      refine_accumulate(rst[dev], k, rsc[dev][S.index].fm, d_depth[dev], refine_r, fs);
-                     if (hooks.preview && dev == P.devs[0] && (++refined % std::max(1, hooks.preview_every) == 0)) {
-                         std::vector<float> img;
-                         int pw, ph;
-                         refine_preview(rst[dev], K, hooks.preview_down, img, pw, ph, fs);
-                         hooks.preview("depth (building)", img, pw, ph);
-                     }
+                     if (hooks.preview && dev == P.devs[0] && (++refined % std::max(1, hooks.preview_every) == 0) && ctx[dev].bp.tryFlush(hooks) &&
+                         ctx[dev].bp.due(hooks.preview_min_ms))
+                         ctx[dev].bp.enqueue(fs, -1, "depth (building)", [&, dev](float* d, cudaStream_t ps, int& pw, int& ph) {
+                             refine_preview_kernel(rst[dev], K, hooks.preview_down, d, pw, ph, ps);
+                         });
                  },
                  "pass 2: fine focus", hooks);
         for (size_t i = 1; i < P.devs.size(); ++i) merge_device(rst[prim], rst[P.devs[i]]);
@@ -707,12 +821,11 @@ int run_stack(StackOptions& so) {
                  [&](int dev, PassSlot& S, int k, cudaStream_t fs) {
                      compose_frame(cst[dev], k, S.d_warp, d_D[dev], d_Ds[dev], csc[dev][S.index], fs);
                      // live view: the first GPU's composition so far, every preview_every frames
-                     if (hooks.preview && dev == P.devs[0] && (++composed % std::max(1, hooks.preview_every) == 0)) {
-                         std::vector<float> img;
-                         int pw, ph;
-                         compose_preview(cst[dev], hooks.preview_down, img, pw, ph, fs);
-                         hooks.preview("B (building)", img, pw, ph);
-                     }
+                     if (hooks.preview && dev == P.devs[0] && (++composed % std::max(1, hooks.preview_every) == 0) && ctx[dev].bp.tryFlush(hooks) &&
+                         ctx[dev].bp.due(hooks.preview_min_ms))
+                         ctx[dev].bp.enqueue(fs, -1, "B (building)", [&, dev](float* d, cudaStream_t ps, int& pw, int& ph) {
+                             compose_preview_kernel(cst[dev], hooks.preview_down, d, pw, ph, ps);
+                         });
                  },
                  "pass 3: composition", hooks);
         for (size_t i = 1; i < P.devs.size(); ++i) merge_device(cst[prim], cst[P.devs[i]]);
@@ -728,7 +841,7 @@ int run_stack(StackOptions& so) {
         logf("compose: %zu of %d frames carry a label; %.2f s\n", ks.size(), K, since(t3));
     }
     if (so.result) so.result->compose_seconds = since(t3);
-    if (hooks.preview) { std::vector<float> small; int pw, ph; downsample_preview(b_img, ow, oh, hooks.preview_down, small, pw, ph); hooks.preview("B", small, pw, ph); }
+    if (hooks.preview) { std::vector<float> small; int pw, ph; downsample_preview(b_img, ow, oh, hooks.preview_down, small, pw, ph); hooks.preview("B", small.data(), pw, ph); }
     if (hooks.cancelled()) { cudaFree(d_guide); cudaStreamDestroy(s); return 3; }
     stage("finalize", 0.0);
 
@@ -767,7 +880,7 @@ int run_stack(StackOptions& so) {
     auto wanted = [&](const std::string& n) { return so.outputs.empty() || std::find(so.outputs.begin(), so.outputs.end(), n) != so.outputs.end(); };
     if (hooks.preview)
         for (size_t i = 0; i < F.names.size(); ++i)
-            if (wanted(F.names[i])) { std::vector<float> small; int pw, ph; downsample_preview(F.images[i], ow, oh, hooks.preview_down, small, pw, ph); hooks.preview(F.names[i], small, pw, ph); }
+            if (wanted(F.names[i])) { std::vector<float> small; int pw, ph; downsample_preview(F.images[i], ow, oh, hooks.preview_down, small, pw, ph); hooks.preview(F.names[i], small.data(), pw, ph); }
     std::vector<uint8_t> icc = tiff_probe(P.paths[0]).icc;   // the frames' colour profile goes into every output
     if (so.result) {
         auto& Rr = *so.result;
@@ -780,10 +893,13 @@ int run_stack(StackOptions& so) {
 
     // ---- write
     auto t5 = std::chrono::steady_clock::now();
-    size_t written = 0;
+    std::atomic<size_t> written{0};
     if (!out.empty()) {
     fs::create_directories(out);
     fs::path od(out);
+    // one thread per output: the 16-bit conversion and the file write of each (0.68 s for three in a row)
+    std::vector<std::thread> writers;
+    std::atomic<int> failed{0};
     for (size_t i = 0; i < F.names.size(); ++i) {
         if (!wanted(F.names[i])) continue;
         const std::vector<float>* img = &F.images[i];
@@ -791,9 +907,13 @@ int run_stack(StackOptions& so) {
             size_t j = std::find(so.result->names.begin(), so.result->names.end(), F.names[i]) - so.result->names.begin();
             img = &so.result->images[j];
         }
-        if (!write_tiff_rgb16((od / (F.names[i] + ".tif")).string(), *img, ow, oh, icc)) { logf("cannot write %s\n", F.names[i].c_str()); return 1; }
-        ++written;
+        std::string path = (od / (F.names[i] + ".tif")).string(), name = F.names[i];
+        writers.emplace_back([img, path, name, ow, oh, &icc, &failed, &written] {
+            if (!write_tiff_rgb16(path, *img, ow, oh, icc)) { logf("cannot write %s\n", name.c_str()); ++failed; }
+            else ++written;
+        });
     }
+    struct Join { std::vector<std::thread>& t; ~Join() { for (auto& x : t) if (x.joinable()) x.join(); } } join{writers};
     write_raw(od / "depth.f32", R.depth_s.data(), R.depth_s.size());
     write_raw(od / "depth_smooth.f32", Ds.data(), Ds.size());
     write_raw(od / "conf.f32", R.conf.data(), R.conf.size());
@@ -806,7 +926,9 @@ int run_stack(StackOptions& so) {
         fprintf(mf, "\n");
         fclose(mf);
     }
-    logf("wrote %zu outputs (%dx%d) in %.2f s -> %s", written, ow, oh, since(t5), out.c_str());
+    for (auto& t : writers) t.join();
+    if (failed) return 1;
+    logf("wrote %zu outputs (%dx%d) in %.2f s -> %s", written.load(), ow, oh, since(t5), out.c_str());
     if (so.result) so.result->write_seconds = since(t5);
     }
     cudaFree(d_guide);
@@ -893,7 +1015,7 @@ int run_align(AlignOptions& ao, AlignOut& A) {
     // ---- pass 0: luma at the align scale, for every frame, to the host
     std::vector<float> luma_stack((size_t)N * w * h);
     {
-        struct Slot { float *d_rgb = nullptr, *d_y = nullptr, *d_small = nullptr; AreaResizer rz; };
+        struct Slot { float *d_rgb = nullptr, *d_y = nullptr, *d_small = nullptr; AreaResizer rz; AsyncPreview fp; };
         std::vector<std::vector<Slot>> slots(ndev);
         StreamerOptions opt;
         opt.devices = devs;
@@ -914,28 +1036,27 @@ int run_align(AlignOptions& ao, AlignOut& A) {
                 CK(cudaMalloc(&S.d_y, (size_t)W * H * sizeof(float)));
                 CK(cudaMalloc(&S.d_small, (size_t)w * h * sizeof(float)));
                 S.rz.build(W, H, w, h);
+                if (hooks.frame) S.fp.alloc(W, H, hooks.frame_down);
             }
         }
         auto on_frame = [&](const DeviceFrame& f) {
             auto& S = slots[f.dev][f.slot];
+            const bool view = hooks.frame && S.fp.tryFlush(hooks) && S.fp.due(hooks.frame_min_ms);
+            S.fp.guard(f.stream);
             convert_to_rgb_f32(f.d_pixels(), *f.info, S.d_rgb, nullptr, f.stream);
+            if (view)   // the frame as read (unaligned), small; delivered at the slot's next turn
+                S.fp.enqueue(f.stream, f.k, nullptr, [&](float* d, cudaStream_t ps, int& pw, int& ph) { image_preview_kernel(S.d_rgb, W, H, hooks.frame_down, d, pw, ph, ps); });
             luma(S.d_rgb, S.d_y, (size_t)W * H, f.stream);
             S.rz.run(S.d_y, S.d_small, 1, f.stream);
             cudaMemcpyAsync(luma_stack.data() + (size_t)f.k * w * h, S.d_small, (size_t)w * h * sizeof(float), cudaMemcpyDeviceToHost, f.stream);
             if (hooks.progress) hooks.progress("reading frames", (double)(++done) / N);
-            if (hooks.frame) {   // the frame as read (unaligned), small
-                std::vector<float> img;
-                int pw, ph;
-                image_preview(S.d_rgb, W, H, hooks.frame_down, img, pw, ph, f.stream);
-                hooks.frame(f.k, img, pw, ph);
-            }
         };
         StreamerStats st = stream_frames(paths, opt, on_frame);
         for (auto& e : st.errors) logf("  error: %s\n", e.c_str());
         for (int d : devs) {
             CK(cudaSetDevice(d));
             CK(cudaDeviceSynchronize());
-            for (auto& S : slots[d]) { cudaFree(S.d_rgb); cudaFree(S.d_y); cudaFree(S.d_small); S.rz.free(); }
+            for (auto& S : slots[d]) { S.fp.flush(hooks); cudaFree(S.d_rgb); cudaFree(S.d_y); cudaFree(S.d_small); S.rz.free(); S.fp.free(); }
         }
         logf("align: %d frames %dx%d -> luma %dx%d in %.2f s%s\n", N, W, H, w, h, st.seconds, source_note(st).c_str());
         if (getenv("STACKER_MEM_DEBUG"))

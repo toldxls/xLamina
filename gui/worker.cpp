@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 
 #include "imageview.h"
 #include "stackcore/tiff.h"
@@ -20,6 +22,30 @@ Worker::~Worker() {
 
 void Worker::releaseCache() {
     if (!running_) cache_.clear();
+}
+
+bool Worker::resident(const QStringList& files) {
+    if (running_ || files.isEmpty()) return false;
+    for (const QString& f : files) if (!cache_.find(f.toStdWString())) return false;
+    return true;
+}
+
+FloatImage Worker::take(const float* rgb, size_t n) {
+    FloatImage img;
+    {
+        std::lock_guard<std::mutex> lk(poolMutex_);
+        if (!pool_.empty()) { img = std::move(pool_.back()); pool_.pop_back(); }
+    }
+    if (!img) img = std::make_shared<std::vector<float>>();
+    img->resize(n);   // no reallocation once the pool has warmed up
+    memcpy(img->data(), rgb, n * sizeof(float));
+    return img;
+}
+
+void Worker::recycle(FloatImage img) {
+    if (!img) return;
+    std::lock_guard<std::mutex> lk(poolMutex_);
+    if (pool_.size() < 8) pool_.push_back(std::move(img));
 }
 
 void Worker::start(const JobOptions& jo_in, int liveDown, bool quiet) {
@@ -41,22 +67,27 @@ void Worker::start(const JobOptions& jo_in, int liveDown, bool quiet) {
         hooks.frame_down = std::max(1, liveDown);
         hooks.preview_every = liveDown >= 6 ? 3 : liveDown >= 3 ? 6 : 12;   // dearer previews, fewer of them
         hooks.progress = [this](const std::string& stage, double f) { emit progress(QString::fromStdString(stage), f); };
-        if (!quiet) {
-            hooks.preview = [this](const std::string& name, const std::vector<float>& rgb, int w, int h) {
-                float gain = 1.f;
-                if (name.rfind("focus", 0) == 0) {   // the focus measure has no fixed scale: show it up to its 99th percentile
-                    std::vector<float> v;
-                    v.reserve((size_t)w * h / 4 + 1);
-                    for (size_t i = 0; i < (size_t)w * h; i += 4) v.push_back(rgb[i * 3]);
-                    if (!v.empty()) {
-                        size_t q = v.size() * 99 / 100;
-                        std::nth_element(v.begin(), v.begin() + q, v.end());
-                        gain = v[q] > 1e-9f ? 1.f / v[q] : 1.f;
-                    }
-                }
-                emit preview(QString::fromStdString(name), toQImage(rgb.data(), w, h, gain));
+        viewsInFlight_ = previewsInFlight_ = 0;
+        // timing experiments: XLAMINA_NOVIEW=1 drops the per-frame view, XLAMINA_NOPREVIEW=1 the building maps
+        const bool noView = getenv("XLAMINA_NOVIEW"), noPreview = getenv("XLAMINA_NOPREVIEW");
+        if (!quiet) {   // the floats go to the GUI thread in pooled buffers; it converts them (see FloatImage)
+            hooks.preview = [this](const std::string& name, const float* rgb, int w, int h) {
+                bool building = name.find("(building)") != std::string::npos;
+                if (building && previewsInFlight_.load() >= 2) return;   // the screen has not caught up: skip this one
+                ++previewsInFlight_;   // final previews are never skipped, but they are counted the same way
+                emit preview(QString::fromStdString(name), take(rgb, (size_t)w * h * 3), w, h);
             };
-            hooks.frame = [this](int k, const std::vector<float>& rgb, int w, int h) { emit frame(k, toQImage(rgb.data(), w, h)); };
+            hooks.frame = [this](int k, const float* rgb, int w, int h) {
+                if (viewsInFlight_.load() >= 2) return;
+                ++viewsInFlight_;
+                emit frame(k, take(rgb, (size_t)w * h * 3), w, h);
+            };
+            if (noView) hooks.frame = nullptr;
+            if (noPreview) hooks.preview = nullptr;
+            if (getenv("XLAMINA_NOOPHOOKS")) {   // the GPU-side preview work without the host side
+                hooks.frame = [](int, const float*, int, int) {};
+                hooks.preview = [](const std::string&, const float*, int, int) {};
+            }
         }
         auto t0 = std::chrono::steady_clock::now();
         try {
@@ -90,14 +121,14 @@ void ThumbLoader::stop() {
     ++generation_;
 }
 
-void ThumbLoader::start(const QStringList& files, int width) {
+void ThumbLoader::start(const QStringList& files, int width, const QList<int>& indices) {
     stop();
     stop_.store(false);
     int gen = generation_.load();
     QObject* job = new QObject();
     job->moveToThread(&thread_);
     thread_.start();
-    QMetaObject::invokeMethod(job, [this, files, width, gen, job] {
+    QMetaObject::invokeMethod(job, [this, files, width, gen, job, indices] {
         std::vector<uint8_t> buf;
         for (int i = 0; i < files.size() && !stop_.load() && generation_.load() == gen; ++i) {
             TiffInfo info = tiff_probe(files[i].toStdWString());
@@ -125,7 +156,7 @@ void ThumbLoader::start(const QStringList& files, int width) {
                     out[x] = qRgb(c[0], c[1], c[2]);
                 }
             }
-            emit thumbnail(i, img);
+            emit thumbnail(indices.isEmpty() ? i : indices.value(i, i), img);
         }
         job->deleteLater();
     }, Qt::QueuedConnection);

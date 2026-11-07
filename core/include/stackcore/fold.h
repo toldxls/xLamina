@@ -100,9 +100,13 @@ void fold_accumulate(FoldState& st, int k, const float* d_img, const FoldParams&
 // Live preview of the running A (a_num / a_den) at 1/down of the grid, float RGB on the host (syncs the stream).
 void fold_preview(const FoldState& st, int down, std::vector<float>& rgb, int& pw, int& ph, cudaStream_t s);
 // The best focus measure found so far per pixel (b_best, grey x3), same layout: the detail map building.
-void fold_focus_preview(const FoldState& st, int down, std::vector<float>& rgb, int& pw, int& ph, cudaStream_t s);
+// Preview kernels: the small image (pw x ph x 3 floats) into d_out on stream s, nothing else. The copy to
+// the host is the caller's (pipeline.cpp AsyncPreview: its own stream, so a slow D2H under a saturated
+// link never holds the slot or fold stream; FINDINGS 30).
+void preview_size(int w, int h, int down, int& pw, int& ph);
+void fold_focus_preview_kernel(const FoldState& st, int down, float* d_out, int& pw, int& ph, cudaStream_t s);
 // A float RGB device image at 1/down (point samples), to the host (syncs the stream).
-void image_preview(const float* d_rgb, int w, int h, int down, std::vector<float>& rgb, int& pw, int& ph, cudaStream_t s);
+void image_preview_kernel(const float* d_rgb, int w, int h, int down, float* d_out, int& pw, int& ph, cudaStream_t s);
 
 // Host copy of a state, for merging and for writing out.
 struct HostFoldState {

@@ -1,7 +1,6 @@
 #include "benchmark.h"
 
 #include <QApplication>
-#include <QCheckBox>
 #include <QClipboard>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -40,6 +39,7 @@ using namespace stackcore;
 // Deterministic, so two machines running it are comparable.
 namespace {
 const int kSampleW = 4000, kSampleH = 2667, kSampleN = 32;   // 2 GB of frames: runs of a few seconds, not sub-second noise
+const int kQuickFrames = 40;                                 // the quick benchmark's subset of the open stack
 
 inline float hash01(int x, int y, int seed) {
     uint32_t h = (uint32_t)x * 374761393u + (uint32_t)y * 668265263u + (uint32_t)seed * 2246822519u;
@@ -101,7 +101,7 @@ QStringList generate_sample(const QString& dir, const std::function<void(const Q
     if (complete) return files;
     const int W = kSampleW, H = kSampleH, N = kSampleN;
     const size_t n = (size_t)W * H;
-    progress("generating the sample stack: scene");
+    progress("generating the sample stack (once): scene");
     std::vector<float> Z(n), T(n), tintR(n), tintG(n), tintB(n);
     const float cx = 0.6f * W, cy = 0.5f * H, rx = 0.25f * W, ry = 0.30f * H;
     for (int y = 0; y < H; ++y)
@@ -126,13 +126,13 @@ QStringList generate_sample(const QString& dir, const std::function<void(const Q
     std::vector<std::vector<float>> levels(L);
     std::vector<float> tmp;
     for (int l = 0; l < L; ++l) {
-        progress(QString("generating the sample stack: defocus level %1 of %2").arg(l + 1).arg(L));
+        progress(QString("generating the sample stack (once): defocus level %1 of %2").arg(l + 1).arg(L));
         gauss_blur(T, levels[l], tmp, W, H, sigmas[l]);
     }
     std::vector<float>().swap(tmp);
     std::vector<float> rgb(n * 3);
     for (int k = 0; k < N; ++k) {
-        progress(QString("generating the sample stack: frame %1 of %2").arg(k + 1).arg(N));
+        progress(QString("generating the sample stack (once): frame %1 of %2").arg(k + 1).arg(N));
         int dx = (int)std::lround(1.5 * std::sin(0.9 * k)), dy = (int)std::lround(1.2 * std::cos(0.7 * k));
         uint32_t rng = 12345u + 7919u * k;
         for (int y = 0; y < H; ++y) {
@@ -165,7 +165,7 @@ BenchmarkDialog::BenchmarkDialog(Worker& worker, const JobOptions& base, const Q
     : QDialog(parent), worker_(worker), base_(base), frames_(frames), stackLabel_(stackLabel), perf_(perf) {
     setWindowTitle("Benchmark");
     setWindowFlag(Qt::WindowContextHelpButtonHint, false);
-    resize(1000, 640);
+    resize(960, 560);
     gpus_ = enumerateGpus();
     sampleDir_ = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation)).filePath("xLamina-sample");
 
@@ -183,39 +183,18 @@ BenchmarkDialog::BenchmarkDialog(Worker& worker, const JobOptions& base, const Q
     if (!frames_.isEmpty()) stack_->addItem(QString("The open stack: %1 (%2 frames)").arg(stackLabel_).arg(frames_.size()), 0);
     stack_->addItem(QString("Built-in sample: %1 synthetic frames of %2 x %3 (comparable between machines)").arg(kSampleN).arg(kSampleW).arg(kSampleH), 1);
     fl->addRow("Stack", stack_);
-    res_ = new QComboBox;
-    res_->addItems({"Full resolution", "Half resolution"});
-    res_->setCurrentIndex(base_.stack.po.g.scale == 0.5 ? 1 : 0);
-    fl->addRow("Output", res_);
+    mode_ = new QComboBox;
+    mode_->addItem(QString("Quick (about 20 s): up to %1 frames at half resolution; the current settings, each GPU alone, frames streamed").arg(kQuickFrames), 0);
+    mode_->addItem("Thorough (minutes): the whole stack at the Render panel's resolution, every setting varied, then the best of each combined", 1);
+    fl->addRow("Mode", mode_);
     QStringList outs;
     for (const auto& o : base_.stack.outputs) outs << QString::fromStdString(o);
-    fl->addRow("Outputs", new QLabel(outs.isEmpty() ? "all" : outs.join(", ") + "  (as ticked in the Render panel; nothing is written to disk)"));
-    QWidget* vary = new QWidget;
-    QHBoxLayout* hl = new QHBoxLayout(vary);
-    hl->setContentsMargins(0, 0, 0, 0);
-    varyGpus_ = new QCheckBox("GPUs");
-    varyGpus_->setToolTip("Each GPU alone, and all of them together.");
-    varyStreams_ = new QCheckBox("Streams per GPU");
-    varyStreams_->setToolTip("1, 2 and 3 upload/compute streams per GPU in the fusion passes.");
-    varyReaders_ = new QCheckBox("Reader threads");
-    varyReaders_->setToolTip("8, 16 and 32 TIFF reader threads (matters when the frames are read from disk).");
-    varyPairs_ = new QCheckBox("Pairs in flight");
-    varyPairs_->setToolTip("2, 3 and 4 alignment pairs in flight per GPU.");
-    varyCache_ = new QCheckBox("Frames resident / streamed");
-    varyCache_->setToolTip("Frames kept pinned in host memory between passes, or read from disk every pass.");
-    for (QCheckBox* c : {varyGpus_, varyStreams_, varyReaders_, varyPairs_, varyCache_}) {
-        c->setChecked(true);
-        hl->addWidget(c);
-        connect(c, &QCheckBox::toggled, this, &BenchmarkDialog::updatePlan);
-    }
-    varyGpus_->setEnabled(gpus_.size() > 1);
-    hl->addStretch(1);
-    fl->addRow("Vary", vary);
     plan_ = new QLabel;
     plan_->setWordWrap(true);
     fl->addRow("", plan_);
     vl->addWidget(what);
     connect(stack_, &QComboBox::currentIndexChanged, this, &BenchmarkDialog::updatePlan);
+    connect(mode_, &QComboBox::currentIndexChanged, this, &BenchmarkDialog::updatePlan);
 
     table_ = new QTableWidget(0, 11);
     table_->setHorizontalHeaderLabels({"#", "Configuration", "Align s", "Fusion s", "Total s", "Frames/s", "Pass 1 s", "Depth s", "Refine s", "Compose s", "Finalize s"});
@@ -224,8 +203,8 @@ BenchmarkDialog::BenchmarkDialog(Worker& worker, const JobOptions& base, const Q
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table_->setAlternatingRowColors(true);
-    table_->setToolTip("Total is the wall time of the whole job (alignment, fusion, report). The first run of a stack reads the frames from\n"
-                       "disk and is marked cold; the comparison is between the warm runs. Bold: the fastest warm run.");
+    table_->setToolTip("Total is the wall time of the whole job (alignment, fusion, report; nothing is written to disk). A first run that\n"
+                       "reads the frames from disk is marked cold and left out of the comparison. Bold: the fastest warm run.");
     vl->addWidget(table_, 1);
 
     stage_ = new QLabel("Press Start.");
@@ -268,21 +247,33 @@ BenchmarkDialog::~BenchmarkDialog() {
     if (sampleThread_.joinable()) sampleThread_.join();
 }
 
+bool BenchmarkDialog::quick() const { return mode_->currentData().toInt() == 0; }
 bool BenchmarkDialog::useSample() const { return stack_->currentData().toInt() == 1; }
 
-// The sweep: the current settings first (twice when the frames are not resident yet: the cold run reads
-// them), then one setting at a time; the combined best is added at the end of the run.
+// the quick benchmark takes every n-th frame of the open stack so that at most kQuickFrames remain
+QStringList BenchmarkDialog::runFrames() const {
+    const QStringList& all = useSample() ? sample_ : frames_;
+    if (!quick() || all.size() <= kQuickFrames) return all;
+    int step = (all.size() + kQuickFrames - 1) / kQuickFrames;
+    QStringList out;
+    for (int i = 0; i < all.size(); i += step) out << all[i];
+    return out;
+}
+
+// Quick: the current settings (twice when the frames must first be read: the cold run is not compared),
+// each GPU alone, the frames streamed instead of resident. Thorough: every setting varied in turn; the
+// combined best is added at the end of the run.
 void BenchmarkDialog::buildConfigs() {
     configs_.clear();
     auto add = [&](const QString& label, const QString& dim, PerfSettings p, bool cold = false) {
         for (const Config& c : configs_) if (!cold && !c.cold && c.perf == p) return;   // the same settings once (the cold run aside)
         configs_ << Config{label, dim, p, cold};
     };
-    int n = useSample() ? kSampleN : frames_.size();
-    bool resident = !useSample() && perf_.cacheFrames && worker_.cache().count() >= n;
+    QStringList fr = runFrames();
+    bool resident = !useSample() && perf_.cacheFrames && !fr.isEmpty() && worker_.resident(fr);
     if (perf_.cacheFrames && !resident) add("current settings, frames read from disk (cold)", "", perf_, true);
     add("current settings", "", perf_);
-    if (varyGpus_->isChecked() && gpus_.size() > 1) {
+    if (gpus_.size() > 1) {
         for (const GpuInfo& g : gpus_) {
             PerfSettings p = perf_;
             p.gpus = {g.index};
@@ -292,13 +283,12 @@ void BenchmarkDialog::buildConfigs() {
         p.gpus.clear();
         add("all GPUs", "gpus", p);
     }
-    if (varyStreams_->isChecked())
+    if (!quick()) {
         for (int s : {1, 2, 3}) { PerfSettings p = perf_; p.streams = s; add(QString("%1 stream%2 per GPU").arg(s).arg(s == 1 ? "" : "s"), "streams", p); }
-    if (varyReaders_->isChecked())
         for (int r : {8, 16, 32}) { PerfSettings p = perf_; p.readers = r; add(QString("%1 reader threads").arg(r), "readers", p); }
-    if (varyPairs_->isChecked())
         for (int t : {2, 3, 4}) { PerfSettings p = perf_; p.pairThreads = t; add(QString("%1 alignment pairs in flight per GPU").arg(t), "pairs", p); }
-    if (varyCache_->isChecked()) {
+    }
+    {
         PerfSettings p = perf_;
         p.cacheFrames = !perf_.cacheFrames;
         add(p.cacheFrames ? "frames resident in host memory" : "frames streamed from disk every pass (no cache)", "cache", p);
@@ -308,9 +298,11 @@ void BenchmarkDialog::buildConfigs() {
 void BenchmarkDialog::updatePlan() {
     if (running_) return;
     buildConfigs();
-    int n = useSample() ? kSampleN : frames_.size();
-    plan_->setText(QString("%1 runs of %2 frames, plus the combined best if it differs. Starting from: %3.")
-                       .arg(configs_.size()).arg(n).arg(perf_.summary()));
+    int n = runFrames().size();
+    if (useSample() && sample_.isEmpty()) n = quick() ? std::min(kQuickFrames, kSampleN) : kSampleN;
+    plan_->setText(QString("%1 runs of %2 frames at %3 resolution%4. Starting from: %5.")
+                       .arg(configs_.size()).arg(n).arg(quick() ? "half" : base_.stack.po.g.scale == 0.5 ? "half" : "full")
+                       .arg(quick() ? "" : ", plus the combined best if it differs").arg(perf_.summary()));
 }
 
 void BenchmarkDialog::setRunning(bool on) {
@@ -318,8 +310,8 @@ void BenchmarkDialog::setRunning(bool on) {
     running_ = on;
     if (changed) emit runningChanged(on);
     startBtn_->setText(on ? "Stop" : "Start");
-    for (QWidget* w : std::initializer_list<QWidget*>{stack_, res_, varyGpus_, varyStreams_, varyReaders_, varyPairs_, varyCache_}) w->setEnabled(!on);
-    varyGpus_->setEnabled(!on && gpus_.size() > 1);
+    stack_->setEnabled(!on);
+    mode_->setEnabled(!on);
     applyBtn_->setEnabled(!on && bestRow() >= 0);
     saveBtn_->setEnabled(!on && !rows_.isEmpty());
     copyBtn_->setEnabled(!on && !rows_.isEmpty());
@@ -338,14 +330,15 @@ void BenchmarkDialog::startStop() {
     table_->setRowCount(0);
     stopping_ = false;
     combinedDone_ = false;
-    buildConfigs();
     next_ = 0;
     setRunning(true);
-    if (useSample() && sample_.isEmpty()) makeSample(); else beginSweep();
+    sweepClock_.start();
+    if (useSample() && sample_.isEmpty()) makeSample();
+    else { buildConfigs(); beginSweep(); }
 }
 
 void BenchmarkDialog::makeSample() {
-    stage_->setText("Generating the sample stack…");
+    stage_->setText("Generating the sample stack (once)…");
     progress_->setRange(0, 0);
     if (sampleThread_.joinable()) sampleThread_.join();
     sampleThread_ = std::thread([this] {
@@ -355,6 +348,8 @@ void BenchmarkDialog::makeSample() {
         QMetaObject::invokeMethod(this, [this, files] {
             sample_ = files;
             progress_->setRange(0, 1000);
+            buildConfigs();
+            sweepClock_.start();   // the generation is not part of the benchmark
             beginSweep();
         }, Qt::QueuedConnection);
     });
@@ -371,13 +366,13 @@ void BenchmarkDialog::runNext() {
     const Config& c = configs_[next_];
     JobOptions jo = base_;
     c.perf.apply(jo);
-    jo.stack.po.g.scale = res_->currentIndex() == 1 ? 0.5 : 1.0;
+    if (quick()) jo.stack.po.g.scale = 0.5;
     jo.stack.write_outputs = false;
     jo.out = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation)).filePath("xLamina-benchmark").toStdString();
+    jo.align.paths.clear();
+    for (const QString& f : runFrames()) jo.align.paths.push_back(f.toStdWString());
     if (useSample()) {
         jo.align.dir = sampleDir_.toStdWString();
-        jo.align.paths.clear();
-        for (const QString& f : sample_) jo.align.paths.push_back(f.toStdWString());
         jo.align.um_per_px = 0;
     }
     stage_->setText(QString("Run %1 of %2: %3").arg(next_ + 1).arg(configs_.size()).arg(c.label));
@@ -447,10 +442,10 @@ int BenchmarkDialog::bestRow() const {
     return best;
 }
 
-// After the one-at-a-time sweep: take the best value of every varied setting and run them together,
-// unless that combination has been run already.
+// After a thorough sweep: take the best value of every varied setting and run them together, unless that
+// combination has been run already.
 void BenchmarkDialog::finishSweep() {
-    if (!stopping_ && !combinedDone_ && rows_.size() > 1) {
+    if (!quick() && !stopping_ && !combinedDone_ && rows_.size() > 1) {
         combinedDone_ = true;
         PerfSettings comb = perf_;
         auto bestOf = [&](const QString& dim, auto get, auto set) {
@@ -479,14 +474,15 @@ void BenchmarkDialog::finishSweep() {
     for (int i = 0; i < rows_.size(); ++i)
         for (int c = 0; c < table_->columnCount(); ++c)
             if (QTableWidgetItem* it = table_->item(i, c)) { QFont f = it->font(); f.setBold(i == best); it->setFont(f); }
+    double took = sweepClock_.elapsed() / 1000.0;
     if (best >= 0) {
         const Row& b = rows_[best];
         double cur = -1;
         for (const Row& r : rows_) if (r.rc == 0 && !r.cfg.cold && r.cfg.dimension.isEmpty()) cur = r.total;
         QString s = QString("Fastest: %1, %2 s").arg(b.cfg.label).arg(b.total, 0, 'f', 2);
-        if (cur > 0 && b.cfg.perf != perf_) s += QString(" (current settings %1 s, %2 %% slower)").arg(cur, 0, 'f', 2).arg(100 * (cur / b.total - 1), 0, 'f', 0);
+        if (cur > 0 && b.cfg.perf != perf_) s += QString(" (current settings %1 s, %2 % slower)").arg(cur, 0, 'f', 2).arg(100 * (cur / b.total - 1), 0, 'f', 0);
         else if (cur > 0) s += "; the current settings are already the fastest";
-        stage_->setText(s + (stopping_ ? ". Stopped." : "."));
+        stage_->setText(s + QString(". Benchmark took %1 s%2").arg(took, 0, 'f', 0).arg(stopping_ ? ", stopped." : "."));
     } else {
         stage_->setText(stopping_ ? "Stopped." : "No run finished; see the log.");
     }
@@ -497,7 +493,6 @@ void BenchmarkDialog::finishSweep() {
         QFile f(autoReport_);
         if (f.open(QIODevice::WriteOnly | QIODevice::Text)) f.write(reportText().toUtf8());
         grab().save(autoReport_ + ".png");
-        QString p = autoReport_;
         autoReport_.clear();
         QMetaObject::invokeMethod(this, [this] { close(); }, Qt::QueuedConnection);
     }
@@ -522,9 +517,10 @@ QString BenchmarkDialog::reportText() const {
     QString out;
     QTextStream ts(&out);
     ts << "xLamina " << XLAMINA_VERSION << " benchmark, " << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm") << "\n";
-    if (useSample()) ts << "Stack: built-in sample, " << kSampleN << " frames of " << kSampleW << " x " << kSampleH << "\n";
-    else ts << "Stack: " << stackLabel_ << ", " << frames_.size() << " frames\n";
-    ts << "Output: " << (res_->currentIndex() == 1 ? "half" : "full") << " resolution; outputs";
+    if (useSample()) ts << "Stack: built-in sample, " << kSampleN << " frames of " << kSampleW << " x " << kSampleH;
+    else ts << "Stack: " << stackLabel_ << ", " << frames_.size() << " frames";
+    ts << "; " << (quick() ? "quick" : "thorough") << " mode, " << runFrames().size() << " frames per run at "
+       << ((quick() || base_.stack.po.g.scale == 0.5) ? "half" : "full") << " resolution; outputs";
     for (const auto& o : base_.stack.outputs) ts << " " << QString::fromStdString(o);
     ts << "\n" << info_->text() << "\n\n";
     ts.setFieldAlignment(QTextStream::AlignLeft);
