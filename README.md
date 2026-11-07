@@ -54,10 +54,12 @@ dark prior's reach, flat smoothing) at their defaults, for one-at-a-time experim
 a 1:1 comparison. The depth volume is estimated at 1/2 of the sensor resolution since 0.6.1
 (1/4 left doubled outlines on bright plates); it needs about 5 GB of GPU memory for 163
 full-size frames. Since 0.6.3 the dark prior stays off within 24 px of sharp content (on the
-finer grid it had filled the gaps of needle fans with far frames) and regions without texture
-get their focus curves and depth smoothed over 128 px, so defocused background changes frame
-gradually instead of in patches with visible seams. The 0.5.x B is `--b-reference 1` on the
-command line (depth resolution 1/4, dark prior everywhere, none of the 0.6.x additions).
+finer grid it had filled the gaps of needle fans with far frames). Since 0.6.4 defocused
+background is handled like the reference stacker's: beside sharp detail it keeps that detail's
+frame for about 128 px (flat smoothing), beyond that it takes the end of the stack where it is
+quietest, with soft transitions, instead of breaking into patches of different frames with
+visible seams. The 0.5.x B is `--b-reference 1` on the command line (depth resolution 1/4,
+dark prior everywhere, none of the 0.6.x additions).
 
 Cn is C at smoothing 3; with the panel's C smoothing at 2 the two differ on about 3 % of
 pixels, so tick Cn only when C's smoothing is lower.

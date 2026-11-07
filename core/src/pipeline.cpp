@@ -716,6 +716,7 @@ bool parse_stack_option(const std::string& a, const std::string& v, StackOptions
     else if (a == "--end-vote") so.end_vote_px = atof(v.c_str());
     else if (a == "--flat-blur") so.po.flat_blur_px = atof(v.c_str());
     else if (a == "--flat-reach") so.po.flat_reach_px = atof(v.c_str());
+    else if (a == "--flat-min") so.po.flat_min = atof(v.c_str());
     else if (a == "--b-reference") {   // the 0.5.x B, bit-identical: the 1/4 volume with the priors and no 0.6.x additions
         so.po.depth_fraction = 0.25; so.dark_prior = 1.0; so.dark_reach_px = 0; so.end_vote_px = 0; so.po.flat_blur_px = 0; so.sgm_scale = false;
     }
@@ -904,6 +905,7 @@ static int run_stack_once(StackOptions& so) {
             CK(cudaMemcpyAsync(d_flat, P.flat.data(), P.flat.size() * sizeof(float), cudaMemcpyHostToDevice, s));
             dp.flat = d_flat;
             dp.flat_blur_px = (float)po.flat_blur_px;
+            dp.flat_min = (float)po.flat_min;
         }
         dfree.p.erase(std::find(dfree.p.begin(), dfree.p.end(), (void*)d_L16));   // consumed inside depth_from_volume
         R = depth_from_volume(d_V, d_L16, d_guide, d_ga, P.vp.dw, P.vp.dh, K, ow, oh, dp, s);

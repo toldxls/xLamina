@@ -373,9 +373,10 @@ void MainWindow::buildUi() {
     darkReach_ = dspin(0, 200, 4, 24, 0, " px", "How far from sharp content the dark prior stays off, in sensor pixels. Default 24; 0 applies the prior to\n"
                                                  "every featureless pixel (the 0.5.x behaviour, which put far frames into the gaps of needle fans at 1/2 resolution).");
     al->addRow("Dark reach", darkReach_);
-    flatBlur_ = dspin(0, 512, 16, 128, 0, " px", "In regions without texture (defocused background) the focus curves and the depth are smoothed over this\n"
-                                                  "many sensor pixels, so the background changes frame gradually instead of breaking into patches with visible\n"
-                                                  "seams (FINDINGS 34). Default 128; 0 = off.");
+    flatBlur_ = dspin(0, 512, 16, 128, 0, " px", "Defocused background (no sharp detail within the dark reach): a band of about this width beside sharp detail\n"
+                                                  "takes that detail's frame, beyond it the background takes the end of the stack where it is quietest, with\n"
+                                                  "soft transitions; its focus curves are also smoothed over this width (FINDINGS 34). Default 128; 0 = off\n"
+                                                  "(the depth stage's own choice, which breaks the background into patches with visible seams).");
     al->addRow("Flat smoothing", flatBlur_);
     QPushButton* resetAdv = new QPushButton("Defaults");
     resetAdv->setToolTip("Put every advanced parameter back to its validated default.");

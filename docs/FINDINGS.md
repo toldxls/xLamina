@@ -1295,19 +1295,56 @@ percentile; the background noise alone exceeded it and the mask was empty
 (mean 0.009 in the background), hence the pre-blur and the ranking. Where
 the mask is set, (a) every aggregated focus slice is box-blurred over the
 blur width (so the defocused background shares one curve over a wide area)
-and (b) the SGM depth is Gaussian-blurred over half the width before the
-guided upsampling, so the depth there changes gradually, as a blend of
-frames, instead of at a hard border. On this stack the mask covers 64 % of
-the first background region, 92 % of the second, 9 % of the fan and 26 %
-of the ghost region (`flat.f32` is written beside `depth.f32`).
+and (b, 0.6.3) the SGM depth was Gaussian-blurred over half the width
+before the guided upsampling. On this stack the mask covers 64 % of the
+first background region, 92 % of the second, 9 % of the fan and 26 % of the
+ghost region (`flat.f32` is written beside `depth.f32`). The seams went,
+but Travis found the background still "blobby": the depth now ramped
+smoothly from frame 0 at the matrix to the far end, and the ramp walks
+through frames 20-60.
 
-| region (1/2 grid, 0.6.3 defaults) | 0.6.2 + reach (a) | + slice blur | + depth blur (shipped) |
-|---|---|---|---|
-| background 1 | patches, seams | fewer seams, patches | smooth gradient, no seams |
-| background 2 | patches, seams | one seam | smooth, like the reference |
-| fan | clean | clean | clean |
-| ghost (crystal) | gone | gone | gone |
-| plates, crystal edge | unchanged | unchanged | unchanged |
+**What the background is, frame by frame.** Warping every frame onto the
+first background region and comparing (`bgframes_a.png`): the matrix at
+the lower left is sharp at frame 0; in frames 20-60 it is a set of defocus
+rings spreading over the background; from frame 80 on the region is a
+featureless haze. The reference B in that region is closest to frame 0
+(luma RMSE 0.031 against 0.046 for 0.6.3's B, 0.08 for frame 161), and its
+depth map says why: the whole area within ~250 px of the matrix is at
+frame 0-20, then it jumps within ~50 px to ~150 and stays there. Intermediate
+frames are the worst choice for a defocused background and the reference
+never shows them. Why our depth stage cannot find this on its own: in the
+background the fine focus measure (6 px) is sensor noise, flat across the
+stack to within 5 % (its argmax is the reference frame, the only unresampled
+one), so the end priors and the regional vote decide, patch by patch. A
+coarser measure (|G3 - G12| of the luma, averaged over 128 px) does carry
+the signal: in the band and in the far background alike it is highest at
+frame 0 (the matrix's haze) and falls monotonically to a floor by frame
+~100.
+
+Three variants of the depth stage, judged on the 1:1 sheets
+(`report_real/h10_*`, `h11_*`, `h12_*`, `h13_*`):
+
+| flat pixels' depth | far background | band beside the matrix | fan | notes |
+|---|---|---|---|---|
+| 0.6.3: SGM, then masked blur | smooth ramp, no seams | rings (frames 20-60) | clean | blobby |
+| data term = least fine-scale energy (`--flat-min`) | smooth | rings | **blotch back** (needle gaps are "flat") | the fine measure is noise; settled on intermediate frames (median 55) |
+| nearest *textured* pixel's depth, far end beyond | smooth | wrong (the matrix's haze counts as textured and carries far frames) | clean | dark cut-out around the matrix |
+| **nearest *sharp* detail's depth, far end beyond (0.6.4)** | smooth, like the reference | the matrix's frame, soft ramp | clean | no rings, no seams |
+
+The 0.6.4 rule, applied at depth resolution after the SGM, to every pixel
+without confident sharp detail within the dark reach (the confidence
+dilated by the reach; `wc` is the curve's contrast whatever the peak's
+position, so end-framed objects count): the band value is the confident
+pixels' depth spread by pull-push over an area pyramid, weighted by the
+dilated confidence Gaussian-spread over 1.5 x the flat width and x4 (about
+1 for 100 px, 0.5 at 190 px, gone by 400 px); beyond the band the pixel
+takes the quieter end of the stack, the end whose coarse structure (the
+luma volume's first and last 8 frames, |G3 - G12|, averaged over the flat
+width) is the weaker, which on this stack is the far end everywhere; the
+target is blurred over a quarter of the flat width so band and far end
+meet gradually. Sharp detail keeps its SGM depth; the 1/4 reference keeps
+its bytes. Cost: the depth stage is unchanged at ~3.0 s (the volume stage's
+slice blur 2.0 -> 2.7 s remains).
 
 Per-region scores (luma RMSE against the reference, tone-matched / edges;
 depth RMSE in frames):
@@ -1316,17 +1353,23 @@ depth RMSE in frames):
 |---|---|---|---|---|---|
 | 1/4 reference (`--b-reference 1`) | .0412 / .0766, 8.1 | .0299 / .0648, 12.2 | .0398 / .0879, 19.2 | .0657 / .1213, 3.4 | .0459 / .0804, 5.0 |
 | 1/2 + reach + vote | .0412 / .0762, 20.5 | .0299 / .0648, 13.5 | .0394 / .0872, 19.8 | .0661 / .1213, 7.6 | .0458 / .0803, 7.1 |
-| + slice blur | .0414 / .0760, 16.8 | .0299 / .0648, 13.6 | .0398 / .0875, 27.5 | .0657 / .1218, 11.4 | .0458 / .0803, 6.7 |
-| **0.6.3 (+ depth blur)** | .0412 / .0759, 13.7 | .0297 / .0649, 12.6 | .0397 / .0875, 24.1 | .0657 / .1217, 8.2 | .0458 / .0803, 6.4 |
+| 0.6.3 (slice + depth blur) | .0412 / .0759, 13.7 | .0297 / .0649, 12.6 | .0397 / .0875, 24.1 | .0657 / .1217, 8.2 | .0458 / .0803, 6.4 |
+| least fine-scale energy | .0434 / .0761, 29.4 | .0538 / .0755, 53.1 | .0396 / .0852, 33.2 | .0667 / .1219, 16.5 | .0454 / .0796, 17.7 |
+| nearest textured, far end | .0412 / .0758, 14.4 | .0306 / .0650, 17.2 | .0414 / .0878, 52.3 | .0658 / .1218, 9.9 | .0463 / .0800, 19.5 |
+| **0.6.4 (nearest sharp, far end)** | .0412 / .0760, 14.2 | .0295 / .0645, 13.0 | .0397 / .0876, 21.9 | .0664 / .1213, 8.6 | .0458 / .0803, 7.8 |
 
-Luma is within noise everywhere (the metric cannot see the seams; the
-sheets `report_real/h9_*.png` can). Cost: the volume stage 2.0 -> 2.7 s on
-this stack (fusion 11.9 -> 12.5 s).
+Luma is within noise except where a variant broke something (the fan with
+the least-energy term); the metric cannot see seams or rings, the sheets
+can. What 0.6.4 does not reproduce: the reference keeps more of the
+near-frame bokeh (the dark shadow of the crystal in the second background
+region, the haze blobs right of the matrix); ours renders those areas from
+the far end, flatter but equally smooth.
 
-0.6.3's B defaults: volume at 1/2, dark prior 1 with reach 24, end vote 48,
-flat smoothing 128 / reach 24, P1 0.06 / P2 0.8 in effect, guided radius 8.
-`--b-reference 1` (1/4 volume, dark prior 1, no reach, no vote, no flat
-smoothing, unscaled P1/P2) is the 0.5.x B, still byte-identical to 0.5.5.
+0.6.4's B defaults: volume at 1/2, dark prior 1 with reach 24, end vote 48,
+flat smoothing 128 / reach 24 with the band-and-far rule, P1 0.06 / P2 0.8
+in effect, guided radius 8. `--b-reference 1` (1/4 volume, dark prior 1, no
+reach, no vote, no flat smoothing, unscaled P1/P2) is the 0.5.x B, still
+byte-identical to 0.5.5 (checked after every change).
 
 ## Open items
 

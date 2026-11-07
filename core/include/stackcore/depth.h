@@ -42,6 +42,11 @@ struct DepthParams {
     // frame gradually (as a blend of frames) instead of at a hard border between two patches (FINDINGS 34)
     const float* flat = nullptr;
     float flat_blur_px = 0.f;
+    // in flat regions the data term prefers the frame with the least focus energy (defocused background shows
+    // the fewest ghosts of nearby objects there), weighted by this; the end and dark priors step back by the
+    // mask's share. 0 = flat pixels keep the 0.6.3 cost (no data term, priors decide). Experimental: the fine
+    // focus measure is noise in defocused background, so this term settled on intermediate frames (FINDINGS 34)
+    float flat_min = 0.f;
 };
 
 struct DepthResult {

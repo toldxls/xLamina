@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "stackcore/imgops.h"
 #include "stackcore/pipeline.h"   // logf
@@ -99,7 +100,7 @@ __global__ void k_curve_stats(const float* __restrict__ V, const __half* __restr
 // confidence w from contrast, end-frame mask; w *= (1 - h); w = 0 on end-peaked pixels
 __global__ void k_confidence(const float* __restrict__ vmax, const float* __restrict__ vmed, const int* __restrict__ kmax,
                              const float* __restrict__ h, const float* __restrict__ trend, int n, int K, float lo, float hi, int eg,
-                             float* __restrict__ w, uint8_t* __restrict__ endm) {
+                             float* __restrict__ w, uint8_t* __restrict__ endm, float* __restrict__ wc) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float vm = vmax[i];
@@ -109,6 +110,7 @@ __global__ void k_confidence(const float* __restrict__ vmax, const float* __rest
     int km = kmax[i];
     uint8_t e = (km < eg || km > K - 1 - eg) ? 1 : 0;
     w[i] = e ? 0.f : ww;
+    if (wc) wc[i] = ww;   // the curve's contrast whatever its peak's position: sharp detail, end frames included
     // bit 1: the pixel lies beyond the first frames (the end prior's direction): the peak's side in 0.5.x, the
     // curve's trend when given (robust to a noisy peak)
     bool at0 = trend ? (trend[i] > 0.f) : (km < eg);
@@ -133,25 +135,31 @@ __global__ void k_end_vote(uint8_t* __restrict__ endm, const float* __restrict__
 // cost volume, in place over V (double intermediates where numpy promoted to float64)
 __global__ void k_cost(float* __restrict__ V, const __half* __restrict__ Lv, const float* __restrict__ w,
                        const uint8_t* __restrict__ endm, const float* __restrict__ vmax, const float* __restrict__ lmin,
-                       const float* __restrict__ lmax, const float* __restrict__ h, const float* __restrict__ wnb, int n, int K,
-                       float ep, float lam, float lam_h) {
+                       const float* __restrict__ lmax, const float* __restrict__ h, const float* __restrict__ wnb,
+                       const float* __restrict__ flat, int n, int K, float ep, float lam, float lam_h, float lam_f) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float* c = V + (size_t)i * K;
     float wi = w[i], vm = fmaxf(vmax[i], 1e-12f), hi = h[i];
     bool e = endm[i] & 1, at0 = endm[i] & 2;
     float lrange = fmaxf(lmax[i] - lmin[i], 0.01f), l0 = lmin[i];
+    // a flat pixel (defocused background, no texture within reach) has no focus peak to follow; what it wants is
+    // the frame where it shows the LEAST structure (the rings of a nearby object's defocus are structure), so its
+    // data term is lam_f x the normalised focus energy, and the end and dark priors step back by the same share
+    float fl = (flat && lam_f > 0) ? flat[i] : 0.f;
     // numpy's dtypes: (1 - w)(1 - endm) lam dark is float64 (bool array - python float -> float64);
     // lam_h h dark is float32 (python float * float32 array); C accumulates in float64, cast at the end
     double w_dark = ((double)(1.0f - wi) * (e ? 0.0 : 1.0)) * (double)lam;
     if (wnb) w_dark *= (double)(1.0f - wnb[i]);   // no dark prior beside sharp content (wnb: the neighbourhood's confidence)
+    w_dark *= (double)(1.0f - fl);
     float w_halo = lam_h * hi;
     for (int k = 0; k < K; ++k) {
         float base = wi * (1.0f - c[k] / vm);                              // float32
         double acc = base;
+        if (fl > 0) acc = (1.0f - fl) * base + fl * lam_f * (c[k] / vm);
         if (ep > 0 && e) {
             float dist = (at0 ? (float)k : (float)(K - 1 - k)) / (float)(K > 1 ? K - 1 : 1);
-            acc += ((double)ep * 1.0) * (double)dist;
+            acc += ((double)ep * 1.0) * (double)dist * (double)(1.0f - fl);
         }
         if (lam > 0 || lam_h > 0) {
             float dark = (__half2float(Lv[(size_t)i * K + k]) - l0) / lrange;   // float32
@@ -404,6 +412,102 @@ void guided_filter(const float* d_guide, const float* d_src, float* d_out, int w
     k_gf_out<<<blocks1(n), 256, 0, s>>>(mIp, mp, d_guide, d_out, n);
 }
 
+// ---- flat regions (FINDINGS 34): within reach of textured pixels the depth is theirs (a band, as a sharp object's
+// own frame shows the least of its defocus beside it); beyond the band it is the quieter end of the stack (the one
+// where the coarse structure of the defocused background is weakest, measured on the luma volume's end frames)
+
+__global__ void k_plane_mean(const __half* __restrict__ Lv, int n, int K, int k0, int k1, float* __restrict__ out) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float a = 0.f;
+    for (int k = k0; k < k1; ++k) a += __half2float(Lv[(size_t)i * K + k]);
+    out[i] = a / (float)(k1 - k0);
+}
+__global__ void k_abs_diff(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = fabsf(a[i] - b[i]);
+}
+__global__ void k_textured(const float* __restrict__ flat, const float* __restrict__ d, float* __restrict__ wgt, float* __restrict__ num, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float w = 1.f - flat[i];
+    wgt[i] = w;
+    num[i] = d[i] * w;
+}
+__global__ void k_down2(const float* __restrict__ in, int w, int h, float* __restrict__ out, int w2, int h2) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= w2 || y >= h2) return;
+    int x0 = 2 * x, y0 = 2 * y, x1 = min(x0 + 1, w - 1), y1 = min(y0 + 1, h - 1);
+    out[y * w2 + x] = 0.25f * (in[y0 * w + x0] + in[y0 * w + x1] + in[y1 * w + x0] + in[y1 * w + x1]);
+}
+// pull-push: where the level has data (den -> 1) its own mean, elsewhere the coarser level's fill
+__global__ void k_push(const float* __restrict__ num, const float* __restrict__ den, const float* __restrict__ up, float* __restrict__ fill, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float v = num[i] / fmaxf(den[i], 1e-9f);
+    if (!up) { fill[i] = v; return; }
+    float a = fminf(den[i], 1.f);
+    fill[i] = a * v + (1.f - a) * up[i];
+}
+__global__ void k_flat_target(const float* __restrict__ fill, const float* __restrict__ band_g, const float* __restrict__ e0,
+                              const float* __restrict__ e1, float* __restrict__ out, int n, float kfar, float gain) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float b = fminf(band_g[i] * gain, 1.f);
+    float far = e0[i] < e1[i] ? 0.f : kfar;
+    out[i] = b * fill[i] + (1.f - b) * far;
+}
+
+// coarse structure of one luma plane: |G(3 px) - G(12 px)| (sensor px), averaged over the flat blur width
+static void coarse_energy(const float* plane, float* out, float* t1, float* t2, int dw, int dh, float frac, float big_px, cudaStream_t s) {
+    DevGaussian ga, gb, gc;
+    ga.build(std::max(0.5, 3.0 * (double)frac));
+    gb.build(std::max(1.0, 12.0 * (double)frac));
+    gc.build(std::max(1.0, (double)big_px * (double)frac));
+    gaussian_blur(plane, t1, out, dw, dh, ga, s);
+    gaussian_blur(plane, t2, out, dw, dh, gb, s);
+    k_abs_diff<<<blocks1((size_t)dw * dh), 256, 0, s>>>(t1, t2, out, dw * dh);
+    gaussian_blur(out, t1, t2, dw, dh, gc, s);
+    CK(cudaMemcpyAsync(out, t1, (size_t)dw * dh * sizeof(float), cudaMemcpyDeviceToDevice, s));
+    CK(cudaStreamSynchronize(s));
+    ga.free(); gb.free(); gc.free();
+}
+
+// the weighted pixels' depth spread into the rest (pull-push over an area pyramid); fill is dw*dh
+static void pull_push_fill(const float* d, const float* wgt, float* fill, int dw, int dh, cudaStream_t s) {
+    std::vector<float*> num, den;
+    std::vector<int> ws, hs;
+    int w = dw, h = dh;
+    float *n0 = dmalloc((size_t)w * h), *d0 = dmalloc((size_t)w * h);
+    mul(d, wgt, n0, (size_t)w * h, s);
+    CK(cudaMemcpyAsync(d0, wgt, (size_t)w * h * sizeof(float), cudaMemcpyDeviceToDevice, s));
+    num.push_back(n0); den.push_back(d0); ws.push_back(w); hs.push_back(h);
+    while (std::min(w, h) > 8) {
+        int w2 = (w + 1) / 2, h2 = (h + 1) / 2;
+        float *nn = dmalloc((size_t)w2 * h2), *dd = dmalloc((size_t)w2 * h2);
+        k_down2<<<grid2(w2, h2), BLK, 0, s>>>(num.back(), w, h, nn, w2, h2);
+        k_down2<<<grid2(w2, h2), BLK, 0, s>>>(den.back(), w, h, dd, w2, h2);
+        num.push_back(nn); den.push_back(dd); ws.push_back(w2); hs.push_back(h2);
+        w = w2; h = h2;
+    }
+    int L = (int)num.size();
+    float* prev = dmalloc((size_t)ws[L - 1] * hs[L - 1]);
+    k_push<<<blocks1((size_t)ws[L - 1] * hs[L - 1]), 256, 0, s>>>(num[L - 1], den[L - 1], nullptr, prev, ws[L - 1] * hs[L - 1]);
+    for (int l = L - 2; l >= 0; --l) {
+        size_t nl = (size_t)ws[l] * hs[l];
+        float* up = dmalloc(nl);
+        resize_linear(prev, ws[l + 1], hs[l + 1], up, ws[l], hs[l], s);
+        float* cur = (l == 0) ? fill : dmalloc(nl);
+        k_push<<<blocks1(nl), 256, 0, s>>>(num[l], den[l], up, cur, (int)nl);
+        CK(cudaStreamSynchronize(s));
+        cudaFree(up); cudaFree(prev);
+        prev = cur;
+    }
+    CK(cudaStreamSynchronize(s));
+    for (float* q : num) cudaFree(q);
+    for (float* q : den) cudaFree(q);
+}
+
 DepthResult depth_from_volume(const float* d_V_in, void* d_Lv16, const float* d_guide_full, const float* d_ga,
                               int dw, int dh, int K, int ow, int oh, const DepthParams& p, cudaStream_t s) {
     if (K > 512) throw std::runtime_error("depth: K > 512 not supported");
@@ -455,7 +559,9 @@ DepthResult depth_from_volume(const float* d_V_in, void* d_Lv16, const float* d_
         g08.free(); g3.free(); g1.free();
         cudaFree(t1); cudaFree(t2); cudaFree(t3); cudaFree(d_so); cudaFree(d_sh); cudaFree(d_s5);
     }
-    k_confidence<<<blocks1(n), 256, 0, s>>>(vmax, vmed, kmax, h, trend, n, K, p.c_lo, p.c_hi, p.end_guard, w, endm);
+    const bool flat_fill = p.flat && p.flat_blur_px > 0;
+    float* wc = flat_fill ? dmalloc(n) : nullptr;   // sharp detail, for the flat regions' band (after the SGM)
+    k_confidence<<<blocks1(n), 256, 0, s>>>(vmax, vmed, kmax, h, trend, n, K, p.c_lo, p.c_hi, p.end_guard, w, endm, wc);
     if (trend) { CK(cudaStreamSynchronize(s)); cudaFree(trend); }
     // out-of-range pixels follow their neighbourhood's vote on which end they are beyond
     if (p.end_vote_px > 0 && p.end_prior > 0) {
@@ -482,13 +588,25 @@ DepthResult depth_from_volume(const float* d_V_in, void* d_Lv16, const float* d_
         CK(cudaStreamSynchronize(s));
         cudaFree(d_se);
     }
-    k_cost<<<blocks1(n), 256, 0, s>>>(V, (const __half*)d_Lv16, w, endm, vmax, lmin, lmax, h, wnb, n, K, p.end_prior, p.dark_prior,
-                                       p.halo_prior);
+    k_cost<<<blocks1(n), 256, 0, s>>>(V, (const __half*)d_Lv16, w, endm, vmax, lmin, lmax, h, wnb, p.flat, n, K, p.end_prior,
+                                       p.dark_prior, p.halo_prior, p.flat_min);
     if (wnb) { CK(cudaStreamSynchronize(s)); cudaFree(wnb); }
     float* P2 = dmalloc(n);
     k_p2<<<grid2(dw, dh), BLK, 0, s>>>(d_ga, P2, dw, dh, p.p1, p.p2, p.edge);
     CK(cudaStreamSynchronize(s));
     CK(cudaGetLastError());
+    // the coarse structure of the background at the two ends of the stack (for the flat regions, after the SGM)
+    float *e0 = nullptr, *e1 = nullptr;
+    if (flat_fill) {
+        float *pl = dmalloc(n), *t1 = dmalloc(n), *t2 = dmalloc(n);
+        int ke = std::min(8, std::max(1, K / 4));
+        e0 = dmalloc(n); e1 = dmalloc(n);
+        k_plane_mean<<<blocks1(n), 256, 0, s>>>((const __half*)d_Lv16, n, K, 0, ke, pl);
+        coarse_energy(pl, e0, t1, t2, dw, dh, p.depth_full_fraction, p.flat_blur_px, s);
+        k_plane_mean<<<blocks1(n), 256, 0, s>>>((const __half*)d_Lv16, n, K, K - ke, K, pl);
+        coarse_energy(pl, e1, t1, t2, dw, dh, p.depth_full_fraction, p.flat_blur_px, s);
+        cudaFree(pl); cudaFree(t1); cudaFree(t2);
+    }
     cudaFree(d_Lv16);   // consumed: the luma volume's memory goes to the SGM
     R.ms_cost = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     {
@@ -555,16 +673,34 @@ DepthResult depth_from_volume(const float* d_V_in, void* d_Lv16, const float* d_
     R.sgm_bands = bands;
     cudaFree(S);
 
-    // --- in flat regions the depth changes gradually: blurred over half the flat blur width, masked
-    if (p.flat && p.flat_blur_px > 0) {
-        float *f1 = dmalloc(n), *f2 = dmalloc(n);
-        DevGaussian gf;
-        gf.build(std::max(1.0, 0.5 * p.flat_blur_px * p.depth_full_fraction));
-        gaussian_blur(d, f1, f2, dw, dh, gf, s);
-        lerp_mask(d, f1, p.flat, d, n, s);
+    // --- pixels without sharp detail within reach: the band beside sharp detail takes its depth (spread from the
+    // confident pixels), beyond the band the quieter end of the stack; soft transitions. Sharp detail keeps the SGM.
+    if (flat_fill) {
+        float *fill = dmalloc(n), *band = dmalloc(n), *f1 = dmalloc(n), *f2 = dmalloc(n), *ov = dmalloc(n), *wd = dmalloc(n);
+        pull_push_fill(d, wc, fill, dw, dh, s);
+        // sharp detail dilated by the reach: the override is 1 - that; the band is its Gaussian spread
+        {
+            float reach = p.dark_reach_px > 0 ? p.dark_reach_px : 24.f;
+            int rr = std::max(1, (int)std::nearbyint(reach * p.depth_full_fraction));
+            auto se = ellipse_se(rr);
+            int2* d_se;
+            CK(cudaMalloc(&d_se, se.size() * sizeof(int2)));
+            CK(cudaMemcpyAsync(d_se, se.data(), se.size() * sizeof(int2), cudaMemcpyHostToDevice, s));
+            k_morph<<<grid2(dw, dh), BLK, 0, s>>>(wc, wd, dw, dh, d_se, (int)se.size(), true);   // dilate
+            k_textured<<<blocks1(n), 256, 0, s>>>(wd, d, ov, f1, n);                                // ov = 1 - dilated
+            CK(cudaStreamSynchronize(s));
+            cudaFree(d_se);
+        }
+        DevGaussian gb, gt;
+        gb.build(std::max(1.0, 1.5 * p.flat_blur_px * p.depth_full_fraction));            // the band's reach
+        gaussian_blur(wd, band, f2, dw, dh, gb, s);
+        k_flat_target<<<blocks1(n), 256, 0, s>>>(fill, band, e0, e1, f1, n, (float)(K - 1), 4.f);
+        gt.build(std::max(1.0, 0.25 * p.flat_blur_px * p.depth_full_fraction));          // soft band-to-far transition
+        gaussian_blur(f1, f2, fill, dw, dh, gt, s);
+        lerp_mask(d, f2, ov, d, n, s);
         CK(cudaStreamSynchronize(s));
-        gf.free();
-        cudaFree(f1); cudaFree(f2);
+        gb.free(); gt.free();
+        for (float* q : {fill, band, f1, f2, ov, wd, e0, e1, wc}) cudaFree(q);
     }
 
     // --- upsample, guided filter on the output grid, rint, 3x3 median; conf

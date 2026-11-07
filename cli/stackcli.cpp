@@ -76,6 +76,7 @@ static int usage() {
             "               --end-vote 48: out-of-range pixels take the end their neighbourhood votes for, over this many sensor px (0 = per pixel)\n"
             "               --flat-blur 128 --flat-reach 24: in regions without texture within the reach, focus slices are box-blurred over the\n"
             "                             blur width (sensor px), so defocused background keeps one depth (0 = off)\n"
+            "               --flat-min 1: in those regions prefer the frame with the least structure, by this weight (0 = priors decide)\n"
             "               --b-reference 1: the 0.5.x B exactly (1/4 volume, dark prior 1, none of the 0.6.x additions)\n"
             "  developer commands:\n"
             "  stackcli probe FILE.tif\n"

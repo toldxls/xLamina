@@ -68,10 +68,12 @@ struct Pass1Options {
     // the depth volume's resolution as a fraction of the sensor: 1/2 since 0.6.1 (FINDINGS 32: the doubled plate
     // edges of 1/4 are gone at 1:1); --depth-fraction 0.25 gives the 0.5.x reference B
     double depth_fraction = 0.5, depth_fm_px = 6.0, vol_agg_px = 32.0;
-    // in flat regions of the guide (no texture within flat_reach_px) every focus slice is box-blurred over
-    // flat_blur_px, so the curves of defocused background agree over a wide area and the depth there does not
-    // break into patches (FINDINGS 34); near detail the slices keep the grid's resolution. 0 = off (0.5.x)
+    // defocused background (FINDINGS 34): in flat regions of the guide (no texture within flat_reach_px) every
+    // focus slice is box-blurred over flat_blur_px, and in the depth stage pixels without sharp detail within reach
+    // take the nearest sharp detail's frame in a band about flat_blur_px wide, the quieter end of the stack beyond
+    // it (DepthParams::flat, flat_blur_px). 0 = off (the 0.5.x behaviour: the priors decide)
     double flat_blur_px = 128.0, flat_reach_px = 24.0;
+    double flat_min = 0.0;                        // DepthParams::flat_min (least-structure data term in flat regions); 0 = off
     Hooks hooks;
 };
 
