@@ -42,6 +42,16 @@ __global__ void k_planes_to_k_f16(const __half* __restrict__ in, __half* __restr
     if (i >= n) return;
     for (int k = 0; k < K; ++k) out[(size_t)i * K + k] = in[(size_t)k * n + i];
 }
+__global__ void k_planes_to_k_f32_chunk(const float* __restrict__ in, float* __restrict__ out, int n, int K, int k0, int kc) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    for (int j = 0; j < kc; ++j) out[(size_t)i * K + k0 + j] = in[(size_t)j * n + i];
+}
+__global__ void k_planes_to_k_f16_chunk(const __half* __restrict__ in, __half* __restrict__ out, int n, int K, int k0, int kc) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    for (int j = 0; j < kc; ++j) out[(size_t)i * K + k0 + j] = in[(size_t)j * n + i];
+}
 
 // ---- per-pixel statistics of the focus curve: vmax, median, argmax; and of Lv: min, max
 
@@ -340,6 +350,14 @@ void planes_to_kfastest_f16(const void* d_planes, void* d_out, int dw, int dh, i
     int n = dw * dh;
     k_planes_to_k_f16<<<blocks1(n), 256, 0, s>>>((const __half*)d_planes, (__half*)d_out, n, K);
 }
+void planes_to_kfastest_f32_chunk(const float* d_planes, float* d_out, int dw, int dh, int K, int k0, int kc, cudaStream_t s) {
+    int n = dw * dh;
+    k_planes_to_k_f32_chunk<<<blocks1(n), 256, 0, s>>>(d_planes, d_out, n, K, k0, kc);
+}
+void planes_to_kfastest_f16_chunk(const void* d_planes, void* d_out, int dw, int dh, int K, int k0, int kc, cudaStream_t s) {
+    int n = dw * dh;
+    k_planes_to_k_f16_chunk<<<blocks1(n), 256, 0, s>>>((const __half*)d_planes, (__half*)d_out, n, K, k0, kc);
+}
 
 void guided_filter(const float* d_guide, const float* d_src, float* d_out, int w, int h, int r, float eps, float* sc,
                    cudaStream_t s) {
@@ -422,23 +440,47 @@ DepthResult depth_from_volume(const float* d_V_in, const void* d_Lv16, const flo
         R.end_fraction = (double)c / n;
     }
 
-    // --- SGM
+    // --- SGM, in horizontal bands when the path-sum volume does not fit beside the cost volume (at 1/2
+    // resolution 163 frames are 4.9 GB each; FINDINGS 31). The bands overlap by `ov` rows: a path's cost is
+    // capped by P2 at every step, so what it carries from rows farther away than that is nil. One band is
+    // the whole image, which is the code as it always was.
     auto t1 = std::chrono::steady_clock::now();
-    float* S = dmalloc((size_t)n * K);
-    CK(cudaMemsetAsync(S, 0, (size_t)n * K * sizeof(float), s));
-    int threads = ((K + 31) / 32) * 32;
-    auto pass = [&](int dx, int dy) {
-        unsigned blocks = dy == 0 ? dh : (dx == 0 ? dw : dw + dh - 1);
-        if (K <= 256) k_sgm_pass<256><<<blocks, threads, 0, s>>>(V, P2, p.p1, S, dw, dh, K, dx, dy);
-        else k_sgm_pass<512><<<blocks, threads, 0, s>>>(V, P2, p.p1, S, dw, dh, K, dx, dy);
-    };
-    pass(1, 0); pass(-1, 0); pass(0, 1); pass(0, -1);   // the prototype's order: x+, x-, y+, y-
-    if (p.dirs == 8) { pass(1, 1); pass(-1, 1); pass(1, -1); pass(-1, -1); }   // (dy, dx) = (1,1), (1,-1), (-1,1), (-1,-1)
+    const int ov = 64;
+    size_t S_bytes = (size_t)n * K * sizeof(float);
+    size_t fr = 0, tot = 0;
+    CK(cudaMemGetInfo(&fr, &tot));
+    size_t budget = fr > (768u << 20) ? fr - (768u << 20) : 0;   // room for the post stage's maps
+    int bands = 1;
+    if (S_bytes > budget) {
+        size_t row_bytes = (size_t)dw * K * sizeof(float);
+        int rows_fit = (int)(budget / row_bytes);
+        if (rows_fit <= 2 * ov + 16) throw std::runtime_error("depth: not enough GPU memory for the SGM volume");
+        bands = (int)((dh + (rows_fit - 2 * ov) - 1) / (rows_fit - 2 * ov));
+    }
+    const int band_rows = (dh + bands - 1) / bands;
+    const int s_rows = std::min(dh, band_rows + 2 * ov);
+    float* S = dmalloc((size_t)s_rows * dw * K);
     float* d = dmalloc(n);
-    k_argmin<<<blocks1(n), 256, 0, s>>>(S, n, K, d);
+    int threads = ((K + 31) / 32) * 32;
+    for (int b = 0; b < bands; ++b) {
+        const int y0 = b * band_rows, y1 = std::min(dh, y0 + band_rows);
+        const int ya = std::max(0, y0 - ov), yb = std::min(dh, y1 + ov), H = yb - ya;
+        const float* Vb = V + (size_t)ya * dw * K;
+        const float* P2b = P2 + (size_t)ya * dw;
+        CK(cudaMemsetAsync(S, 0, (size_t)H * dw * K * sizeof(float), s));
+        auto pass = [&](int dx, int dy) {
+            unsigned blocks = dy == 0 ? H : (dx == 0 ? dw : dw + H - 1);
+            if (K <= 256) k_sgm_pass<256><<<blocks, threads, 0, s>>>(Vb, P2b, p.p1, S, dw, H, K, dx, dy);
+            else k_sgm_pass<512><<<blocks, threads, 0, s>>>(Vb, P2b, p.p1, S, dw, H, K, dx, dy);
+        };
+        pass(1, 0); pass(-1, 0); pass(0, 1); pass(0, -1);   // the prototype's order: x+, x-, y+, y-
+        if (p.dirs == 8) { pass(1, 1); pass(-1, 1); pass(1, -1); pass(-1, -1); }   // (dy, dx) = (1,1), (1,-1), (-1,1), (-1,-1)
+        k_argmin<<<blocks1((y1 - y0) * dw), 256, 0, s>>>(S + (size_t)(y0 - ya) * dw * K, (y1 - y0) * dw, K, d + (size_t)y0 * dw);
+    }
     CK(cudaStreamSynchronize(s));
     CK(cudaGetLastError());
     R.ms_sgm = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
+    R.sgm_bands = bands;
     cudaFree(S);
 
     // --- upsample, guided filter on the output grid, rint, 3x3 median; conf

@@ -69,6 +69,8 @@ static int usage() {
             "               --halo-prior H (2) / --dark-prior D (1): B's preference for darker frames beside bright objects / in\n"
             "                             featureless pixels; raise H to push the band beside a bright plate to its own frame\n"
             "               --cache 0: read every pass from disk instead of keeping the frames pinned in host memory\n"
+            "               depth volume (the GUI's Advanced panel): --radius-px 6 --power 4 --depth-fraction 0.25 --depth-fm-px 6 --vol-agg-px 32\n"
+            "               refinement / composition: --refine-r 12 --refine-fm-px 9 --soft-px 3\n"
             "  developer commands:\n"
             "  stackcli probe FILE.tif\n"
             "  stackcli dump FILE.tif OUT.f32 [--gpu N]\n"

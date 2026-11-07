@@ -1096,6 +1096,82 @@ critical path), and the output TIFFs are written on one thread each (0.68 ->
 the whole stack from disk while pass 0 was reading it too, is paused during
 a render: alignment in the GUI 8.1 -> 6.5 s.
 
+## 31. The depth volume at other resolutions (2026-11-07)
+
+The GUI benchmark's synthetic sample now writes its truth beside the frames
+(`truth/depth_frames_over_N-1.tif`, the depth per pixel as grey = z / (N - 1);
+`truth/sharp.tif`, the all-in-focus scene; a README with the scene's formula),
+and its defocus grows 1 px of sigma per frame of distance, about what a 20x /
+NA 0.4 objective does at Travis's 0.468 um steps and 0.14 um/px. At the earlier
+0.45 px per frame the depth was underdetermined at 1/4 resolution: 32 frames
+differed by less than half a pixel of blur at the volume's scale.
+
+The depth volume's parameters are now on the command line (`stackcli run ...
+--radius-px --power --depth-fraction --depth-fm-px --vol-agg-px`, beside the
+existing `--halo-prior --dark-prior --refine-r --refine-fm-px --soft-px`) and
+in the GUI's Advanced panel, which gained Depth resolution (1/4, 1/2, full).
+
+To run a 1/2-resolution volume on 163 frames at all, three memory changes went
+in, all bit-identical for the default path (B, C, Cn compared byte for byte):
+- pass 1's slot buffers (frame, warp and measure scratch, 2.2 GB each) are freed
+  right after the streaming instead of at the end of pass 1, so the volume
+  aggregation and the depth stage have the memory;
+- the plane-major host volume is uploaded and transposed a few frames at a
+  time through a 256 MB staging buffer instead of as a second full device copy
+  (4.9 GB more at 1/2 resolution; 1.8 GB saved at 1/4);
+- the SGM runs in overlapping horizontal bands (64 rows of overlap) when its
+  path-sum volume does not fit beside the cost volume; a path's cost is capped
+  by P2 at every step, so what it carries from rows farther away than that is
+  nil. One band is the whole image, which is the code as it was.
+
+The spill-zone radii now follow the depth resolution (they were fixed at 1/4).
+A 1/2-resolution volume of 163 frames (4.9 GB of measure, 2.5 GB of luma, the
+SGM in 8 bands) runs on the 3080 Ti alone in 13 s; the 3070 cannot hold the
+slices beside its state. Full resolution would be 20 + 10 + 20 GB and needs
+the depth stage streamed through the GPU in bands from host memory: not done.
+
+On the synthetic stack the 1/2-resolution volume with a 3 px window, no
+aggregation and no priors gave a depth map that was right up to a bright
+plate's rim on both sides (transition +7..+15 px outside the rim, inside
+band clean, 0.41 / 0.29 frames RMS on the matrix / plate), where the defaults
+put the band 6-40 px inside the rim onto frames 9 away (the dark prior, which
+also keeps the outside glow down) and spread the plate's depth 40-100 px into
+the matrix in blotches (the 32 px aggregation and the 1/4-resolution grid).
+
+On the real stack, scored per region against the reference B (plates, fan,
+crystal edge, background edge, a flat matrix patch; each region registered
+on its own, tone matched with a cubic, lumas compared after a 1 px blur):
+
+| luma RMSE all / edges, depth RMSE frames | plates | fan | crystal edge | bg edge | flat matrix |
+|---|---|---|---|---|---|
+| default (1/4, priors, agg 32) | .0412 / .0766, 8.1 | .0299 / .0648, 12.2 | .0398 / .0879, 19.2 | .0657 / .1213, 3.4 | .0459 / .0804, 5.0 |
+| 1/4, dark prior 0 | .0412 / .0766, 8.0 | .0298 / .0648, 13.0 | .0400 / .0880, 22.4 | .0657 / .1213, 3.4 | .0459 / .0805, 4.7 |
+| 1/4, agg 8 | .0414 / .0772, 9.2 | .0301 / .0655, 11.3 | .0397 / .0878, 14.8 | .0657 / .1214, 4.2 | .0459 / .0805, 5.2 |
+| 1/4, no priors, agg 0, window 3 | .0416 / .0775, 8.1 | .0319 / .0660, 10.8 | .0401 / .0884, 15.4 | .0657 / .1213, 5.4 | .0460 / .0806, 5.1 |
+| 1/2, window 3 (priors, agg 32) | .0424 / .0763, **28.6** | .0301 / .0646, 22.1 | .0392 / .0868, 26.0 | .0661 / .1213, 11.3 | .0458 / .0802, 11.6 |
+| 1/2, window 6 | .0425 / .0763, 29.0 | .0301 / .0647, 19.1 | .0393 / .0869, 23.5 | .0661 / .1211, 11.9 | .0459 / .0802, 9.8 |
+| 1/2, window 3, no priors | .0409 / .0765, 10.0 | .0301 / .0644, 15.0 | .0398 / .0880, 22.5 | .0656 / .1211, 4.0 | .0460 / .0807, 5.2 |
+
+- The synthetic result does not carry over as it stands. With the priors on,
+  the 1/2-resolution volume sends whole plates to frames 11 away (depth bias
+  +11 in the plates region): the priors' weights were tuned against the
+  1/4-resolution focus term (sec. 11 again: thresholds tuned at one depth scale
+  break at another). Without the priors the 1/2-resolution depth agrees with
+  the reference about as well as the default does, no better, and loses the
+  near-frame region at the crystal edge that the default finds.
+- In the image every variant is within noise of the default (differences in
+  the fourth decimal): the refinement and the soft composition absorb most of
+  the depth differences.
+- The 1/4-resolution "no priors, no aggregation" variant put a greenish patch
+  into the fan region's dark background: the priors earn their keep there, as
+  sec. 9 and sec. 12 said.
+
+So the defaults stay. What this bought: the knobs on the CLI and in the GUI, a
+1/2-resolution volume that fits, and a per-region scored comparison. The next
+phase is the parameter search: many B runs over the depth resolution, window,
+aggregation, the priors (rescaled with the resolution) and SGM's P1 / P2 (not
+yet on the CLI), scored per region and judged at 1:1.
+
 ## Open items
 
 - **B: doubled plate edge / glow** (§25a): the C-style aggregation does not

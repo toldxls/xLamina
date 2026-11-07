@@ -388,6 +388,19 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
     logf("%d frames in %.3f s: %.1f frames/s, %.2f GB/s%s\n", st.frames, st.seconds, st.frames / st.seconds,
            st.bytes / st.seconds / 1e9, source_note(st).c_str());
     for (size_t i = 0; i < devs.size(); ++i) printf("  GPU %d: %d frames\n", devs[i], st.frames_per_device[i]);
+    // the slots (frame, warp and measure buffers, 2.2 GB each) are not needed past the streaming: free them now so
+    // the volume aggregation and the depth stage have the memory (a 1/2-resolution volume's slices are 4.9 GB)
+    for (int d : devs) {
+        auto& D = ctx[d];
+        CK(cudaSetDevice(d));
+        for (auto& S : D.slots) {
+            cudaFree(S.d_rgb); cudaFree(S.d_scratch); cudaFree(S.d_warp); S.sc.free();
+            if (volume) S.vsc.free();
+            cudaEventDestroy(S.ready); cudaEventDestroy(S.done);
+            S.fp.free();
+        }
+        D.slots.clear();
+    }
 
     // merge on the first device, in device order (any order gives the same B / C; A to double rounding):
     // the other cards' states cross through pinned memory, and the merged state stays on the GPU for
@@ -624,6 +637,12 @@ bool parse_stack_option(const std::string& a, const std::string& v, StackOptions
     else if (a == "--b-radius") so.po.b_radius_px = atof(v.c_str());
     else if (a == "--halo-prior") so.halo_prior = atof(v.c_str());
     else if (a == "--dark-prior") so.dark_prior = atof(v.c_str());
+    // the depth volume's parameters (the GUI's Advanced panel; the `fold` command has the same names)
+    else if (a == "--radius-px") so.po.radius_px = atof(v.c_str());
+    else if (a == "--power") so.po.power = atof(v.c_str());
+    else if (a == "--depth-fraction") so.po.depth_fraction = atof(v.c_str());
+    else if (a == "--depth-fm-px") so.po.depth_fm_px = atof(v.c_str());
+    else if (a == "--vol-agg-px") so.po.vol_agg_px = atof(v.c_str());
     else if (a == "--outputs") {
         so.outputs.clear();
         size_t i = 0;
@@ -700,33 +719,44 @@ int run_stack(StackOptions& so) {
     DepthResult R;
     float* d_guide = nullptr;
     {
-        float *d_planes, *d_V, *d_ga;
-        void *d_L16p, *d_L16;
-        CK(cudaMalloc(&d_planes, nd * K * sizeof(float)));
+        float *d_V, *d_ga;
+        void* d_L16;
         CK(cudaMalloc(&d_V, nd * K * sizeof(float)));
-        CK(cudaMalloc(&d_L16p, nd * K * 2));
         CK(cudaMalloc(&d_L16, nd * K * 2));
         CK(cudaMalloc(&d_guide, no * sizeof(float)));
         CK(cudaMalloc(&d_ga, nd * sizeof(float)));
-        CK(cudaMemcpy(d_planes, P.V_all.data(), nd * K * sizeof(float), cudaMemcpyHostToDevice));
-        CK(cudaMemcpy(d_L16p, P.lum_all.data(), nd * K * 2, cudaMemcpyHostToDevice));
         CK(cudaMemcpy(d_guide, P.guide.data(), no * sizeof(float), cudaMemcpyHostToDevice));
         CK(cudaMemcpy(d_ga, P.ga.data(), nd * sizeof(float), cudaMemcpyHostToDevice));
-        planes_to_kfastest_f32(d_planes, d_V, P.vp.dw, P.vp.dh, K, s);
-        planes_to_kfastest_f16(d_L16p, d_L16, P.vp.dw, P.vp.dh, K, s);
-        CK(cudaStreamSynchronize(s));
-        cudaFree(d_planes); cudaFree(d_L16p);
+        // plane-major host volumes -> k-fastest device volumes, a few planes at a time through a staging buffer
+        // (a full plane-major copy on the device doubled the volume's footprint: 4.9 GB more at 1/2 resolution)
+        {
+            const int kc = std::max(1, std::min(K, (int)(((size_t)256 << 20) / (nd * sizeof(float)))));
+            float* d_stage;
+            void* d_stage16;
+            CK(cudaMalloc(&d_stage, (size_t)kc * nd * sizeof(float)));
+            CK(cudaMalloc(&d_stage16, (size_t)kc * nd * 2));
+            for (int k0 = 0; k0 < K; k0 += kc) {
+                int c = std::min(kc, K - k0);
+                CK(cudaMemcpyAsync(d_stage, P.V_all.data() + (size_t)k0 * nd, (size_t)c * nd * sizeof(float), cudaMemcpyHostToDevice, s));
+                planes_to_kfastest_f32_chunk(d_stage, d_V, P.vp.dw, P.vp.dh, K, k0, c, s);
+                CK(cudaMemcpyAsync(d_stage16, P.lum_all.data() + (size_t)k0 * nd, (size_t)c * nd * 2, cudaMemcpyHostToDevice, s));
+                planes_to_kfastest_f16_chunk(d_stage16, d_L16, P.vp.dw, P.vp.dh, K, k0, c, s);
+                CK(cudaStreamSynchronize(s));   // the staging buffers are reused
+            }
+            cudaFree(d_stage); cudaFree(d_stage16);
+        }
         P.V_all.release_async();
         P.fm_all.release_async();
         P.lum_all.release_async();
         DepthParams dp;
         dp.halo_prior = (float)so.halo_prior;
         dp.dark_prior = (float)so.dark_prior;
+        dp.depth_full_fraction = (float)po.depth_fraction;   // the spill-zone radii are in sensor px
         R = depth_from_volume(d_V, d_L16, d_guide, d_ga, P.vp.dw, P.vp.dh, K, ow, oh, dp, s);
         cudaFree(d_V); cudaFree(d_L16); cudaFree(d_ga);
     }
-    logf("depth: %.2f s (cost %.0f ms, SGM %.0f ms, post %.0f ms); end-peaked %.1f%%\n", since(t1), R.ms_cost, R.ms_sgm, R.ms_post,
-           100 * R.end_fraction);
+    logf("depth: %.2f s (cost %.0f ms, SGM %.0f ms%s, post %.0f ms); end-peaked %.1f%%\n", since(t1), R.ms_cost, R.ms_sgm,
+         R.sgm_bands > 1 ? (" in " + std::to_string(R.sgm_bands) + " bands").c_str() : "", R.ms_post, 100 * R.end_fraction);
     if (so.result) so.result->depth_seconds = since(t1);
     auto preview_depth = [&](const char* name) {
         if (!hooks.preview) return;

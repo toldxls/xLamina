@@ -33,6 +33,7 @@ struct DepthParams {
 
 struct DepthResult {
     int dw = 0, dh = 0, ow = 0, oh = 0, K = 0;
+    int sgm_bands = 1;            // > 1 when the path-sum volume was processed in overlapping bands (memory)
     std::vector<float> depth_s;   // oh*ow, integer-valued frame index
     std::vector<float> conf;      // oh*ow
     std::vector<float> spill;     // dh*dw, the h map (kept for the refinement pass)
@@ -47,7 +48,10 @@ struct DepthResult {
 DepthResult depth_from_volume(const float* d_V, const void* d_Lv16, const float* d_guide_full, const float* d_ga,
                               int dw, int dh, int K, int ow, int oh, const DepthParams& p, cudaStream_t s);
 
-// plane-major (K, dh, dw) -> k-fastest (dh, dw, K), float32 and float16 variants
+// plane-major (K, dh, dw) -> k-fastest (dh, dw, K), float32 and float16 variants; the _chunk forms take
+// planes k0 .. k0 + kc - 1 (a staging buffer of kc planes) and write them into their k slots of the full volume
+void planes_to_kfastest_f32_chunk(const float* d_planes, float* d_out, int dw, int dh, int K, int k0, int kc, cudaStream_t s);
+void planes_to_kfastest_f16_chunk(const void* d_planes, void* d_out, int dw, int dh, int K, int k0, int kc, cudaStream_t s);
 void planes_to_kfastest_f32(const float* d_planes, float* d_out, int dw, int dh, int K, cudaStream_t s);
 void planes_to_kfastest_f16(const void* d_planes, void* d_out, int dw, int dh, int K, cudaStream_t s);
 

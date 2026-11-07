@@ -337,7 +337,15 @@ void MainWindow::buildUi() {
     al->addRow("Focus window", focusRadius_);
     focusPower_ = dspin(1, 8, 0.5, 4, 1, "", "Exponent on the focus measure when the frames compete. Default 4.");
     al->addRow("Focus power", focusPower_);
-    depthFmPx_ = dspin(1, 30, 1, 6, 0, " px", "Window of the normalised Laplacian in the depth volume (at 1/4 sensor resolution). Default 6.");
+    depthRes_ = new QComboBox;
+    depthRes_->addItem("1/4 of the sensor (default)", 0.25);
+    depthRes_->addItem("1/2 of the sensor", 0.5);
+    depthRes_->addItem("Full (small stacks only)", 1.0);
+    depthRes_->setToolTip("Resolution of the depth volume. 1/2 needs about 5 GB for 163 full frames and makes the edge of a bright object\n"
+                          "tighter (FINDINGS 31); full resolution needs 20 GB for such a stack and is for small ones.");
+    al->addRow("Depth resolution", depthRes_);
+    depthFmPx_ = dspin(1, 30, 1, 6, 0, " px", "Window of the normalised Laplacian in the depth volume, in depth-volume pixels. Default 6;\n"
+                                               "3 at 1/2 resolution gave the tightest edges on the synthetic stack (FINDINGS 31).");
     al->addRow("Depth window", depthFmPx_);
     volAggPx_ = dspin(0, 128, 4, 32, 0, " px", "Edge-aware aggregation of the depth volume, in sensor pixels; against ghost lines beside edges. Default 32.");
     al->addRow("Volume aggregation", volAggPx_);
@@ -359,6 +367,7 @@ void MainWindow::buildUi() {
     QPushButton* resetAdv = new QPushButton("Defaults");
     resetAdv->setToolTip("Put every advanced parameter back to its validated default.");
     connect(resetAdv, &QPushButton::clicked, this, [this] {
+        depthRes_->setCurrentIndex(0);
         focusRadius_->setValue(6); focusPower_->setValue(4); depthFmPx_->setValue(6); volAggPx_->setValue(32);
         refineR_->setValue(12); refineFmPx_->setValue(9); softPx_->setValue(3); haloPrior_->setValue(2); darkPrior_->setValue(1);
     });
@@ -480,6 +489,7 @@ void MainWindow::loadSettings() {
     s.endGroup();
     s.beginGroup("advanced");
     advanced_->setChecked(s.value("enabled", false).toBool());
+    depthRes_->setCurrentIndex(s.value("depthRes", 0).toInt());
     focusRadius_->setValue(s.value("focusRadius", 6.0).toDouble());
     focusPower_->setValue(s.value("focusPower", 4.0).toDouble());
     depthFmPx_->setValue(s.value("depthFmPx", 6.0).toDouble());
@@ -512,6 +522,7 @@ void MainWindow::saveSettings() {
     s.endGroup();
     s.beginGroup("advanced");
     s.setValue("enabled", advanced_->isChecked());
+    s.setValue("depthRes", depthRes_->currentIndex());
     s.setValue("focusRadius", focusRadius_->value());
     s.setValue("focusPower", focusPower_->value());
     s.setValue("depthFmPx", depthFmPx_->value());
@@ -536,6 +547,7 @@ void MainWindow::resetSettings() {
     cradius_->setValue(32);
     bradius_->setValue(0);
     advanced_->setChecked(false);
+    depthRes_->setCurrentIndex(0);
     focusRadius_->setValue(6); focusPower_->setValue(4); depthFmPx_->setValue(6); volAggPx_->setValue(32);
     refineR_->setValue(12); refineFmPx_->setValue(9); softPx_->setValue(3); haloPrior_->setValue(2); darkPrior_->setValue(1);
     perfToUi(PerfSettings());
@@ -861,6 +873,7 @@ bool MainWindow::buildJob(JobOptions& jo, bool interactive) {
     jo.stack.po.c_radius_px = cradius_->value();
     jo.stack.po.b_radius_px = bradius_->value();
     if (advanced_->isChecked()) {
+        jo.stack.po.depth_fraction = depthRes_->currentData().toDouble();
         jo.stack.po.radius_px = focusRadius_->value();
         jo.stack.po.power = focusPower_->value();
         jo.stack.po.depth_fm_px = depthFmPx_->value();

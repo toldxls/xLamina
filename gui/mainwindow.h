@@ -157,6 +157,7 @@ private:
     QCheckBox* cacheFrames_ = nullptr;
     // advanced depth / composition tuning (the validated defaults unless the group is ticked)
     QGroupBox* advanced_ = nullptr;
+    QComboBox* depthRes_ = nullptr;
     QDoubleSpinBox* focusRadius_ = nullptr;
     QDoubleSpinBox* focusPower_ = nullptr;
     QDoubleSpinBox* depthFmPx_ = nullptr;

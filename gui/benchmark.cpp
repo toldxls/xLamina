@@ -40,6 +40,7 @@ using namespace stackcore;
 namespace {
 const int kSampleW = 4000, kSampleH = 2667, kSampleN = 32;   // 2 GB of frames: runs of a few seconds, not sub-second noise
 const int kQuickFrames = 40;                                 // the quick benchmark's subset of the open stack
+const float kDefocusPxPerFrame = 1.0f;                       // the sample's blur growth (sigma) per frame of distance
 
 inline float hash01(int x, int y, int seed) {
     uint32_t h = (uint32_t)x * 374761393u + (uint32_t)y * 668265263u + (uint32_t)seed * 2246822519u;
@@ -121,8 +122,31 @@ QStringList generate_sample(const QString& dir, const std::function<void(const Q
             if (plate) { tintR[i] = 0.95f * m; tintG[i] = 0.80f * m; tintB[i] = 0.30f * m; }
             else { tintR[i] = 0.50f * m; tintG[i] = 0.38f * m; tintB[i] = 0.26f * m; }
         }
-    const float sigmas[] = {0.f, 0.6f, 1.2f, 2.4f, 4.f, 6.f, 8.5f, 11.f};
-    const int L = 8;
+    // the truth, so outputs can be scored against it (FINDINGS 31): the depth per pixel in frames (grey,
+    // value = z / (N - 1), 16-bit) and the all-in-focus image, in a truth/ subfolder so no stacker reads them
+    {
+        QString td = QDir(dir).filePath("truth");
+        QDir().mkpath(td);
+        std::vector<float> z3(n * 3), sharp(n * 3);
+        for (size_t i = 0; i < n; ++i) {
+            float v = Z[i] / (N - 1);
+            z3[i * 3] = z3[i * 3 + 1] = z3[i * 3 + 2] = v;
+            sharp[i * 3] = tintR[i] * T[i]; sharp[i * 3 + 1] = tintG[i] * T[i]; sharp[i * 3 + 2] = tintB[i] * T[i];
+        }
+        write_tiff_rgb16(QDir(td).filePath("depth_frames_over_N-1.tif").toStdString(), z3, W, H, {});
+        write_tiff_rgb16(QDir(td).filePath("sharp.tif").toStdString(), sharp, W, H, {});
+        QFile f(QDir(td).filePath("README.txt"));
+        if (f.open(QIODevice::WriteOnly | QIODevice::Text))
+            f.write(QString("xLamina synthetic sample: %1 frames of %2 x %3. Frame k is in focus where depth = k; defocus sigma = %5 px per frame of distance.\n"
+                            "depth_frames_over_N-1.tif: grey = depth / %4 (16-bit). sharp.tif: the all-in-focus scene. Frame k is shifted by\n"
+                            "(round(1.5 sin 0.9k), round(1.2 cos 0.7k)) px; frame 0's shift is (0, 1). Plate: ellipse centre (0.6 W, 0.5 H), radii (0.25 W, 0.30 H),\n"
+                            "depth %4 x (0.82 + 0.08 ex), bright rim where |ex^2 + ey^2 - 1| < 0.012; matrix depth %4 x 0.45 x (0.5 + 0.5 sin(2 pi 1.3 x/W + 0.7) cos(2 pi 0.9 y/H + 1.9)).\n")
+                        .arg(N).arg(W).arg(H).arg(N - 1).arg(kDefocusPxPerFrame).toUtf8());
+    }
+    // defocus grows 1 px of sigma per frame of distance, about what a 20x / NA 0.4 objective does at Travis's
+    // 0.468 um steps and 0.14 um/px (0.45 px/frame left the depth underdetermined at 1/4 resolution)
+    const float sigmas[] = {0.f, 0.7f, 1.5f, 3.f, 5.f, 8.f, 12.f, 17.f, 24.f, 32.f};
+    const int L = 10;
     std::vector<std::vector<float>> levels(L);
     std::vector<float> tmp;
     for (int l = 0; l < L; ++l) {
@@ -140,7 +164,7 @@ QStringList generate_sample(const QString& dir, const std::function<void(const Q
             for (int x = 0; x < W; ++x) {
                 int sx = std::clamp(x + dx, 0, W - 1);
                 size_t s = (size_t)sy * W + sx, o = ((size_t)y * W + x) * 3;
-                float d = 0.45f * std::abs(Z[s] - k);
+                float d = kDefocusPxPerFrame * std::abs(Z[s] - k);
                 int l = 0;
                 while (l < L - 2 && sigmas[l + 1] < d) ++l;
                 float t = std::clamp((d - sigmas[l]) / (sigmas[l + 1] - sigmas[l]), 0.f, 1.f);
