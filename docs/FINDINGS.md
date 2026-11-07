@@ -939,6 +939,41 @@ streaming passes' kernels (pass 2 fine focus 3.0 s, pass 1 2.1 s), compose's
 host mixing (~1.5 s), the alignment read + pinning (3.1 s) and ~1.4 s of
 allocation/merge overhead.
 
+## 28. Pass 2: the Gaussian blurs (2026-11-06, late)
+
+Nsight on the 3080 Ti alone, pass 2 (fine focus), per frame: upload 14.7 ms,
+`k_blur_row` + `k_blur_col` 22.6 ms over the three blurs of `refine_measure`
+(sigma 0.8, 9 and 27: the normaliser's kernel is 217 taps), warp 1.9 ms,
+everything else < 1 ms each. The blur kernels read every tap from global
+memory, so the card could not hide them behind the upload and pass 2 took
+2.97 s with both GPUs.
+
+`gaussian_blur` now runs shared-memory tiled kernels: the row filter loads
+`1024 + 2R` pixels and the coefficients per block, the column filter a
+`(32 + 2R) x 32` tile, and each thread produces four consecutive outputs from
+sliding register windows, so a tap costs one shared load per two
+multiply-adds instead of two per one (the first tiled version without the
+register blocking was only 35 % faster: shared-bandwidth bound). The
+per-output summation order is exactly the global-memory kernels' (taps in
+increasing i; the column pair summed before its multiply), and the old
+kernels remain as the fallback past 48 KB of shared memory (R > ~160) or
+when R >= the image size. B, C and Cn are bit-identical to the previous
+build, on one GPU and on two.
+
+| both GPUs, 163 frames | before | after |
+|---|---|---|
+| pass 1 stream | 2.10 s | 1.77 s |
+| pass 2 fine focus | 2.97 s | 1.41 s (116 fps) |
+| pass 3 composition | 1.48 s | 1.41 s |
+| fusion total | 12.9 s | 11.0 s |
+| whole run | 19.2 s | **17.3 s** |
+
+Passes 2 and 3 are now at the two links' upload rate; on the 3080 Ti alone
+pass 2 is 2.45 s = 163 x 14.7 ms. What is left in the fusion: compose's
+host-side mixing (~1.5 s of its 2.9 s), the pass-1 kernels (1.8 s; the fold's
+pyramid and the volume slice), refine's host step (0.4 s), finalize (1.2 s),
+and ~1.3 s of allocation and merges.
+
 ## Open items
 
 - **B: doubled plate edge / glow** (§25a): the C-style aggregation does not

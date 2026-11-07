@@ -58,6 +58,79 @@ __global__ void k_blur_col(const float* __restrict__ in, float* __restrict__ out
     out[(size_t)y * w + x] = s;
 }
 
+// The same two filters from shared-memory tiles, four consecutive outputs per thread so a tap
+// costs one shared load per two multiply-adds instead of two per one (the fine-focus normaliser is
+// sigma 27, 217 taps, and the global-memory versions above took 8 ms per pass at full resolution;
+// FINDINGS 28). Each output's summation order is exactly the one above (taps in increasing i, the
+// column pair summed before its multiply), so the results are bit-identical.
+constexpr int BR_THREADS = 256, BR_PER = 4, BR_TILE = BR_THREADS * BR_PER;   // row filter: pixels per block (one row)
+constexpr int BC_X = 32, BC_Y = 32, BC_TY = 8;                               // column filter: BC_X columns x BC_Y rows, 4 rows per thread
+constexpr int BLUR_SMEM_MAX = 48 * 1024;
+
+__global__ void k_blur_row_sm(const float* __restrict__ in, float* __restrict__ out, int w, int h, const float* __restrict__ k, int R) {
+    extern __shared__ float sm[];
+    float* ks = sm;                     // 2R + 1 coefficients
+    float* tile = sm + 2 * R + 1;       // BR_TILE + 2R pixels: x0 - R .. x0 + BR_TILE + R - 1
+    const int y = blockIdx.y, x0 = blockIdx.x * BR_TILE;
+    const float* row = in + (size_t)y * w;
+    for (int i = threadIdx.x; i < 2 * R + 1; i += blockDim.x) ks[i] = k[i];
+    for (int i = threadIdx.x; i < BR_TILE + 2 * R; i += blockDim.x) {
+        int idx = x0 - R + i;
+        tile[i] = idx < w + R ? row[refl101(idx, w)] : 0.f;   // past w + R nothing reads it (R < w: one reflection)
+    }
+    __syncthreads();
+    const int x = x0 + BR_PER * threadIdx.x;
+    if (x >= w) return;
+    const float* t = tile + BR_PER * threadIdx.x + R;   // t[i] = row[refl101(x + i)]
+    float a0 = 0.f, a1 = 0.f, a2 = 0.f, a3 = 0.f;
+    float v0 = t[-R], v1 = t[-R + 1], v2 = t[-R + 2];
+    for (int i = -R; i <= R; ++i) {
+        float v3 = t[i + 3];
+        float c = ks[i + R];
+        a0 += c * v0; a1 += c * v1; a2 += c * v2; a3 += c * v3;
+        v0 = v1; v1 = v2; v2 = v3;
+    }
+    float* o = out + (size_t)y * w + x;
+    o[0] = a0;
+    if (x + 1 < w) o[1] = a1;
+    if (x + 2 < w) o[2] = a2;
+    if (x + 3 < w) o[3] = a3;
+}
+
+__global__ void k_blur_col_sm(const float* __restrict__ in, float* __restrict__ out, int w, int h, const float* __restrict__ k, int R) {
+    extern __shared__ float sm[];
+    float* ks = sm;
+    float* tile = sm + 2 * R + 1;       // (BC_Y + 2R) rows x BC_X columns: rows y0 - R .. y0 + BC_Y + R - 1
+    const int x = blockIdx.x * BC_X + threadIdx.x, y0 = blockIdx.y * BC_Y;
+    const int rows = BC_Y + 2 * R;
+    for (int i = threadIdx.y * BC_X + threadIdx.x; i < 2 * R + 1; i += BC_X * BC_TY) ks[i] = k[i];
+    if (x < w)
+        for (int j = threadIdx.y; j < rows; j += BC_TY) {
+            int idx = y0 - R + j;
+            tile[j * BC_X + threadIdx.x] = idx < h + R ? in[(size_t)refl101(idx, h) * w + x] : 0.f;
+        }
+    __syncthreads();
+    const int r = (BC_Y / BC_TY) * threadIdx.y, y = y0 + r;   // this thread's 4 consecutive rows
+    if (x >= w || y >= h) return;
+    const float* t = tile + (r + R) * BC_X + threadIdx.x;      // t[i * BC_X] = in[refl101(y + i)][x]
+    // windows: U_j = t[(i + j) BC_X] (rows above... below), D_j = t[(j - i) BC_X]
+    float u0 = t[0], u1 = t[BC_X], u2 = t[2 * BC_X], u3 = t[3 * BC_X];
+    float d0 = u0, d1 = u1, d2 = u2, d3 = u3;
+    const float c0 = ks[R];
+    float a0 = c0 * u0, a1 = c0 * u1, a2 = c0 * u2, a3 = c0 * u3;
+    for (int i = 1; i <= R; ++i) {
+        u0 = u1; u1 = u2; u2 = u3; u3 = t[(i + 3) * BC_X];
+        d3 = d2; d2 = d1; d1 = d0; d0 = t[-i * BC_X];
+        float c = ks[R + i];
+        a0 += c * (u0 + d0); a1 += c * (u1 + d1); a2 += c * (u2 + d2); a3 += c * (u3 + d3);
+    }
+    float* o = out + (size_t)y * w + x;
+    o[0] = a0;
+    if (y + 1 < h) o[(size_t)w] = a1;
+    if (y + 2 < h) o[(size_t)2 * w] = a2;
+    if (y + 3 < h) o[(size_t)3 * w] = a3;
+}
+
 // box: plain sums (OpenCV's sliding sums differ by rounding only); normalised in double like ColumnSum
 __global__ void k_box_row(const float* __restrict__ in, float* __restrict__ out, int w, int h, int R) {
     int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -334,8 +407,17 @@ void DevGaussian::free() {
 }
 
 void gaussian_blur(const float* d_in, float* d_out, float* d_tmp, int w, int h, const DevGaussian& g, cudaStream_t s) {
-    k_blur_row<<<grid2(w, h), BLK, 0, s>>>(d_in, d_tmp, w, h, g.d_k, g.R);
-    k_blur_col<<<grid2(w, h), BLK, 0, s>>>(d_tmp, d_out, w, h, g.d_k, g.R);
+    const int R = g.R;
+    size_t sm_row = (size_t)(2 * R + 1 + BR_TILE + 2 * R) * sizeof(float);
+    size_t sm_col = (size_t)(2 * R + 1 + (BC_Y + 2 * R) * BC_X) * sizeof(float);
+    if (sm_row <= BLUR_SMEM_MAX && R < w)
+        k_blur_row_sm<<<dim3((w + BR_TILE - 1) / BR_TILE, h), BR_THREADS, sm_row, s>>>(d_in, d_tmp, w, h, g.d_k, R);
+    else
+        k_blur_row<<<grid2(w, h), BLK, 0, s>>>(d_in, d_tmp, w, h, g.d_k, R);
+    if (sm_col <= BLUR_SMEM_MAX && R < h)
+        k_blur_col_sm<<<dim3((w + BC_X - 1) / BC_X, (h + BC_Y - 1) / BC_Y), dim3(BC_X, BC_TY), sm_col, s>>>(d_tmp, d_out, w, h, g.d_k, R);
+    else
+        k_blur_col<<<grid2(w, h), BLK, 0, s>>>(d_tmp, d_out, w, h, g.d_k, R);
 }
 
 void box_filter(const float* d_in, float* d_out, float* d_tmp, int w, int h, int r, cudaStream_t s) {
