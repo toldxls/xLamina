@@ -24,7 +24,7 @@ public:
     explicit Worker(QObject* parent = nullptr);
     ~Worker() override;
     bool running() const { return running_; }
-    void start(const stackcore::JobOptions& jo);
+    void start(const stackcore::JobOptions& jo, int liveDown = 6);   // live views at 1/liveDown of the output
     void cancel() { cancel_.store(true); }
 
 signals:

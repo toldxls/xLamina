@@ -92,6 +92,8 @@ void fold_accumulate(FoldState& st, int k, const float* d_img, const FoldParams&
 
 // Live preview of the running A (a_num / a_den) at 1/down of the grid, float RGB on the host (syncs the stream).
 void fold_preview(const FoldState& st, int down, std::vector<float>& rgb, int& pw, int& ph, cudaStream_t s);
+// The best focus measure found so far per pixel (b_best, grey x3), same layout: the detail map building.
+void fold_focus_preview(const FoldState& st, int down, std::vector<float>& rgb, int& pw, int& ph, cudaStream_t s);
 // A float RGB device image at 1/down (point samples), to the host (syncs the stream).
 void image_preview(const float* d_rgb, int w, int h, int down, std::vector<float>& rgb, int& pw, int& ph, cudaStream_t s);
 

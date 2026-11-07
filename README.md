@@ -22,12 +22,16 @@ current driver. Nothing else.
 Open a folder (or drop one onto the window). Every TIFF of the stack's image size is a
 frame; other TIFFs in the folder are listed greyed out and left alone. Tick the outputs
 you want, set the field of view if you know it (it gives the report its µm/px), press
-Render. The viewer shows each frame as it is read (so the stack's wobble is visible) and
-aligned, with the stack building in the pane under the frame list, then the depth map,
-then the result; the tabs under it switch between the outputs. Save as… writes the
-current one as a 16-bit TIFF, JPEG or PNG; the full set plus `report.json` is also
-written to `<folder>_stacker`. The frames' ICC profile is kept in the outputs and used
-for display.
+Render. While it runs the viewer splits in two: on the left each frame as it is
+processed (raw while reading, so the stack's wobble is visible, then warped onto the
+output grid), on the right what is being built from them — the detail map through the
+stack forwards, the depth map back through it, then the composition forwards. Zoom and
+pan stay put as the frames change. Afterwards the tabs under the viewer switch between
+the outputs at full resolution; clicking a frame in the list shows it at full
+resolution. Live view sets the resolution of the live panes (each frame shown is copied
+off the GPU, so Full slows the render). Save as… writes the current image as a 16-bit
+TIFF, JPEG or PNG; the full set plus `report.json` is also written to
+`<folder>_stacker`. The frames' ICC profile is kept in the outputs and used for display.
 
 After a render each frame in the list shows its wobble: the shift (px) and scale change
 (%) from the previous frame, from the alignment. Frames whose shift is an outlier are

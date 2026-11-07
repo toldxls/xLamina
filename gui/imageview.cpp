@@ -19,12 +19,27 @@ ImageView::ImageView(QWidget* parent) : QGraphicsView(parent) {
     item_ = scene_.addPixmap(QPixmap());
 }
 
+// A new image keeps the user's zoom and position (as fractions of the image, so
+// images of different sizes - a raw frame, a warped one, a full-resolution one -
+// show the same area at the same on-screen size) until the view is fitted again.
 void ImageView::setImage(const QImage& img, bool keepView) {
-    bool sameSize = !image_.isNull() && image_.size() == img.size();
+    bool keep = keepView && !fitted_ && !image_.isNull() && !img.isNull();
+    QPointF frac;
+    double shownWidth = 0;
+    if (keep) {
+        QPointF c = mapToScene(viewport()->rect().center());
+        frac = QPointF(c.x() / image_.width(), c.y() / image_.height());
+        shownWidth = zoom() * image_.width();
+    }
     image_ = img;
     item_->setPixmap(QPixmap::fromImage(img));
     scene_.setSceneRect(item_->boundingRect());
-    if (!keepView || !sameSize || fitted_) fit();
+    if (!keep) { fit(); return; }
+    double z = shownWidth / img.width();
+    resetTransform();
+    scale(z, z);
+    centerOn(frac.x() * img.width(), frac.y() * img.height());
+    emit zoomChanged(z);
 }
 
 void ImageView::fit() {

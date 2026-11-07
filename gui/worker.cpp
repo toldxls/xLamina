@@ -17,7 +17,7 @@ Worker::~Worker() {
     thread_.wait();
 }
 
-void Worker::start(const JobOptions& jo_in) {
+void Worker::start(const JobOptions& jo_in, int liveDown) {
     if (running_) return;
     running_ = true;
     cancel_.store(false);
@@ -27,16 +27,27 @@ void Worker::start(const JobOptions& jo_in) {
     QObject* worker = new QObject();
     worker->moveToThread(&thread_);
     thread_.start();
-    QMetaObject::invokeMethod(worker, [this, jo, data, worker] {
+    QMetaObject::invokeMethod(worker, [this, jo, data, worker, liveDown] {
         set_log([this](const std::string& s) { emit logLine(QString::fromStdString(s)); });
         Hooks hooks;
         hooks.cancel = &cancel_;
-        hooks.preview_down = 6;
-        hooks.preview_every = 3;
-        hooks.frame_down = 6;    // the frames go to the main view: ~1140 px wide for a 6840 px grid
+        hooks.preview_down = std::max(1, liveDown);
+        hooks.frame_down = std::max(1, liveDown);
+        hooks.preview_every = liveDown >= 6 ? 3 : liveDown >= 3 ? 6 : 12;   // dearer previews, fewer of them
         hooks.progress = [this](const std::string& stage, double f) { emit progress(QString::fromStdString(stage), f); };
         hooks.preview = [this](const std::string& name, const std::vector<float>& rgb, int w, int h) {
-            emit preview(QString::fromStdString(name), toQImage(rgb.data(), w, h));
+            float gain = 1.f;
+            if (name.rfind("focus", 0) == 0) {   // the focus measure has no fixed scale: show it up to its 99th percentile
+                std::vector<float> v;
+                v.reserve((size_t)w * h / 4 + 1);
+                for (size_t i = 0; i < (size_t)w * h; i += 4) v.push_back(rgb[i * 3]);
+                if (!v.empty()) {
+                    size_t q = v.size() * 99 / 100;
+                    std::nth_element(v.begin(), v.begin() + q, v.end());
+                    gain = v[q] > 1e-9f ? 1.f / v[q] : 1.f;
+                }
+            }
+            emit preview(QString::fromStdString(name), toQImage(rgb.data(), w, h, gain));
         };
         hooks.frame = [this](int k, const std::vector<float>& rgb, int w, int h) { emit frame(k, toQImage(rgb.data(), w, h)); };
         try {

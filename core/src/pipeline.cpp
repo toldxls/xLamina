@@ -251,12 +251,12 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
             image_preview(S.d_warp, ow, oh, hooks.frame_down, img, pw, ph, f.stream);
             hooks.frame(k, img, pw, ph);
         }
-        // live preview: this GPU's running A (sum / weight) at a fraction of the output grid
+        // live preview: this GPU's best focus measure so far at a fraction of the output grid
         if (hooks.preview && f.dev == devs[0] && (done % hooks.preview_every == 0)) {
             std::vector<float> img;
             int pw, ph;
-            fold_preview(D.st, hooks.preview_down, img, pw, ph, D.fold_s);
-            hooks.preview("A (building)", img, pw, ph);
+            fold_focus_preview(D.st, hooks.preview_down, img, pw, ph, D.fold_s);
+            hooks.preview("focus (building)", img, pw, ph);   // the detail map so far
         }
     };
 
@@ -588,10 +588,22 @@ int run_stack(StackOptions& so) {
             CK(cudaMalloc(&d_depth[d], no * sizeof(float)));
             CK(cudaMemcpy(d_depth[d], R.depth_s.data(), no * sizeof(float), cudaMemcpyHostToDevice));
         }
+        // last frame first: the live view runs back through the stack (the argmax is order-free)
+        std::vector<int> back_k(all_k.rbegin(), all_k.rend());
+        std::vector<fs::path> back_paths(P.paths.rbegin(), P.paths.rend());
         std::vector<PassDev> ctx;
-        run_pass(P.paths, all_k, P.T, P.g, P.devs, streams, po.opt.readers, ctx,
+        std::atomic<int> refined{0};
+        run_pass(back_paths, back_k, P.T, P.g, P.devs, streams, po.opt.readers, ctx,
                  [&](int dev, PassSlot& S, int, cudaStream_t ss) { refine_measure(S.d_warp, rsc[dev][S.index], ss); },
-                 [&](int dev, PassSlot& S, int k, cudaStream_t fs) { refine_accumulate(rst[dev], k, rsc[dev][S.index].fm, d_depth[dev], refine_r, fs); },
+                 [&](int dev, PassSlot& S, int k, cudaStream_t fs) {
+                     refine_accumulate(rst[dev], k, rsc[dev][S.index].fm, d_depth[dev], refine_r, fs);
+                     if (hooks.preview && dev == P.devs[0] && (++refined % std::max(1, hooks.preview_every) == 0)) {
+                         std::vector<float> img;
+                         int pw, ph;
+                         refine_preview(rst[dev], K, hooks.preview_down, img, pw, ph, fs);
+                         hooks.preview("depth (building)", img, pw, ph);
+                     }
+                 },
                  "pass 2: fine focus", hooks);
         HostRefine hr;
         bool first = true;
@@ -635,9 +647,19 @@ int run_stack(StackOptions& so) {
             CK(cudaMemcpy(d_Ds[d], Ds.data(), no * sizeof(float), cudaMemcpyHostToDevice));
         }
         std::vector<PassDev> ctx;
+        std::atomic<int> composed{0};
         run_pass(sub, ks, P.T, P.g, P.devs, streams, po.opt.readers, ctx,
                  [&](int, PassSlot&, int, cudaStream_t) {},
-                 [&](int dev, PassSlot& S, int k, cudaStream_t fs) { compose_frame(cst[dev], k, S.d_warp, d_D[dev], d_Ds[dev], csc[dev][S.index], fs); },
+                 [&](int dev, PassSlot& S, int k, cudaStream_t fs) {
+                     compose_frame(cst[dev], k, S.d_warp, d_D[dev], d_Ds[dev], csc[dev][S.index], fs);
+                     // live view: the first GPU's composition so far, every preview_every frames
+                     if (hooks.preview && dev == P.devs[0] && (++composed % std::max(1, hooks.preview_every) == 0)) {
+                         std::vector<float> img;
+                         int pw, ph;
+                         compose_preview(cst[dev], hooks.preview_down, img, pw, ph, fs);
+                         hooks.preview("B (building)", img, pw, ph);
+                     }
+                 },
                  "pass 3: composition", hooks);
         HostCompose hc;
         bool first = true;

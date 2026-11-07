@@ -15,6 +15,7 @@
 #include <QImageWriter>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QSplitter>
 #include <QStatusBar>
 #include <QToolBar>
 #include <QVBoxLayout>
@@ -53,6 +54,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(&worker_, &Worker::logLine, this, &MainWindow::onLog);
     connect(&worker_, &Worker::finished, this, &MainWindow::onFinished);
     connect(&thumbs_, &ThumbLoader::thumbnail, this, &MainWindow::onThumbnail);
+    connect(&frameLoader_, &ThumbLoader::thumbnail, this, &MainWindow::onFullFrame);
 }
 
 QImage MainWindow::forDisplay(QImage img) const {
@@ -96,10 +98,17 @@ void MainWindow::buildUi() {
     cl->setContentsMargins(0, 0, 0, 0);
     cl->setSpacing(0);
     view_ = new ImageView;
+    liveView_ = new ImageView;            // right pane while rendering: the map being built
+    liveView_->setToolTip("What the render is building: the detail map (pass 1), the depth map (pass 2), the composition (pass 3)");
+    split_ = new QSplitter(Qt::Horizontal);
+    split_->addWidget(view_);
+    split_->addWidget(liveView_);
+    split_->setChildrenCollapsible(false);
+    liveView_->hide();
     tabs_ = new QTabBar;
     tabs_->setExpanding(false);
     tabs_->setDrawBase(false);
-    cl->addWidget(view_, 1);
+    cl->addWidget(split_, 1);
     cl->addWidget(tabs_);
     setCentralWidget(centre);
     connect(tabs_, &QTabBar::currentChanged, this, &MainWindow::showOutput);
@@ -108,22 +117,12 @@ void MainWindow::buildUi() {
     // ---- left: frames
     QDockWidget* frames = new QDockWidget("Frames", this);
     frames->setFeatures(QDockWidget::DockWidgetMovable);
-    QWidget* fw = new QWidget;
-    QVBoxLayout* fl0 = new QVBoxLayout(fw);
-    fl0->setContentsMargins(0, 0, 0, 0);
     frameList_ = new QListWidget;
     frameList_->setAlternatingRowColors(true);
     frameList_->setIconSize(QSize(144, 96));
     frameList_->setUniformItemSizes(true);
-    frameList_->setToolTip("The stack's frames. Click one to see it; greyed files are not part of the stack.");
-    frameView_ = new QLabel;
-    frameView_->setAlignment(Qt::AlignCenter);
-    frameView_->setMinimumHeight(140);
-    frameView_->setStyleSheet("background: #202020;");
-    frameView_->setToolTip("While the frames are read and aligned: the stack building. Afterwards: the frame being processed.");
-    fl0->addWidget(frameList_, 1);
-    fl0->addWidget(frameView_);
-    frames->setWidget(fw);
+    frameList_->setToolTip("The stack's frames. Click one to see it at full resolution; greyed files are not part of the stack.");
+    frames->setWidget(frameList_);
     addDockWidget(Qt::LeftDockWidgetArea, frames);
     connect(frameList_, &QListWidget::currentRowChanged, this, &MainWindow::showFrame);
 
@@ -156,6 +155,15 @@ void MainWindow::buildUi() {
     lockScale_ = new QCheckBox("Lock scale (telecentric optics)");
     lockScale_->setToolTip("Apply no scale change between frames; use for telecentric objectives.");
     fl->addRow("", lockScale_);
+    liveRes_ = new QComboBox;
+    liveRes_->addItem("Low (1/12)", 12);
+    liveRes_->addItem("Medium (1/6)", 6);
+    liveRes_->addItem("High (1/3)", 3);
+    liveRes_->addItem("Full", 1);
+    liveRes_->setCurrentIndex(1);
+    liveRes_->setToolTip("Resolution of the live view while rendering, as a fraction of the output.\n"
+                         "Each frame shown is copied from the GPU; Full copies 365 MB per frame and slows the render.");
+    fl->addRow("Live view", liveRes_);
     smoothing_ = new QDoubleSpinBox;
     smoothing_->setRange(0, 6);
     smoothing_->setSingleStep(0.5);
@@ -232,7 +240,7 @@ void MainWindow::openFolder(const QString& dir) {
     flagged_.clear();
     dropFlagged_->setEnabled(false);
     frameList_->clear();
-    frameView_->clear();
+    liveView_->hide();
     colorSpace_ = QColorSpace();
     // the stack is the TIFFs of the most common size; other files in the folder are listed greyed out
     QMap<QPair<unsigned, unsigned>, int> sizes;
@@ -245,12 +253,16 @@ void MainWindow::openFolder(const QString& dir) {
     int bestn = 0;
     for (auto it = sizes.begin(); it != sizes.end(); ++it) if (it.value() > bestn) { best = it.key(); bestn = it.value(); }
     int skipped = 0;
+    QPixmap blankPx(frameList_->iconSize());
+    blankPx.fill(QColor(40, 40, 40));
+    QIcon blank(blankPx);
     for (int i = 0; i < files.size(); ++i) {
         bool ok = infos[i].ok() && infos[i].width == best.first && infos[i].height == best.second;
         QListWidgetItem* it = new QListWidgetItem(files[i]);
         if (ok) {
             frames_ << d.filePath(files[i]);
             frameRows_ << i;
+            it->setIcon(blank);   // holds the row height until the thumbnail arrives
             it->setFlags(it->flags() | Qt::ItemIsUserCheckable);
             it->setCheckState(Qt::Checked);
             it->setToolTip("Untick to leave this frame out of the render. Wobble numbers appear here after a render.");
@@ -283,61 +295,41 @@ void MainWindow::onThumbnail(int index, QImage image) {
     frameList_->item(frameRows_[index])->setIcon(QIcon(QPixmap::fromImage(forDisplay(image))));
 }
 
-// While the frames are read, aligned and folded the main view shows each frame as
-// it is processed (raw first, so the stack's wobble is visible, then warped onto
-// the output grid) and the small pane shows the result building; from the depth
-// map on, the main view shows the result and the small pane the frame.
+// The live view: while frames stream (reading, pass 1 forward, pass 2 backward,
+// pass 3 forward) the left pane shows each frame as it is processed (raw while
+// reading, so the stack's wobble is visible, then warped onto the output grid)
+// and the right pane what is being built from them.
 void MainWindow::onFrame(int k, QImage image) {
     if (k < 0 || k >= jobFrames_.size()) return;
     k = jobFrames_[k];   // the job's frame -> the folder's frame
     selecting_ = true;
     frameList_->setCurrentRow(frameRows_[k]);
     selecting_ = false;
-    image = forDisplay(image);
     bool raw = stage_->text().startsWith("reading");
-    bool framesPhase = raw || stage_->text().startsWith("aligning") || stage_->text().startsWith("pass 1");
-    if (framesPhase) {
-        current_ = "frame";
-        view_->setImage(image, true);
-        statusBar()->showMessage(QString("%1 %2 of %3%4").arg(raw ? "Reading frame" : "Aligned frame").arg(k + 1).arg(frames_.size())
-                                     .arg(raw ? "" : " (warped onto the output grid)"));
-    } else {
-        frameView_->setPixmap(QPixmap::fromImage(image).scaled(frameView_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
-    }
+    current_ = "frame";
+    view_->setImage(forDisplay(image), true);
+    const QString& st = stage_->text();
+    QString what = raw ? "Reading frame" : st.startsWith("pass 2") ? "Fine focus, frame" : st.startsWith("pass 3") ? "Composing, frame" : "Aligned frame";
+    statusBar()->showMessage(QString("%1 %2 of %3").arg(what).arg(k + 1).arg(frames_.size()));
 }
 
 void MainWindow::showFrame(int listRow) {
     if (selecting_ || listRow < 0 || listRow >= frameList_->count() || worker_.running()) return;
     int row = frameList_->item(listRow)->data(Qt::UserRole).toInt();
     if (row < 0 || row >= frames_.size()) return;
-    // a quick 1/4 preview of the source frame, read on this thread (the RAM-disk / NVMe read dominates)
-    TiffInfo info = tiff_probe(frames_[row].toStdWString());
-    if (!info.ok() || info.samples < 3) { statusBar()->showMessage(QString("%1: %2").arg(frames_[row], QString::fromStdString(info.error))); return; }
-    std::vector<uint8_t> buf(tiff_buffer_capacity(info.pixel_bytes()) + kReadAlign);
-    uint8_t* base = buf.data() + (kReadAlign - ((uintptr_t)buf.data() % kReadAlign)) % kReadAlign;
-    TiffRead rd = tiff_read_pixels(frames_[row].toStdWString(), info, base, buf.size() - (base - buf.data()));
-    if (!rd.ok()) return;
-    const uint8_t* px = base + rd.data_offset_in_buf;
-    int down = 4, pw = info.width / down, ph = info.height / down;
-    QImage img(pw, ph, QImage::Format_RGB32);
-    size_t bpp = info.samples * (info.bits / 8);
-    for (int y = 0; y < ph; ++y) {
-        QRgb* out = reinterpret_cast<QRgb*>(img.scanLine(y));
-        const uint8_t* srow = px + (size_t)(y * down) * info.width * bpp;
-        for (int x = 0; x < pw; ++x) {
-            const uint8_t* p = srow + (size_t)(x * down) * bpp;
-            int c[3];
-            for (int k = 0; k < 3; ++k) {
-                if (info.bits == 16) { unsigned v = info.big_endian ? (p[2 * k] << 8) | p[2 * k + 1] : (p[2 * k + 1] << 8) | p[2 * k]; c[k] = v >> 8; }
-                else c[k] = p[k];
-            }
-            out[x] = qRgb(c[0], c[1], c[2]);
-        }
-    }
+    // the source frame at full resolution, read on a thread; the icon stands in meanwhile
+    pendingFrame_ = row;
+    QIcon icon = frameList_->item(listRow)->icon();
+    if (!icon.isNull()) { current_ = "frame"; view_->setImage(icon.pixmap(icon.availableSizes().value(0)).toImage(), true); }
+    statusBar()->showMessage(QString("%1 — loading at full resolution…").arg(QFileInfo(frames_[row]).fileName()));
+    frameLoader_.start({frames_[row]}, 1 << 20);
+}
+
+void MainWindow::onFullFrame(int index, QImage image) {
+    if (index != 0 || pendingFrame_ < 0 || pendingFrame_ >= frames_.size() || worker_.running()) return;
     current_ = "frame";
-    view_->setImage(forDisplay(img), false);
-    QFileInfo fi(frames_[row]);
-    statusBar()->showMessage(QString("%1 — %2 x %3, %4-bit").arg(fi.fileName()).arg(info.width).arg(info.height).arg(info.bits));
+    view_->setImage(forDisplay(image), true);
+    statusBar()->showMessage(QString("%1 — %2 x %3 (full resolution)").arg(QFileInfo(frames_[pendingFrame_]).fileName()).arg(image.width()).arg(image.height()));
 }
 
 void MainWindow::render() {
@@ -368,8 +360,9 @@ void MainWindow::render() {
     result_.reset();
     while (tabs_->count()) tabs_->removeTab(0);
     log_->clear();
+    liveView_->hide();
     setBusy(true);
-    worker_.start(jo);
+    worker_.start(jo, liveRes_->currentData().toInt());
 }
 
 void MainWindow::cancel() {
@@ -381,7 +374,7 @@ void MainWindow::setBusy(bool busy) {
     renderBtn_->setEnabled(!busy);
     cancelBtn_->setEnabled(busy);
     saveBtn_->setEnabled(!busy && result_ && !result_->result.names.empty());
-    frameList_->setEnabled(!busy);
+    // the list stays enabled (a disabled list greys the thumbnails); showFrame ignores clicks while rendering
     progress_->setValue(0);
 }
 
@@ -391,9 +384,17 @@ void MainWindow::onProgress(QString stage, double fraction) {
 }
 
 void MainWindow::onPreview(QString name, QImage image) {
-    if (!name.startsWith("depth")) image = forDisplay(image);
-    if (name == "A" && stage_->text().startsWith("pass 1")) {   // the stack building, while the frames take the main view
-        frameView_->setPixmap(QPixmap::fromImage(image).scaled(frameView_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    bool grey = name.startsWith("depth") || name.startsWith("focus");
+    if (!grey) image = forDisplay(image);
+    if (name.endsWith("(building)") || name.startsWith("depth map")) {   // the right pane: what the render is building
+        if (liveView_->isHidden()) {
+            liveView_->show();
+            int half = split_->width() / 2;
+            split_->setSizes({half, half});
+            view_->fit();
+        }
+        liveView_->setImage(image, true);
+        liveView_->setToolTip(name);
         return;
     }
     current_ = name;
@@ -481,6 +482,7 @@ void MainWindow::dropFlagged() {
 void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
     result_ = data;
     setBusy(false);
+    liveView_->hide();
     labelWobble(data->align);
     if (data->rc == 3) { stage_->setText("Cancelled."); return; }
     if (data->rc != 0) { stage_->setText("Failed; see the log."); QMessageBox::warning(this, "xLamina", "The render failed. The log has the details."); return; }
@@ -518,9 +520,8 @@ void MainWindow::showOutput(int tab) {
     QString name = tabs_->tabText(tab);
     QImage img = outputImage(name);
     if (img.isNull()) return;
-    bool keep = current_ != "frame" && !current_.contains("building");
     current_ = name;
-    view_->setImage(img, keep);
+    view_->setImage(img, true);   // the zoomed area carries over from the live view / the other outputs
     statusBar()->showMessage(QString("%1 — %2 x %3").arg(name).arg(img.width()).arg(img.height()));
 }
 

@@ -12,6 +12,7 @@
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QSplitter>
 #include <QTabBar>
 
 #include <memory>
@@ -24,6 +25,7 @@ class MainWindow : public QMainWindow {
 public:
     explicit MainWindow(QWidget* parent = nullptr);
     void openFolder(const QString& dir);
+    bool rendering() const { return worker_.running(); }
 
 protected:
     void dragEnterEvent(QDragEnterEvent* e) override;
@@ -43,6 +45,7 @@ private slots:
     void onPreview(QString name, QImage image);
     void onFrame(int k, QImage image);
     void onThumbnail(int index, QImage image);
+    void onFullFrame(int index, QImage image);
     void onLog(QString line);
     void onFinished(std::shared_ptr<JobResultData> data);
     void dropFlagged();
@@ -64,8 +67,12 @@ private:
     QAction* dropFlagged_ = nullptr;
     QColorSpace colorSpace_;               // the frames' ICC profile (invalid = assume sRGB)
     bool selecting_ = false;
-    QLabel* frameView_ = nullptr;
+    ImageView* liveView_ = nullptr;        // right pane while rendering
+    QSplitter* split_ = nullptr;
     ThumbLoader thumbs_;
+    ThumbLoader frameLoader_;              // one frame at full resolution
+    int pendingFrame_ = -1;
+    QComboBox* liveRes_ = nullptr;
     std::shared_ptr<JobResultData> result_;
     QMap<QString, QImage> cache_;        // 8-bit versions of outputs and previews
     QString current_;                    // name of the image on screen

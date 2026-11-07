@@ -37,6 +37,9 @@ void refine_measure(const float* d_img, RefineScratch& sc, cudaStream_t s);
 // the restricted argmax: fw = |D - k| <= R ? fm : -inf; _take rule
 void refine_accumulate(RefineState& st, int k, const float* d_fm, const float* d_depth, int R, cudaStream_t s);
 
+// the refined depth so far at 1/down (frame index / (K-1), grey x3), for a live view
+void refine_preview(const RefineState& st, int K, int down, std::vector<float>& rgb, int& pw, int& ph, cudaStream_t s);
+
 struct HostRefine {
     int w = 0, h = 0;
     std::vector<float> bw;
@@ -76,6 +79,9 @@ std::vector<int> compose_frames(const std::vector<float>& depth_s, const std::ve
 // lab = |D - k| < 0.5 blurred (soft labels); wi = clip(1 - |Ds - k|, 0, 1); accumulate both compositions
 void compose_frame(ComposeState& st, int k, const float* d_img, const float* d_D, const float* d_Ds, ComposeScratch& sc,
                    cudaStream_t s);
+
+// the composition so far at 1/down (narrow labels), for a live view
+void compose_preview(const ComposeState& st, int down, std::vector<float>& rgb, int& pw, int& ph, cudaStream_t s);
 
 struct HostCompose {
     int w = 0, h = 0;

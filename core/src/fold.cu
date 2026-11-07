@@ -271,6 +271,28 @@ void fold_preview(const FoldState& st, int down, std::vector<float>& rgb, int& p
     CK(cudaStreamSynchronize(s));
 }
 
+// the best focus measure found so far per pixel (grey; -1 = nothing yet -> 0), point-sampled
+__global__ void k_preview_focus(const float* __restrict__ best, int w, int h, int down, float* __restrict__ out, int pw, int ph) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= pw || y >= ph) return;
+    size_t i = (size_t)min(y * down + down / 2, h - 1) * w + min(x * down + down / 2, w - 1);
+    float v = fmaxf(best[i], 0.f);
+    for (int c = 0; c < 3; ++c) out[((size_t)y * pw + x) * 3 + c] = v;
+}
+
+void fold_focus_preview(const FoldState& st, int down, std::vector<float>& rgb, int& pw, int& ph, cudaStream_t s) {
+    down = std::max(1, down);
+    pw = std::max(1, st.w / down);
+    ph = std::max(1, st.h / down);
+    float* d;
+    CK(cudaMallocAsync(&d, (size_t)pw * ph * 3 * sizeof(float), s));
+    k_preview_focus<<<dim3((pw + 31) / 32, (ph + 7) / 8), dim3(32, 8), 0, s>>>(st.b_best, st.w, st.h, down, d, pw, ph);
+    rgb.resize((size_t)pw * ph * 3);
+    CK(cudaMemcpyAsync(rgb.data(), d, rgb.size() * sizeof(float), cudaMemcpyDeviceToHost, s));
+    CK(cudaFreeAsync(d, s));
+    CK(cudaStreamSynchronize(s));
+}
+
 void image_preview(const float* d_rgb, int w, int h, int down, std::vector<float>& rgb, int& pw, int& ph, cudaStream_t s) {
     down = std::max(1, down);
     pw = std::max(1, w / down);
