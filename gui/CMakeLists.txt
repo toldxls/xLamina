@@ -3,6 +3,7 @@ qt_add_executable(xlamina WIN32
     main.cpp
     mainwindow.cpp mainwindow.h
     imageview.cpp imageview.h
+    compare.cpp compare.h
     worker.cpp worker.h
     prefs.cpp prefs.h
     benchmark.cpp benchmark.h

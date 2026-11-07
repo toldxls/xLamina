@@ -17,6 +17,8 @@ public:
     double zoom() const { return transform().m11(); }
     QImage image() const { return image_; }
     void setLabel(const QString& text);   // the image's name, drawn in the corner so the active output is never in doubt
+    void syncFrom(const ImageView* o);    // take o's transform and scroll position (the two-up viewer's shared view)
+    bool fitted() const { return fitted_; }
 
 signals:
     void zoomChanged(double z);

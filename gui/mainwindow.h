@@ -25,6 +25,7 @@
 #include <memory>
 
 #include "benchmark.h"
+#include "compare.h"
 #include "imageview.h"
 #include "prefs.h"
 #include "worker.h"
@@ -50,6 +51,8 @@ private slots:
     void cancel();
     void saveCurrent();
     void addComparison();
+    void twoUp();          // the two-up viewer with this render's outputs and the comparison images
+    void openSweep();      // a sweep folder into the two-up viewer
     void openOutputFolder();
     void benchmark();
     void about();
@@ -127,6 +130,7 @@ private:
     QTimer listTick_;
     QElapsedTimer lastView_;
     QPointer<BenchmarkDialog> bench_;
+    QPointer<CompareWindow> twoUp_;
     QList<GpuInfo> gpus_;
 
     ImageView* view_ = nullptr;

@@ -142,6 +142,12 @@ void MainWindow::buildMenus() {
     // the panels (filled in buildUi, after the docks exist)
     view->addSeparator()->setObjectName("panels");
 
+    QMenu* cmpMenu = menuBar()->addMenu("&Compare");
+    QAction* two = cmpMenu->addAction("&Two-up viewer…", QKeySequence("Ctrl+2"), this, &MainWindow::twoUp);
+    two->setStatusTip("Two images side by side with one pan and zoom: this render's outputs, comparison images, sweep variants. Space flips them.");
+    QAction* sweep = cmpMenu->addAction("Open &sweep folder…", QKeySequence("Ctrl+Shift+W"), this, &MainWindow::openSweep);
+    sweep->setStatusTip("A folder written by stackcli sweep: its B variants, with their options, into the two-up viewer.");
+
     QMenu* tools = menuBar()->addMenu("&Tools");
     QAction* bench = tools->addAction("&Benchmark…", QKeySequence("Ctrl+B"), this, &MainWindow::benchmark);
     bench->setStatusTip("Time the engine under different hardware settings and apply the fastest.");
@@ -847,6 +853,28 @@ void MainWindow::addComparison() {
     rebuildTabs();
     tabs_->setCurrentIndex(tabs_->count() - 1);
     showOutput(tabs_->currentIndex());
+}
+
+// the two-up viewer, fed with whatever this window holds: the last render's outputs and the comparison images
+void MainWindow::twoUp() {
+    if (!twoUp_) twoUp_ = new CompareWindow(this);
+    if (result_ && result_->rc == 0) {
+        for (const auto& n : result_->result.names) twoUp_->addImage(QString::fromStdString(n), outputImage(QString::fromStdString(n)), "this render");
+        twoUp_->addImage("depth", outputImage("depth"), "this render");
+    }
+    for (auto it = compare_.begin(); it != compare_.end(); ++it) twoUp_->addImage(it.key(), it.value(), "comparison image");
+    twoUp_->show();
+    twoUp_->raise();
+    twoUp_->activateWindow();
+    if (result_ && result_->rc == 0 && !current_.isEmpty() && current_ != "frame") twoUp_->select(0, current_);
+}
+
+void MainWindow::openSweep() {
+    QString start = result_ ? QFileInfo(result_->outDir).absolutePath() : folder_;
+    QString d = QFileDialog::getExistingDirectory(this, "Sweep folder (holds sweep.json)", start);
+    if (d.isEmpty()) return;
+    twoUp();
+    twoUp_->openSweep(d);
 }
 
 void MainWindow::onComparison(int index, QImage image) {

@@ -49,6 +49,14 @@ void ImageView::setImage(const QImage& img, bool keepView) {
     emit zoomChanged(z);
 }
 
+void ImageView::syncFrom(const ImageView* o) {
+    if (!o || o == this) return;
+    setTransform(o->transform());
+    horizontalScrollBar()->setValue(o->horizontalScrollBar()->value());
+    verticalScrollBar()->setValue(o->verticalScrollBar()->value());
+    fitted_ = o->fitted_;
+}
+
 void ImageView::setLabel(const QString& text) {
     if (label_ == text) return;
     label_ = text;
