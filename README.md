@@ -1,5 +1,7 @@
 # xLamina
 
+![xLamina](gui/icon/xlamina-128.png)
+
 Multi-GPU focus stacker for photomicroscopy. Windows, NVIDIA GPUs, 16-bit TIFF in and out.
 
 Open a folder of frames, choose the outputs, press Render, watch the stack build, save.
@@ -60,7 +62,7 @@ GUI Qt 6.8 for MSVC 2022 (`pip install aqtinstall` then
     core/     stackcore, the C++/CUDA engine and the pipeline
     gui/      xLamina, the Qt application
     cli/      stackcli
-    tools/    build and packaging scripts, the M0 hardware benchmark
+    tools/    build and packaging scripts, the icon generator, the M0 hardware benchmark
     docs/     DESIGN.md and FINDINGS.md (the evidence behind every decision)
 
 The engine was ported stage by stage from a Python reference implementation and checked

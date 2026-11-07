@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QDir>
+#include <QIcon>
 #include <QTimer>
 
 #include "mainwindow.h"
@@ -11,6 +12,9 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     app.setApplicationName("xLamina");
     app.setOrganizationName("xLamina");
+    QIcon icon;
+    for (int s : {16, 24, 32, 48, 64, 128, 256}) icon.addFile(QString(":/xlamina-%1.png").arg(s), QSize(s, s));
+    app.setWindowIcon(icon);
     MainWindow w;
     w.show();
     bool autoRender = false;
