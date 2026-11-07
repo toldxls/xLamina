@@ -516,11 +516,43 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
             float* d_T = nullptr;
             bool b_blur = po.b_radius_px > 0;
             if (b_blur) { gb.build(std::max(0.5, po.b_radius_px * po.depth_fraction)); CK(cudaMalloc(&d_T, nd * sizeof(float))); }
+            // flat regions (no texture in the guide within flat_reach_px): every slice box-blurred over flat_blur_px
+            // there, so defocused background gets one consistent focus curve instead of a noisy one per pixel
+            float *d_flat = nullptr, *d_Vb = nullptr, *d_T2 = nullptr;
+            int rbox = 0;
+            if (po.flat_blur_px > 0) {
+                CK(cudaMalloc(&d_flat, nd * sizeof(float)));
+                CK(cudaMalloc(&d_Vb, nd * sizeof(float)));
+                CK(cudaMalloc(&d_T2, nd * sizeof(float)));
+                // texture of the guide at the scale of the reach: the guide blurred first (so its noise does not
+                // count as texture), |Laplacian|, spread over the reach; ranked over the image, the flattest fifth
+                // is fully flat and anything above the midpoint to the 90th percentile is textured
+                DevGaussian gr;
+                gr.build(std::max(1.0, po.flat_reach_px * po.depth_fraction / 4));
+                gaussian_blur(d_g, d_flat, d_T2, vp.dw, vp.dh, gr, s);
+                gr.free();
+                laplacian3_abs(d_flat, d_Vb, vp.dw, vp.dh, s);
+                gr.build(std::max(1.0, po.flat_reach_px * po.depth_fraction));
+                gaussian_blur(d_Vb, d_flat, d_T2, vp.dw, vp.dh, gr, s);
+                gr.free();
+                float lo = percentile(d_flat, d_T2, nd, 20.0, s), hi = percentile(d_flat, d_T2, nd, 90.0, s);
+                flatness(d_flat, lo, std::max(0.5f * (hi - lo), 1e-6f), d_flat, nd, s);
+                rbox = std::max(1, (int)std::nearbyint(po.flat_blur_px * po.depth_fraction));
+                if (d == devs[0]) {   // for inspection: the fusion writes it as flat.f32 when it writes the depth
+                    P.flat.resize(nd);
+                    CK(cudaMemcpyAsync(P.flat.data(), d_flat, nd * sizeof(float), cudaMemcpyDeviceToHost, s));
+                    CK(cudaStreamSynchronize(s));
+                }
+            }
             for (int k = 0; k < K; ++k) {
                 if (!D.fm16[k]) continue;
                 if (vp.agg_r > 0) aggregate_slice(d_g, gs, D.fm16[k], d_V, vp.agg_eps, s);
                 else { f16_to_f32(D.fm16[k], d_V, nd, s); relu_sqrt(d_V, nd, s); }
                 if (b_blur) gaussian_blur(d_V, d_V, d_T, vp.dw, vp.dh, gb, s);
+                if (d_flat) {
+                    box_filter(d_V, d_Vb, d_T2, vp.dw, vp.dh, rbox, s);
+                    lerp_mask(d_V, d_Vb, d_flat, d_V, nd, s);
+                }
                 // stream order: the copies read d_V and the slices before the next slice's kernels and the frees
                 CK(cudaMemcpyAsync(V_all.data() + nd * k, d_V, nd * sizeof(float), cudaMemcpyDeviceToHost, s));
                 if (keep_fm) CK(cudaMemcpyAsync(fm_all.data() + nd * k, D.fm16[k], nd * 2, cudaMemcpyDeviceToHost, s));
@@ -534,6 +566,7 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
             CK(cudaStreamSynchronize(s));
             if (vp.agg_r > 0) gs.free();
             if (b_blur) { gb.free(); cudaFree(d_T); }
+            if (d_flat) { cudaFree(d_flat); cudaFree(d_Vb); cudaFree(d_T2); }
             cudaFree(d_g);
             cudaFree(d_V);
         }
@@ -679,6 +712,13 @@ bool parse_stack_option(const std::string& a, const std::string& v, StackOptions
     else if (a == "--b-radius") so.po.b_radius_px = atof(v.c_str());
     else if (a == "--halo-prior") so.halo_prior = atof(v.c_str());
     else if (a == "--dark-prior") so.dark_prior = atof(v.c_str());
+    else if (a == "--dark-reach") so.dark_reach_px = atof(v.c_str());
+    else if (a == "--end-vote") so.end_vote_px = atof(v.c_str());
+    else if (a == "--flat-blur") so.po.flat_blur_px = atof(v.c_str());
+    else if (a == "--flat-reach") so.po.flat_reach_px = atof(v.c_str());
+    else if (a == "--b-reference") {   // the 0.5.x B, bit-identical: the 1/4 volume with the priors and no 0.6.x additions
+        so.po.depth_fraction = 0.25; so.dark_prior = 1.0; so.dark_reach_px = 0; so.end_vote_px = 0; so.po.flat_blur_px = 0; so.sgm_scale = false;
+    }
     else if (a == "--sgm-p1") so.sgm_p1 = atof(v.c_str());
     else if (a == "--sgm-p2") so.sgm_p2 = atof(v.c_str());
     else if (a == "--sgm-scale") so.sgm_scale = atoi(v.c_str()) != 0;
@@ -843,6 +883,8 @@ static int run_stack_once(StackOptions& so) {
         DepthParams dp;
         dp.halo_prior = (float)so.halo_prior;
         dp.dark_prior = (float)so.dark_prior;
+        dp.dark_reach_px = (float)so.dark_reach_px;
+        dp.end_vote_px = (float)so.end_vote_px;
         dp.depth_full_fraction = (float)po.depth_fraction;   // the spill-zone radii are in sensor px
         if (so.sgm_p1 > 0) dp.p1 = (float)so.sgm_p1;
         if (so.sgm_p2 > 0) dp.p2 = (float)so.sgm_p2;
@@ -853,8 +895,16 @@ static int run_stack_once(StackOptions& so) {
             dp.p1 *= k;
             dp.p2 *= k;
         }
-        logf("depth: SGM P1 %.3f P2 %.3f, confidence ramp %.2f..%.2f, dark prior %.2f, halo prior %.2f, volume %dx%d\n", dp.p1, dp.p2, dp.c_lo, dp.c_hi,
-             dp.dark_prior, dp.halo_prior, P.vp.dw, P.vp.dh);
+        logf("depth: SGM P1 %.3f P2 %.3f, confidence ramp %.2f..%.2f, dark prior %.2f (reach %.0f px), halo prior %.2f, volume %dx%d\n", dp.p1, dp.p2,
+             dp.c_lo, dp.c_hi, dp.dark_prior, dp.dark_reach_px, dp.halo_prior, P.vp.dw, P.vp.dh);
+        float* d_flat = nullptr;
+        if (!P.flat.empty() && po.flat_blur_px > 0) {   // the flat-region mask from the volume stage
+            CK(cudaMalloc(&d_flat, P.flat.size() * sizeof(float)));
+            dfree.p.push_back(d_flat);
+            CK(cudaMemcpyAsync(d_flat, P.flat.data(), P.flat.size() * sizeof(float), cudaMemcpyHostToDevice, s));
+            dp.flat = d_flat;
+            dp.flat_blur_px = (float)po.flat_blur_px;
+        }
         dfree.p.erase(std::find(dfree.p.begin(), dfree.p.end(), (void*)d_L16));   // consumed inside depth_from_volume
         R = depth_from_volume(d_V, d_L16, d_guide, d_ga, P.vp.dw, P.vp.dh, K, ow, oh, dp, s);
         // d_V and d_ga are freed here by dfree going out of scope
@@ -1049,6 +1099,7 @@ static int run_stack_once(StackOptions& so) {
     }
     struct Join { std::vector<std::thread>& t; ~Join() { for (auto& x : t) if (x.joinable()) x.join(); } } join{writers};
     write_raw(od / "depth.f32", R.depth_s.data(), R.depth_s.size());
+    if (!P.flat.empty()) write_raw(od / "flat.f32", P.flat.data(), P.flat.size());   // depth-resolution grid (stack.txt: w, h x depth fraction)
     write_raw(od / "depth_smooth.f32", Ds.data(), Ds.size());
     write_raw(od / "conf.f32", R.conf.data(), R.conf.size());
     FILE* mf = fopen((od / "stack.txt").string().c_str(), "w");

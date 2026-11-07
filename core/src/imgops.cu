@@ -301,6 +301,14 @@ __global__ void k_clip01(float* a, size_t n) {
     size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) a[i] = fminf(fmaxf(a[i], 0.f), 1.f);
 }
+__global__ void k_lerp_mask(const float* a, const float* b, const float* m, float* out, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = a[i] + m[i] * (b[i] - a[i]);
+}
+__global__ void k_flatness(const float* t, float lo, float inv_tau, float* out, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = fminf(fmaxf(1.f - (t[i] - lo) * inv_tau, 0.f), 1.f);
+}
 
 // INTER_AREA fast path (integer factors): cells summed rows outer, columns inner, then * 1/(fx fy)
 template <int CH>
@@ -471,6 +479,12 @@ void f16_to_f32(const void* a, float* out, size_t n, cudaStream_t s) { k_h2f<<<b
 void f32_to_f16(const float* a, void* out, size_t n, cudaStream_t s) { k_f2h<<<blocks1(n), 256, 0, s>>>(a, (__half*)out, n); }
 void relu_sqrt(float* a, size_t n, cudaStream_t s) { k_relu_sqrt<<<blocks1(n), 256, 0, s>>>(a, n); }
 void clip01(float* a, size_t n, cudaStream_t s) { k_clip01<<<blocks1(n), 256, 0, s>>>(a, n); }
+void lerp_mask(const float* a, const float* b, const float* m, float* out, size_t n, cudaStream_t s) {
+    k_lerp_mask<<<blocks1(n), 256, 0, s>>>(a, b, m, out, n);
+}
+void flatness(const float* t, float lo, float tau, float* out, size_t n, cudaStream_t s) {
+    k_flatness<<<blocks1(n), 256, 0, s>>>(t, lo, 1.f / tau, out, n);
+}
 
 void AreaResizer::build(int sw_, int sh_, int dw_, int dh_) {
     sw = sw_; sh = sh_; dw = dw_; dh = dh_;

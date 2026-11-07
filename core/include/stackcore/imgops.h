@@ -49,6 +49,8 @@ void add(const float* a, const float* b, float* out, size_t n, cudaStream_t s);
 void f16_to_f32(const void* a, float* out, size_t n, cudaStream_t s);
 void f32_to_f16(const float* a, void* out, size_t n, cudaStream_t s);   // round to nearest even, like numpy
 void relu_sqrt(float* a, size_t n, cudaStream_t s);
+void lerp_mask(const float* a, const float* b, const float* m, float* out, size_t n, cudaStream_t s);   // out = a + m (b - a)
+void flatness(const float* texture, float lo, float tau, float* out, size_t n, cudaStream_t s);         // out = clamp(1 - (t - lo) / tau, 0, 1)
 void clip01(float* a, size_t n, cudaStream_t s);
 
 // cv::resize INTER_AREA from (sw, sh) to (dw, dh), `ch` interleaved channels.

@@ -1249,6 +1249,85 @@ soon as the cost is built. Two consecutive default runs are byte-identical;
 a card too short even for 1.5 GB falls back to more bands and says so in
 the log.
 
+## 34. The dark prior's reach, and defocused background on the 1/2 grid (2026-11-07, night)
+
+Turning the dark prior off (sec. 33) traded the fan blotch for a worse
+defocused background: Travis found 0.6.2's B "does poorly" there compared
+with the 1/4-resolution B. Two problems, two changes, both in 0.6.3.
+
+**The dark prior is back, with a reach.** It is what keeps featureless
+background on consistent dark frames, and what it got wrong at 1/2 was not
+the background but the gaps *between* needles and *inside* rims, which the
+finer grid resolves as featureless pixels. So the prior now applies only to
+featureless pixels with no confident (sharp) pixel within `dark_reach_px`
+(24 sensor px; the confidence map dilated by that radius gates the prior
+off). On the fan region the blotch is gone with the prior on; the plate
+ghost stays gone; the other regions are unchanged
+(`report_real/h3_*.png`). Alongside it, an out-of-range pixel (focus curve
+peaking at an end frame) takes the end its neighbourhood votes for, the
+vote smoothed over `end_vote_px` (48 sensor px), instead of its own noisy
+peak's side. Two alternatives for the end decision were tried and dropped:
+the luma trend of the curve (first third against last third) and the
+darker end; both chose worse than the peak's side on the crystal edge.
+
+**Defocused background broke into patches.** With the volume at 1/2, two
+background regions (output grid x 5400-6300 y 1300-1900 and x 5600-6500
+y 2700-3300) showed wispy contour lines that the 1/4 B did not have. Their
+depth maps explain it: at 1/4 the whole area sits on frame ~2; at 1/2 it
+splits into patches of frame 0 and frame 161 with hard borders, and the two
+ends render the defocused foreground differently, so every border is a
+seam. The reference B's map in the same area is a smooth gradient between
+the two ends (median frame 11). None of the usual knobs fixed it: SGM P1/P2
+x2 and x4, the confidence ramp (smears the plates), soft labels 6, the depth
+window 9, the end vote at 96 and 200 px (slight help), focus trend. A
+global isotropic blur of the focus slices (`--b-radius 128`) did cure it
+(the area's depth median went to 2, like 1/4) but smeared the plates' detail
+and altered the fan, so the smoothing has to apply only where the image is
+flat.
+
+The flat-region smoothing (`flat_blur_px` 128, `flat_reach_px` 24; GUI
+"Flat smoothing"): a texture map of the guide at depth resolution (the
+guide blurred by reach / 4 so its noise does not count, |Laplacian|, blurred
+by the reach), ranked over the image: the flattest fifth is fully flat, the
+midpoint to the 90th percentile and above is textured, in between a ramp.
+A first version used the raw Laplacian with a fixed fraction of the 90th
+percentile; the background noise alone exceeded it and the mask was empty
+(mean 0.009 in the background), hence the pre-blur and the ranking. Where
+the mask is set, (a) every aggregated focus slice is box-blurred over the
+blur width (so the defocused background shares one curve over a wide area)
+and (b) the SGM depth is Gaussian-blurred over half the width before the
+guided upsampling, so the depth there changes gradually, as a blend of
+frames, instead of at a hard border. On this stack the mask covers 64 % of
+the first background region, 92 % of the second, 9 % of the fan and 26 %
+of the ghost region (`flat.f32` is written beside `depth.f32`).
+
+| region (1/2 grid, 0.6.3 defaults) | 0.6.2 + reach (a) | + slice blur | + depth blur (shipped) |
+|---|---|---|---|
+| background 1 | patches, seams | fewer seams, patches | smooth gradient, no seams |
+| background 2 | patches, seams | one seam | smooth, like the reference |
+| fan | clean | clean | clean |
+| ghost (crystal) | gone | gone | gone |
+| plates, crystal edge | unchanged | unchanged | unchanged |
+
+Per-region scores (luma RMSE against the reference, tone-matched / edges;
+depth RMSE in frames):
+
+| run | plates | fan | crystal edge | bg edge | matrix flat |
+|---|---|---|---|---|---|
+| 1/4 reference (`--b-reference 1`) | .0412 / .0766, 8.1 | .0299 / .0648, 12.2 | .0398 / .0879, 19.2 | .0657 / .1213, 3.4 | .0459 / .0804, 5.0 |
+| 1/2 + reach + vote | .0412 / .0762, 20.5 | .0299 / .0648, 13.5 | .0394 / .0872, 19.8 | .0661 / .1213, 7.6 | .0458 / .0803, 7.1 |
+| + slice blur | .0414 / .0760, 16.8 | .0299 / .0648, 13.6 | .0398 / .0875, 27.5 | .0657 / .1218, 11.4 | .0458 / .0803, 6.7 |
+| **0.6.3 (+ depth blur)** | .0412 / .0759, 13.7 | .0297 / .0649, 12.6 | .0397 / .0875, 24.1 | .0657 / .1217, 8.2 | .0458 / .0803, 6.4 |
+
+Luma is within noise everywhere (the metric cannot see the seams; the
+sheets `report_real/h9_*.png` can). Cost: the volume stage 2.0 -> 2.7 s on
+this stack (fusion 11.9 -> 12.5 s).
+
+0.6.3's B defaults: volume at 1/2, dark prior 1 with reach 24, end vote 48,
+flat smoothing 128 / reach 24, P1 0.06 / P2 0.8 in effect, guided radius 8.
+`--b-reference 1` (1/4 volume, dark prior 1, no reach, no vote, no flat
+smoothing, unscaled P1/P2) is the 0.5.x B, still byte-identical to 0.5.5.
+
 ## Open items
 
 - **B: doubled plate edge / glow** (§25a): the C-style aggregation does not

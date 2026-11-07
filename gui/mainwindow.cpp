@@ -366,16 +366,24 @@ void MainWindow::buildUi() {
     haloPrior_ = dspin(0, 10, 0.5, 2, 1, "", "B's preference for darker frames beside bright objects (the spill zone). Default 2; raise it to push the band\n"
                                               "beside a bright plate to its own frame.");
     al->addRow("Halo prior", haloPrior_);
-    darkPrior_ = dspin(0, 10, 0.5, 0, 1, "", "B's preference for darker frames in featureless pixels. Default 0 since 0.6.2: on the 1/2-resolution\n"
-                                              "depth grid it put dark far frames into the gaps of needle fans and inside bright rims (FINDINGS 33); 1 was the\n"
-                                              "1/4-resolution value.");
+    darkPrior_ = dspin(0, 10, 0.5, 1, 1, "", "B's preference for darker frames in featureless pixels (defocused background). Default 1. It is switched\n"
+                                              "off within the dark reach of sharp content, where a featureless pixel is a gap between needles or the inside\n"
+                                              "of a rim and must follow its neighbours instead (FINDINGS 34).");
     al->addRow("Dark prior", darkPrior_);
+    darkReach_ = dspin(0, 200, 4, 24, 0, " px", "How far from sharp content the dark prior stays off, in sensor pixels. Default 24; 0 applies the prior to\n"
+                                                 "every featureless pixel (the 0.5.x behaviour, which put far frames into the gaps of needle fans at 1/2 resolution).");
+    al->addRow("Dark reach", darkReach_);
+    flatBlur_ = dspin(0, 512, 16, 128, 0, " px", "In regions without texture (defocused background) the focus curves and the depth are smoothed over this\n"
+                                                  "many sensor pixels, so the background changes frame gradually instead of breaking into patches with visible\n"
+                                                  "seams (FINDINGS 34). Default 128; 0 = off.");
+    al->addRow("Flat smoothing", flatBlur_);
     QPushButton* resetAdv = new QPushButton("Defaults");
     resetAdv->setToolTip("Put every advanced parameter back to its validated default.");
     connect(resetAdv, &QPushButton::clicked, this, [this] {
         depthRes_->setCurrentIndex(1);
         focusRadius_->setValue(6); focusPower_->setValue(4); depthFmPx_->setValue(6); volAggPx_->setValue(32);
-        refineR_->setValue(12); refineFmPx_->setValue(9); softPx_->setValue(3); haloPrior_->setValue(2); darkPrior_->setValue(0);
+        refineR_->setValue(12); refineFmPx_->setValue(9); softPx_->setValue(3); haloPrior_->setValue(2); darkPrior_->setValue(1);
+        darkReach_->setValue(24); flatBlur_->setValue(128);
     });
     al->addRow("", resetAdv);
     pl->addWidget(advanced_);
@@ -504,7 +512,11 @@ void MainWindow::loadSettings() {
     refineFmPx_->setValue(s.value("refineFmPx", 9.0).toDouble());
     softPx_->setValue(s.value("softPx", 3.0).toDouble());
     haloPrior_->setValue(s.value("haloPrior", 2.0).toDouble());
-    darkPrior_->setValue(s.value("darkPrior", 0.0).toDouble());
+    // 0.6.2 saved dark prior 0 (its default then); from 0.6.3 the prior is back on with a reach, so a file from
+    // before the reach existed takes the new default rather than the old one
+    darkPrior_->setValue(s.contains("darkReach") ? s.value("darkPrior", 1.0).toDouble() : 1.0);
+    darkReach_->setValue(s.value("darkReach", 24.0).toDouble());
+    flatBlur_->setValue(s.value("flatBlur", 128.0).toDouble());
     s.endGroup();
     perfToUi(PerfSettings::load(s));
 }
@@ -538,6 +550,8 @@ void MainWindow::saveSettings() {
     s.setValue("softPx", softPx_->value());
     s.setValue("haloPrior", haloPrior_->value());
     s.setValue("darkPrior", darkPrior_->value());
+    s.setValue("darkReach", darkReach_->value());
+    s.setValue("flatBlur", flatBlur_->value());
     s.endGroup();
     perfFromUi().save(s);
 }
@@ -555,7 +569,8 @@ void MainWindow::resetSettings() {
     advanced_->setChecked(false);
     depthRes_->setCurrentIndex(1);
     focusRadius_->setValue(6); focusPower_->setValue(4); depthFmPx_->setValue(6); volAggPx_->setValue(32);
-    refineR_->setValue(12); refineFmPx_->setValue(9); softPx_->setValue(3); haloPrior_->setValue(2); darkPrior_->setValue(0);
+    refineR_->setValue(12); refineFmPx_->setValue(9); softPx_->setValue(3); haloPrior_->setValue(2); darkPrior_->setValue(1);
+    darkReach_->setValue(24); flatBlur_->setValue(128);
     perfToUi(PerfSettings());
     statusBar()->showMessage("Settings reset to the defaults.", 4000);
 }
@@ -892,6 +907,8 @@ bool MainWindow::buildJob(JobOptions& jo, bool interactive) {
         jo.stack.soft_px = softPx_->value();
         jo.stack.halo_prior = haloPrior_->value();
         jo.stack.dark_prior = darkPrior_->value();
+        jo.stack.dark_reach_px = darkReach_->value();
+        jo.stack.po.flat_blur_px = flatBlur_->value();
     }
     jo.stack.outputs.clear();
     for (const char* n : kOutputs) if (outputs_[n]->isChecked()) jo.stack.outputs.push_back(n);

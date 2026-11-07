@@ -2,9 +2,9 @@
 
 ![xLamina](gui/icon/xlamina-128.png)
 
-A photo stacker that can utilize multiple GPUs for rapidly stacking uncompresssed 16-bit TIFF/raw photos. It is a Windows VB program built on CUDA for NVIDIA GPUs. 
+A photo stacker that can utilize multiple GPUs for rapidly stacking uncompressed 16-bit TIFF photos. It is a Windows program (C++ and Qt) built on CUDA for NVIDIA GPUs.
 
-Open a folder of TIFF frames, choose the output algorithms, press Render, watch the stacks build in parallel for each method, and save. The program performs best when paired with RAM File System with 36+ GB of RAM available for the fastest possible reading and processing. 
+Open a folder of TIFF frames, choose the output algorithms, press Render, watch the stacks build in parallel for each method, and save. The program performs best when the frames sit on a RAM disk and the machine has enough RAM to also hold them resident (the frames are read once and kept pinned in memory): about twice the stack's size, 60 GB for 163 full-frame files of 180 MB. 
 
 Methods: B (a regularised depth map: focus volume, semi-global matching, fine refinement,
 soft-label composition), C (Laplacian pyramid), Cn (noise-aware pyramid), A (weighted
@@ -49,12 +49,15 @@ PgUp / PgDown step through the tabs.
 
 Advanced (depth and composition), unticked by default, exposes the parameters of B's depth
 pipeline and of the composition (depth resolution, focus window and power, depth window,
-volume aggregation, refinement range and window, label softness, halo and dark priors) at
-their defaults, for one-at-a-time experiments against a 1:1 comparison. The depth volume is
-estimated at 1/2 of the sensor resolution since 0.6.1 (1/4 left doubled outlines on bright
-plates), with the dark prior off since 0.6.2 (on the finer grid it filled the gaps of needle
-fans with far frames); it needs about 5 GB of GPU memory for 163 full-size frames. The
-0.5.x B is depth resolution 1/4 with dark prior 1.
+volume aggregation, refinement range and window, label softness, halo and dark priors, the
+dark prior's reach, flat smoothing) at their defaults, for one-at-a-time experiments against
+a 1:1 comparison. The depth volume is estimated at 1/2 of the sensor resolution since 0.6.1
+(1/4 left doubled outlines on bright plates); it needs about 5 GB of GPU memory for 163
+full-size frames. Since 0.6.3 the dark prior stays off within 24 px of sharp content (on the
+finer grid it had filled the gaps of needle fans with far frames) and regions without texture
+get their focus curves and depth smoothed over 128 px, so defocused background changes frame
+gradually instead of in patches with visible seams. The 0.5.x B is `--b-reference 1` on the
+command line (depth resolution 1/4, dark prior everywhere, none of the 0.6.x additions).
 
 Cn is C at smoothing 3; with the panel's C smoothing at 2 the two differ on about 3 % of
 pixels, so tick Cn only when C's smoothing is lower.

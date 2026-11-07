@@ -68,6 +68,10 @@ struct Pass1Options {
     // the depth volume's resolution as a fraction of the sensor: 1/2 since 0.6.1 (FINDINGS 32: the doubled plate
     // edges of 1/4 are gone at 1:1); --depth-fraction 0.25 gives the 0.5.x reference B
     double depth_fraction = 0.5, depth_fm_px = 6.0, vol_agg_px = 32.0;
+    // in flat regions of the guide (no texture within flat_reach_px) every focus slice is box-blurred over
+    // flat_blur_px, so the curves of defocused background agree over a wide area and the depth there does not
+    // break into patches (FINDINGS 34); near detail the slices keep the grid's resolution. 0 = off (0.5.x)
+    double flat_blur_px = 128.0, flat_reach_px = 24.0;
     Hooks hooks;
 };
 
@@ -121,6 +125,7 @@ struct Pass1 {
     HostFoldState merged;          // only when host_state
     double merge_seconds = 0, setup_seconds = 0;
     std::vector<float> guide, ga;
+    std::vector<float> flat;               // the flat-region mask at depth resolution (when flat_blur_px > 0)
     PinnedVec<uint16_t> fm_all, lum_all;   // fm_all only when host_state (the fold command writes it; the fusion never reads it)
     PinnedVec<float> V_all;
     int slices = 0;
@@ -139,10 +144,12 @@ struct StackOptions {
     int streams = 2, refine_r = 12;
     double refine_fm_px = 9.0, soft_px = 3.0;
     double c_smoothing = 0.0;          // C's smoothing (FinalParams::c_smoothing); 0 = the raw selection
-    // B's depth priors (DepthParams). The dark prior was 1 with the 1/4-resolution volume; on the 1/2 grid it
-    // puts dark far frames into the gaps of needle fans and inside bright rims, so it is off (FINDINGS 33).
-    // The 0.5.x reference B is --depth-fraction 0.25 --dark-prior 1.
-    double halo_prior = 2.0, dark_prior = 0.0;
+    // B's depth priors (DepthParams). On the 1/2 grid the dark prior put dark far frames into the gaps of needle
+    // fans and inside bright rims (FINDINGS 33), so since 0.6.3 it is gated off within dark_reach_px of sharp
+    // content and kept for defocused background (FINDINGS 34). The 0.5.x reference B is --b-reference 1.
+    double halo_prior = 2.0, dark_prior = 1.0;
+    double dark_reach_px = 24.0;   // DepthParams::dark_reach_px; 0 = the 0.5.x behaviour
+    double end_vote_px = 48.0;     // DepthParams::end_vote_px; 0 = the 0.5.x behaviour
     // SGM's smoothness penalties and the focus-curve confidence ramp (DepthParams); 0 = the DepthParams default.
     // sgm_scale: multiply P1 and P2 by (depth_fraction / 0.25), so the regularisation per micron does not halve
     // when the volume's grid is twice as fine (FINDINGS 33)

@@ -167,5 +167,7 @@ private:
     QDoubleSpinBox* softPx_ = nullptr;
     QDoubleSpinBox* haloPrior_ = nullptr;
     QDoubleSpinBox* darkPrior_ = nullptr;
+    QDoubleSpinBox* darkReach_ = nullptr;
+    QDoubleSpinBox* flatBlur_ = nullptr;
     Worker worker_;
 };

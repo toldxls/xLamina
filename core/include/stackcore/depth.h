@@ -25,10 +25,23 @@ struct DepthParams {
     int end_guard = 3;
     float end_prior = 1.0f;
     float dark_prior = 1.0f;
+    // the dark prior is switched off within this many sensor px of a confident (sharp) pixel: a featureless pixel
+    // there is a gap between needles or the inside of a rim, not background, and must follow its neighbours
+    // (FINDINGS 34). 0 = the prior everywhere the pixel itself is featureless (the 0.5.x behaviour).
+    float dark_reach_px = 24.f;
+    // out-of-range pixels (focus curve peaking at an end) take the end their neighbourhood votes for, the vote
+    // smoothed over this many sensor px: on a fine grid the per-pixel choice flips from patch to patch and the
+    // patch borders show as wisps in defocused background (FINDINGS 34). 0 = each pixel its own end (0.5.x).
+    float end_vote_px = 48.f;
     float halo_prior = 2.0f;
     float halo_radius_px = 80.f;
     float depth_full_fraction = 0.25f;
     float gf_eps = 1e-4f;
+    // the flat-region mask (dh*dw on the device, 1 = no texture within reach; Pass1Options::flat_blur_px): where it
+    // is set, the SGM depth is blurred over half flat_blur_px before upsampling, so defocused background changes
+    // frame gradually (as a blend of frames) instead of at a hard border between two patches (FINDINGS 34)
+    const float* flat = nullptr;
+    float flat_blur_px = 0.f;
 };
 
 struct DepthResult {
