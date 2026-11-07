@@ -186,6 +186,7 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
     fp.radius = (float)std::max(0.8, po.radius_px * g.scale);
     fp.power = (float)po.power;
     fp.c_radius = po.c_radius_px > 0 ? (float)(po.c_radius_px * g.scale) : 0.f;
+    fp.with_a = po.with_a;
     VolumeParams vp;
     {
         double ds = po.depth_fraction / g.scale;   // depth res = fixed fraction of the sensor
@@ -206,12 +207,13 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
     std::vector<FoldDev> ctx(ndev);
     size_t npx_full = (size_t)g.W * g.H, npx_out = (size_t)ow * oh;
     opt.streams_by_device.clear();
+    auto t_setup = std::chrono::steady_clock::now();
     for (int d : devs) {
         auto& D = ctx[d];
         D.dev = d;
         CK(cudaSetDevice(d));
         CK(cudaStreamCreateWithFlags(&D.fold_s, cudaStreamNonBlocking));
-        D.st.alloc(d, ow, oh, fp.levels);
+        D.st.alloc(d, ow, oh, fp.levels, fp.with_a);
         D.fm16.assign(K, nullptr);
         D.lum16.assign(K, nullptr);
         // slots per GPU from the memory left after the state: each needs the frame buffers,
@@ -222,7 +224,8 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         size_t per_slot = slot_bytes + t0.pixel_bytes() + 2 * kReadAlign;
         size_t fr, tot;
         CK(cudaMemGetInfo(&fr, &tot));
-        size_t margin = 512u << 20;
+        // the depth-volume slices stay on the GPU until the aggregation: budget for every frame landing here
+        size_t margin = (512u << 20) + (volume ? (size_t)K * vp.dw * vp.dh * 4 : 0);
         int fit = fr > margin ? (int)((fr - margin) / per_slot) : 0;
         int S = std::max(1, std::min(opt.streams_per_gpu, fit));
         if (fit < 1) logf("GPU %d: not enough memory for the state plus one slot (%.2f GB free)\n", d, fr / 1e9);
@@ -252,8 +255,8 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         fold_measure(S.d_warp, fp, S.sc, f.stream);
         if (volume) {   // this frame's depth-resolution slices stay on this GPU until the aggregation
             size_t nb = (size_t)vp.dw * vp.dh * 2;
-            cudaMallocAsync(&D.fm16[k], nb, f.stream);
-            cudaMallocAsync(&D.lum16[k], nb, f.stream);
+            CK_THROW(cudaMallocAsync(&D.fm16[k], nb, f.stream));   // a failure here must stop the pass, not fault a kernel
+            CK_THROW(cudaMallocAsync(&D.lum16[k], nb, f.stream));
             volume_slice(S.d_warp, vp, S.vsc, D.fm16[k], D.lum16[k], f.stream);
         }
         cudaEventRecord(S.ready, f.stream);
@@ -280,6 +283,7 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
 
     logf("fold: %zu frames, grid %dx%d -> %dx%d at scale %g, %d levels, blur sigma %.2f px, %zu GPU(s)\n",
            run_paths.size(), g.W, g.H, ow, oh, g.scale, fp.levels, fp.radius, devs.size());
+    P.setup_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_setup).count();
     opt.cancel = hooks.cancel;
     StreamerStats st = stream_frames(run_paths, opt, on_frame);
     for (auto& e : st.errors) logf("  error: %s\n", e.c_str());
@@ -292,13 +296,17 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
            st.bytes / st.seconds / 1e9, source_note(st).c_str());
     for (size_t i = 0; i < devs.size(); ++i) printf("  GPU %d: %d frames\n", devs[i], st.frames_per_device[i]);
 
-    // host merge in device order (any order gives the same B / C; A to double rounding)
-    HostFoldState& merged = P.merged;
-    bool first = true;
-    for (int d : devs) {
-        HostFoldState h = download(ctx[d].st);
-        if (first) { merged = std::move(h); first = false; }
-        else merge_into(merged, h);
+    // merge on the first device, in device order (any order gives the same B / C; A to double rounding):
+    // the other cards' states cross through pinned memory, and the merged state stays on the GPU for
+    // the guide and the finalize (FINDINGS 29); the host copy is only made for the fold command
+    {
+        auto t_m = std::chrono::steady_clock::now();
+        int prim = devs[0];
+        for (size_t i = 1; i < devs.size(); ++i) merge_device(ctx[prim].st, ctx[devs[i]].st);
+        P.dst = ctx[prim].st;
+        ctx[prim].st = FoldState{};   // moved out: P.dst outlives this pass
+        if (po.host_state) P.merged = download(P.dst);
+        P.merge_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_m).count();
     }
     P.st = st;
 
@@ -308,27 +316,17 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         int d0 = devs[0];
         CK(cudaSetDevice(d0));
         cudaStream_t s0 = ctx[d0].fold_s;
-        std::vector<const float*> d_coef;
-        std::vector<float*> owned;
-        for (int l = 0; l < fp.levels - 1; ++l) {
-            float* p;
-            CK(cudaMalloc(&p, merged.c_coef[l].size() * sizeof(float)));
-            CK(cudaMemcpy(p, merged.c_coef[l].data(), merged.c_coef[l].size() * sizeof(float), cudaMemcpyHostToDevice));
-            d_coef.push_back(p);
-            owned.push_back(p);
-        }
-        std::vector<float> base_f(merged.c_base.size());
-        for (size_t i = 0; i < base_f.size(); ++i) base_f[i] = (float)(merged.c_base[i] / std::max(merged.count, 1));
+        std::vector<const float*> d_coef(P.dst.c_coef.begin(), P.dst.c_coef.end());   // the merged state's levels, in place
         float *d_base, *d_coll, *d_t1, *d_t2, *d_guide, *d_ga;
-        CK(cudaMalloc(&d_base, base_f.size() * sizeof(float)));
-        CK(cudaMemcpy(d_base, base_f.data(), base_f.size() * sizeof(float), cudaMemcpyHostToDevice));
+        CK(cudaMalloc(&d_base, (size_t)P.dst.shapes.back().w * P.dst.shapes.back().h * 3 * sizeof(float)));
+        fold_base_f32(P.dst, d_base, s0);
         CK(cudaMalloc(&d_coll, npx_out * 3 * sizeof(float)));
         CK(cudaMalloc(&d_t1, npx_out * 3 * sizeof(float)));
         CK(cudaMalloc(&d_t2, npx_out * 3 * sizeof(float)));
         CK(cudaMalloc(&d_guide, npx_out * sizeof(float)));
         size_t nd = (size_t)vp.dw * vp.dh;
         CK(cudaMalloc(&d_ga, nd * sizeof(float)));
-        collapse_pyramid(d_coef, d_base, merged.shapes, d_coll, d_t1, d_t2, s0);
+        collapse_pyramid(d_coef, d_base, P.dst.shapes, d_coll, d_t1, d_t2, s0);
         luma(d_coll, d_guide, npx_out, s0);
         clip01(d_guide, npx_out, s0);
         AreaResizer rz;
@@ -339,7 +337,6 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         CK(cudaMemcpyAsync(ga_h.data(), d_ga, nd * sizeof(float), cudaMemcpyDeviceToHost, s0));
         CK(cudaStreamSynchronize(s0));
         rz.free();
-        for (auto p : owned) cudaFree(p);
         cudaFree(d_base); cudaFree(d_coll); cudaFree(d_t1); cudaFree(d_t2); cudaFree(d_guide); cudaFree(d_ga);
 
         // every GPU aggregates its own slices against the shared guide; the host collects plane-major volumes
@@ -563,14 +560,17 @@ int run_stack(StackOptions& so) {
     }
 
     // ---- pass 1 + volume
+    auto wants = [&](const char* name) { return so.outputs.empty() || std::find(so.outputs.begin(), so.outputs.end(), name) != so.outputs.end(); };
+    po.with_a = wants("A");
     Pass1 P;
+    struct FreeState { FoldState& s; ~FreeState() { s.free(); } } free_state{P.dst};   // the merged state lives on devs[0] until the end
     if (int r = run_pass1(po, P)) return r;
     if (hooks.cancelled()) return 3;
     const int K = (int)P.paths.size();
     const int ow = P.g.out_w(), oh = P.g.out_h();
     const size_t no = (size_t)ow * oh, nd = (size_t)P.vp.dw * P.vp.dh;
     const int prim = P.devs[0];
-    logf("pass 1: %.2f s stream + %.2f s volume\n", P.st.seconds, P.vol_seconds);
+    logf("pass 1: %.2f s setup, %.2f s stream + %.2f s merge + %.2f s volume\n", P.setup_seconds, P.st.seconds, P.merge_seconds, P.vol_seconds);
 
     // ---- depth (SGM) on the primary GPU
     stage("depth map", 0.0);
@@ -655,18 +655,16 @@ int run_stack(StackOptions& so) {
                      }
                  },
                  "pass 2: fine focus", hooks);
-        HostRefine hr;
-        bool first = true;
+        for (size_t i = 1; i < P.devs.size(); ++i) merge_device(rst[prim], rst[P.devs[i]]);
         for (int d : P.devs) {
-            HostRefine h = download(rst[d]);
-            if (first) { hr = std::move(h); first = false; } else merge_into(hr, h);
-            rst[d].free();
             CK(cudaSetDevice(d));
             for (auto& sc : rsc[d]) sc.free();
             cudaFree(d_depth[d]);
         }
         CK(cudaSetDevice(prim));
-        refine_depth(R.depth_s, R.conf, R.spill, P.vp.dw, P.vp.dh, hr, ow, oh, P.g.scale, s);
+        refine_depth(R.depth_s, R.conf, R.spill, P.vp.dw, P.vp.dh, rst[prim], ow, oh, P.g.scale, s);
+        for (int d : P.devs) rst[d].free();   // leaves the last device selected
+        CK(cudaSetDevice(prim));
     }
     std::vector<float> Ds = smooth_depth(R.depth_s, d_guide, ow, oh, P.g.scale, K, s);
     logf("refine: %.2f s\n", since(t2));
@@ -711,18 +709,16 @@ int run_stack(StackOptions& so) {
                      }
                  },
                  "pass 3: composition", hooks);
-        HostCompose hc;
-        bool first = true;
+        for (size_t i = 1; i < P.devs.size(); ++i) merge_device(cst[prim], cst[P.devs[i]]);
         for (int d : P.devs) {
-            HostCompose h = download(cst[d]);
-            if (first) { hc = std::move(h); first = false; } else merge_into(hc, h);
-            cst[d].free();
             CK(cudaSetDevice(d));
             for (auto& sc : csc[d]) sc.free();
             cudaFree(d_D[d]); cudaFree(d_Ds[d]);
         }
         CK(cudaSetDevice(prim));
-        b_img = compose_mix(hc, R.conf, ow, oh, P.g.scale, s);
+        b_img = compose_mix(cst[prim], R.conf, ow, oh, P.g.scale, s);
+        for (int d : P.devs) cst[d].free();   // leaves the last device selected
+        CK(cudaSetDevice(prim));
         logf("compose: %zu of %d frames carry a label; %.2f s\n", ks.size(), K, since(t3));
     }
     if (hooks.preview) { std::vector<float> small; int pw, ph; downsample_preview(b_img, ow, oh, hooks.preview_down, small, pw, ph); hooks.preview("B", small, pw, ph); }
@@ -751,7 +747,9 @@ int run_stack(StackOptions& so) {
     }
     FinalParams fpar;
     fpar.c_smoothing = (float)so.c_smoothing;
-    FinalOutputs F = finalize(P.merged, noise_mad, R.depth_s, b_img, fpar, s);
+    fpar.outputs = so.outputs;
+    CK(cudaSetDevice(prim));
+    FinalOutputs F = finalize(P.dst, noise_mad, R.depth_s, b_img, fpar, s);
     {
         std::string sig;
         char b[32];

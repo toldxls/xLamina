@@ -55,6 +55,8 @@ struct Pass1Options {
     std::vector<int> frames_sel;
     StreamerOptions opt;
     bool volume = false;
+    bool with_a = true;                           // accumulate A (off when A is not an output)
+    bool host_state = false;                      // also download the merged state into Pass1::merged (the fold command)
     double depth_fraction = 0.25, depth_fm_px = 6.0, vol_agg_px = 32.0;
     Hooks hooks;
 };
@@ -66,7 +68,9 @@ struct Pass1 {
     std::vector<std::filesystem::path> paths;
     std::vector<Similarity> T;
     std::vector<int> devs;
-    HostFoldState merged;
+    FoldState dst;                 // the merged state, resident on devs[0]; the caller frees it
+    HostFoldState merged;          // only when host_state
+    double merge_seconds = 0, setup_seconds = 0;
     std::vector<float> guide, ga;
     std::vector<uint16_t> fm_all, lum_all;
     std::vector<float> V_all;

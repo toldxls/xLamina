@@ -34,6 +34,7 @@ struct FoldParams {
     float radius = 3.0f;   // focus-measure blur sigma in OUTPUT px (radius_px * scale, >= 0.8)
     float power = 4.0f;    // A weight exponent
     float c_radius = 0.f;  // C's energy aggregation sigma in OUTPUT px at level 0 (halved per level); 0 = off
+    bool with_a = true;    // accumulate A's weighted sums (off when A is not an output: 64 B/px of traffic per frame)
 };
 
 inline int n_levels(int w, int h, int top = 32) {
@@ -52,7 +53,7 @@ struct FoldState {
     int dev = -1;
     int w = 0, h = 0, levels = 0;
     std::vector<LevelShape> shapes;
-    double* a_num = nullptr;       // h*w*3
+    double* a_num = nullptr;       // h*w*3 (null when allocated without A)
     double* a_den = nullptr;       // h*w
     float* b_best = nullptr;       // h*w, init -1
     int16_t* b_idx = nullptr;      // h*w
@@ -68,7 +69,7 @@ struct FoldState {
     float noise_fm = 0.f;
     float* d_noise_tmp = nullptr;  // scratch for the medians (h*w)
 
-    void alloc(int dev, int w, int h, int levels);   // zero / -1 initialised
+    void alloc(int dev, int w, int h, int levels, bool with_a = true);   // zero / -1 initialised
     void free();
     size_t bytes() const;
 };
@@ -120,6 +121,31 @@ struct HostFoldState {
 
 HostFoldState download(const FoldState& st);
 void merge_into(HostFoldState& a, const HostFoldState& b);   // a = merge(a, b)
+
+// Device-to-device copies between cards through pinned host memory (no P2P between GeForce
+// cards), chunked and double-buffered: the D2H of one chunk overlaps the H2D of the previous.
+class CrossCopier {
+public:
+    CrossCopier(int dst_dev, int src_dev, size_t chunk = (size_t)64 << 20);
+    ~CrossCopier();
+    void copy(void* dst, const void* src, size_t bytes);   // returns when dst holds the data
+private:
+    int dst_, src_;
+    size_t chunk_;
+    uint8_t* pin_[2] = {nullptr, nullptr};
+    cudaStream_t ss_ = nullptr, ds_ = nullptr;
+    cudaEvent_t ev_[2] = {nullptr, nullptr};
+};
+
+// a = merge(a, b) on a's device, b staged across: the same arithmetic as merge_into(HostFoldState),
+// so the merged state is bit-identical whichever card holds it (FINDINGS 29).
+void merge_device(FoldState& a, const FoldState& b);
+// the argmax merge rule on device arrays (greater, or equal with the lower index); col may be null
+void merge_take(float* a_best, int16_t* a_idx, float* a_col, const float* b_best, const int16_t* b_idx, const float* b_col,
+                size_t n, cudaStream_t s);
+void add_f64(double* a, const double* b, size_t n, cudaStream_t s);   // a += b
+// out = (float)(c_base / max(count, 1)): the collapsed pyramid's base, as the host merge computed it
+void fold_base_f32(const FoldState& st, float* d_out, cudaStream_t s);
 // Writes every array as a raw file (<dir>/<name>.<f32|f64|i16>) plus manifest.txt.
 bool write_state(const HostFoldState& st, const std::string& dir);
 

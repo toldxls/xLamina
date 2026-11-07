@@ -974,6 +974,67 @@ host-side mixing (~1.5 s of its 2.9 s), the pass-1 kernels (1.8 s; the fold's
 pyramid and the volume slice), refine's host step (0.4 s), finalize (1.2 s),
 and ~1.3 s of allocation and merges.
 
+## 29. The host-side steps: merges on the GPU, finalize on demand (2026-11-06, late)
+
+After §28 the fusion's streaming passes ran at the links' rate and the rest
+was host work. Nsight (3080 Ti alone) showed what it was:
+
+- **The fold state** (2.6 GB per GPU) was downloaded to pageable memory from
+  every card, merged on the host, then uploaded again piecewise for the
+  guide and for finalize. 727 MB pageable copies take 57 ms each way.
+- **finalize** computed and downloaded all eleven outputs (11 x 363 MB
+  pageable D2H plus the uploads of the state it needs) whatever `--outputs`
+  asked for.
+- **compose** downloaded the four double accumulators (1.94 GB per GPU),
+  merged them on the host, uploaded them again for the mix.
+- **refine** did the same with its 180 MB per GPU.
+- **`k_fold_ab`** at 4 ms per frame was the biggest pass-1 kernel: 130 B/px
+  of traffic, 64 of them for A's weighted double sums.
+
+Changes, all with the same arithmetic in the same order:
+
+1. Merges run on the first GPU. The other card's arrays cross through two
+   pinned 64 MB buffers (`CrossCopier`: the D2H of one chunk overlaps the
+   H2D of the previous) into a temporary device buffer, and `k_add_f64` /
+   `k_merge_take` apply exactly `merge_into`'s rule. The merged `FoldState`
+   stays on that GPU (`Pass1::dst`) for the guide and for finalize; the host
+   copy is only made for the `fold` command (`host_state`).
+2. `finalize` takes the device state and computes only the requested
+   outputs plus what they depend on (H needs CBn; CB, CBn, Cd need the
+   depth helpers; anything mixed with B needs B's pyramid). With B, C, Cn
+   it builds two collapses instead of nine.
+3. `compose_mix` and `refine_depth` read the merged device states directly.
+4. The fold allocates and updates A's sums only when A is an output
+   (`FoldParams::with_a`), which also shrinks the state from 2.6 to 1.6 GB.
+5. The slot budget now reserves the depth-volume slices (K x dw x dh x 4 B),
+   which the smaller state had exposed: the 3070 fitted two slots with
+   0.9 GB left and the per-frame `cudaMallocAsync` was unchecked. It is
+   checked now.
+
+A bug found on the way: freeing the per-GPU states in a loop leaves the last
+device selected; the next step then launched on the 3070 with the 3080 Ti's
+stream and the process spun forever at 15 % GPU load. The primary is
+re-selected after every such loop.
+
+Checks: B, C, Cn bit-identical on two GPUs and on one; all eleven outputs
+on the 3080 Ti bit-identical to the 0.5.4 build; the `fold` command's state
+identical except `a_num` / `a_den`, which differ run to run in 0.5.4 as well
+(the double sums follow the frames' arrival order; the A image is
+unchanged). The merged B / C arrays are bit-identical across any split.
+
+| both GPUs, 163 frames, B C Cn | §28 | now |
+|---|---|---|
+| pass 1 (setup + stream + merge + volume) | 2.4 s | 0.24 + 1.73 + 0.19 + 0.58 s |
+| refine (pass 2 + host) | 1.84 s | 1.77 s |
+| compose (pass 3 + host) | 2.94 s | 2.10 s |
+| finalize | 1.2 s | 0.40 s |
+| fusion total | 11.0 s | 8.2 s |
+| whole run | 17.3 s | **14.6 s** |
+
+What is left: the alignment (6 s: 3.1 s read + pin, 2.75 s pairs), pass 1's
+kernels (1.7 s), the compose mix (0.7 s of host-visible GPU work), and the
+depth stage (0.85 s).
+
 ## Open items
 
 - **B: doubled plate edge / glow** (§25a): the C-style aggregation does not

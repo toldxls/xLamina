@@ -374,8 +374,10 @@ static int cmd_fold(int argc, char** argv) {
         else return usage();
     }
     if (out.empty() || !have_rect) return usage();
+    po.host_state = true;   // the validation reads the merged state from disk
     Pass1 P;
     if (int r = run_pass1(po, P)) return r;
+    P.dst.free();
     if (!write_state(P.merged, out)) { fprintf(stderr, "cannot write %s\n", out.c_str()); return 1; }
     printf("  merged state (%d frames) -> %s\n", P.merged.count, out.c_str());
     if (po.volume) {

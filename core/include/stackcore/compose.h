@@ -47,11 +47,12 @@ struct HostRefine {
 };
 HostRefine download(const RefineState& st);
 void merge_into(HostRefine& a, const HostRefine& b);
+void merge_device(RefineState& a, const RefineState& b);   // a = merge(a, b) on a's device, same rule
 
 // depth_s <- where(blur(conf) > 0.5 & spill_up < 0.3, median3(where(isfinite(bw), iw, depth_s)), depth_s)
 // (all on the current device; host vectors in and out)
 void refine_depth(std::vector<float>& depth_s, const std::vector<float>& conf, const std::vector<float>& spill, int dw, int dh,
-                  const HostRefine& r, int ow, int oh, double scale, cudaStream_t s);
+                  const RefineState& r, int ow, int oh, double scale, cudaStream_t s);   // r on the current device
 
 // depth_smooth = clip(guided_filter(guide, median5(median5(depth_s)), max(2, round(40 scale)), 2e-3), 0, n-1)
 std::vector<float> smooth_depth(const std::vector<float>& depth_s, const float* d_guide_full, int ow, int oh, double scale, int n,
@@ -89,9 +90,10 @@ struct HostCompose {
 };
 HostCompose download(const ComposeState& st);
 void merge_into(HostCompose& a, const HostCompose& b);
+void merge_device(ComposeState& a, const ComposeState& b);   // a += b on a's device
 
 // b1 = n1 / d1, b2 = n2 / d2, mixed by fine detail and focus confidence -> B (float RGB, host)
-std::vector<float> compose_mix(const HostCompose& c, const std::vector<float>& conf, int ow, int oh, double scale, cudaStream_t s);
+std::vector<float> compose_mix(const ComposeState& c, const std::vector<float>& conf, int ow, int oh, double scale, cudaStream_t s);   // c on the current device
 
 // ---- finalize
 
@@ -102,6 +104,7 @@ struct FinalParams {
     // from B instead of the argmax frame (which in flat areas picks the noisiest frame).
     // 0 = the raw selection; 3 = the same gate as Cn.
     float c_smoothing = 0.f;
+    std::vector<std::string> outputs;   // which outputs to compute (plus what they depend on); empty = all
 };
 
 // Outputs by name (A, B, B0, C, CB, Cn, CBn, Cd, Cg, Cg2, H), float RGB on the host.
@@ -109,8 +112,8 @@ struct FinalOutputs {
     std::vector<std::string> names;
     std::vector<std::vector<float>> images;
 };
-FinalOutputs finalize(const HostFoldState& st, const std::vector<float>& noise_mad, const std::vector<float>& depth_s,
-                      const std::vector<float>& b_img, const FinalParams& p, cudaStream_t s);
+FinalOutputs finalize(const FoldState& st, const std::vector<float>& noise_mad, const std::vector<float>& depth_s,
+                      const std::vector<float>& b_img, const FinalParams& p, cudaStream_t s);   // st on the current device
 
 // noise per level from two adjacent frames' Laplacian pyramids: 1.4826 median(|(pa - pb) @ LUMA|) / sqrt 2
 std::vector<float> noise_from_pair(const float* d_img_a, const float* d_img_b, int w, int h, int levels, cudaStream_t s);

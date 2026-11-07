@@ -46,13 +46,15 @@ __global__ void k_fold_ab(double* __restrict__ a_num, double* __restrict__ a_den
     size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float f = fm[i];
-    double wgt = (double)f + 1e-9;
-    wgt = half_power == 2.f ? wgt * wgt : pow(wgt, (double)half_power);
     const float* p = img + i * 3;
-    a_num[i * 3] += wgt * (double)p[0];
-    a_num[i * 3 + 1] += wgt * (double)p[1];
-    a_num[i * 3 + 2] += wgt * (double)p[2];
-    a_den[i] += wgt;
+    if (a_num) {   // A's sums only when A is an output (uniform branch)
+        double wgt = (double)f + 1e-9;
+        wgt = half_power == 2.f ? wgt * wgt : pow(wgt, (double)half_power);
+        a_num[i * 3] += wgt * (double)p[0];
+        a_num[i * 3 + 1] += wgt * (double)p[1];
+        a_num[i * 3 + 2] += wgt * (double)p[2];
+        a_den[i] += wgt;
+    }
     b_fmsum[i] += (double)f;
     if (f > b_best[i] || (f == b_best[i] && k < b_idx[i])) {
         b_best[i] = f;
@@ -117,15 +119,18 @@ float median_sorted(float* d, size_t n, cudaStream_t s) {
 
 // ----------------------------------------------------------------------------- allocation
 
-void FoldState::alloc(int dev_, int w_, int h_, int levels_) {
+void FoldState::alloc(int dev_, int w_, int h_, int levels_, bool with_a) {
     dev = dev_; w = w_; h = h_; levels = levels_;
     shapes = pyramid_shapes(w, h, levels);
     size_t n = (size_t)w * h;
     CK(cudaSetDevice(dev));
-    CK(cudaMalloc(&a_num, n * 3 * sizeof(double)));
-    CK(cudaMemset(a_num, 0, n * 3 * sizeof(double)));
-    CK(cudaMalloc(&a_den, n * sizeof(double)));
-    CK(cudaMemset(a_den, 0, n * sizeof(double)));
+    a_num = nullptr; a_den = nullptr;
+    if (with_a) {
+        CK(cudaMalloc(&a_num, n * 3 * sizeof(double)));
+        CK(cudaMemset(a_num, 0, n * 3 * sizeof(double)));
+        CK(cudaMalloc(&a_den, n * sizeof(double)));
+        CK(cudaMemset(a_den, 0, n * sizeof(double)));
+    }
     CK(cudaMalloc(&b_best, n * sizeof(float)));
     k_fill_f32<<<blocks1(n), 256>>>(b_best, n, -1.f);
     CK(cudaMalloc(&b_idx, n * sizeof(int16_t)));
@@ -166,7 +171,7 @@ void FoldState::free() {
 }
 
 size_t FoldState::bytes() const {
-    size_t n = (size_t)w * h, b = n * (24 + 8 + 4 + 2 + 12 + 8 + 4);
+    size_t n = (size_t)w * h, b = n * ((a_num ? 24 + 8 : 0) + 4 + 2 + 12 + 8 + 4);
     for (int l = 0; l < levels - 1; ++l) b += (size_t)shapes[l].w * shapes[l].h * (4 + 12 + 2);
     return b + (size_t)shapes.back().w * shapes.back().h * 24;
 }
@@ -330,8 +335,7 @@ HostFoldState download(const FoldState& st) {
     HostFoldState h;
     h.w = st.w; h.h = st.h; h.levels = st.levels; h.shapes = st.shapes;
     size_t n = (size_t)st.w * st.h;
-    h.a_num = dl(st.a_num, n * 3);
-    h.a_den = dl(st.a_den, n);
+    if (st.a_num) { h.a_num = dl(st.a_num, n * 3); h.a_den = dl(st.a_den, n); }
     h.b_best = dl(st.b_best, n);
     h.b_idx = dl(st.b_idx, n);
     h.b_col = dl(st.b_col, n * 3);
@@ -349,9 +353,11 @@ HostFoldState download(const FoldState& st) {
 
 void merge_into(HostFoldState& a, const HostFoldState& b) {
     size_t n = (size_t)a.w * a.h;
-    for (size_t i = 0; i < n * 3; ++i) a.a_num[i] += b.a_num[i];
+    if (!a.a_num.empty() && !b.a_num.empty()) {
+        for (size_t i = 0; i < n * 3; ++i) a.a_num[i] += b.a_num[i];
+        for (size_t i = 0; i < n; ++i) a.a_den[i] += b.a_den[i];
+    }
     for (size_t i = 0; i < n; ++i) {
-        a.a_den[i] += b.a_den[i];
         a.b_fmsum[i] += b.b_fmsum[i];
         if (b.b_best[i] > a.b_best[i] || (b.b_best[i] == a.b_best[i] && b.b_idx[i] < a.b_idx[i])) {
             a.b_best[i] = b.b_best[i];
@@ -369,6 +375,120 @@ void merge_into(HostFoldState& a, const HostFoldState& b) {
             }
     }
     for (size_t i = 0; i < a.c_base.size(); ++i) a.c_base[i] += b.c_base[i];
+    a.count += b.count;
+    if (b.noise_k < a.noise_k) {
+        a.noise_k = b.noise_k;
+        a.noise_mad = b.noise_mad;
+        a.noise_fm = b.noise_fm;
+    }
+}
+
+// ----------------------------------------------------------------------------- merge across devices
+
+__global__ void k_add_f64(double* __restrict__ a, const double* __restrict__ b, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) a[i] += b[i];
+}
+__global__ void k_merge_take(float* __restrict__ a_best, int16_t* __restrict__ a_idx, float* __restrict__ a_col,
+                             const float* __restrict__ b_best, const int16_t* __restrict__ b_idx, const float* __restrict__ b_col,
+                             size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    if (b_best[i] > a_best[i] || (b_best[i] == a_best[i] && b_idx[i] < a_idx[i])) {
+        a_best[i] = b_best[i];
+        a_idx[i] = b_idx[i];
+        if (a_col) { a_col[i * 3] = b_col[i * 3]; a_col[i * 3 + 1] = b_col[i * 3 + 1]; a_col[i * 3 + 2] = b_col[i * 3 + 2]; }
+    }
+}
+__global__ void k_base_f32(const double* __restrict__ in, float* __restrict__ out, size_t n, double den) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = (float)(in[i] / den);
+}
+
+void add_f64(double* a, const double* b, size_t n, cudaStream_t s) { k_add_f64<<<blocks1(n), 256, 0, s>>>(a, b, n); }
+void merge_take(float* a_best, int16_t* a_idx, float* a_col, const float* b_best, const int16_t* b_idx, const float* b_col,
+                size_t n, cudaStream_t s) {
+    k_merge_take<<<blocks1(n), 256, 0, s>>>(a_best, a_idx, a_col, b_best, b_idx, b_col, n);
+}
+void fold_base_f32(const FoldState& st, float* d_out, cudaStream_t s) {
+    size_t t = (size_t)st.shapes.back().w * st.shapes.back().h * 3;
+    k_base_f32<<<blocks1(t), 256, 0, s>>>(st.c_base, d_out, t, (double)std::max(st.count, 1));
+}
+
+CrossCopier::CrossCopier(int dst_dev, int src_dev, size_t chunk) : dst_(dst_dev), src_(src_dev), chunk_(chunk) {
+    for (int b = 0; b < 2; ++b) CK(cudaHostAlloc((void**)&pin_[b], chunk_, cudaHostAllocPortable));
+    CK(cudaSetDevice(src_));
+    CK(cudaStreamCreateWithFlags(&ss_, cudaStreamNonBlocking));
+    CK(cudaSetDevice(dst_));
+    CK(cudaStreamCreateWithFlags(&ds_, cudaStreamNonBlocking));
+    for (int b = 0; b < 2; ++b) CK(cudaEventCreateWithFlags(&ev_[b], cudaEventDisableTiming));
+}
+CrossCopier::~CrossCopier() {
+    cudaSetDevice(dst_);
+    cudaStreamSynchronize(ds_);
+    for (int b = 0; b < 2; ++b) { cudaEventDestroy(ev_[b]); cudaFreeHost(pin_[b]); }
+    cudaStreamDestroy(ds_);
+    cudaSetDevice(src_);
+    cudaStreamDestroy(ss_);
+    cudaSetDevice(dst_);
+}
+void CrossCopier::copy(void* dst, const void* src, size_t bytes) {
+    bool used[2] = {false, false};
+    size_t i = 0;
+    for (size_t off = 0; off < bytes; off += chunk_, ++i) {
+        int b = (int)(i & 1);
+        size_t len = std::min(chunk_, bytes - off);
+        if (used[b]) CK(cudaEventSynchronize(ev_[b]));   // the H2D that read this buffer two chunks ago is done
+        CK(cudaSetDevice(src_));
+        CK(cudaMemcpyAsync(pin_[b], (const uint8_t*)src + off, len, cudaMemcpyDeviceToHost, ss_));
+        CK(cudaStreamSynchronize(ss_));
+        CK(cudaSetDevice(dst_));
+        CK(cudaMemcpyAsync((uint8_t*)dst + off, pin_[b], len, cudaMemcpyHostToDevice, ds_));
+        CK(cudaEventRecord(ev_[b], ds_));
+        used[b] = true;
+    }
+    CK(cudaSetDevice(dst_));
+    CK(cudaStreamSynchronize(ds_));
+}
+
+void merge_device(FoldState& a, const FoldState& b) {
+    if (a.dev == b.dev) throw std::runtime_error("merge_device: same device");
+    CK(cudaSetDevice(b.dev));
+    CK(cudaDeviceSynchronize());
+    CK(cudaSetDevice(a.dev));
+    CK(cudaDeviceSynchronize());
+    size_t n = (size_t)a.w * a.h;
+    struct Tmp { uint8_t* p = nullptr; ~Tmp() { cudaFree(p); } } tbuf;
+    CK(cudaMalloc(&tbuf.p, n * 3 * sizeof(double)));   // the largest array; the three B arrays together fit too (18 B/px)
+    uint8_t* tmp = tbuf.p;
+    CrossCopier cc(a.dev, b.dev);
+    cudaStream_t s = 0;
+    auto stage = [&](const void* src, size_t bytes, size_t at = 0) { cc.copy(tmp + at, src, bytes); return tmp + at; };
+    if (a.a_num && b.a_num) {
+        add_f64(a.a_num, (double*)stage(b.a_num, n * 3 * sizeof(double)), n * 3, s);
+        CK(cudaDeviceSynchronize());
+        add_f64(a.a_den, (double*)stage(b.a_den, n * sizeof(double)), n, s);
+        CK(cudaDeviceSynchronize());
+    }
+    add_f64(a.b_fmsum, (double*)stage(b.b_fmsum, n * sizeof(double)), n, s);
+    CK(cudaDeviceSynchronize());
+    // the three arrays staged together: the 12-byte colour first, then the floats, then the int16s, so every
+    // offset keeps its alignment whatever m is (a level with an odd pixel count would otherwise put the colour at 6m)
+    auto take = [&](float* a_best, int16_t* a_idx, float* a_col, const float* bb, const int16_t* bi, const float* bc, size_t m) {
+        float* sc = (float*)stage(bc, m * 3 * sizeof(float), 0);
+        float* sb = (float*)stage(bb, m * sizeof(float), m * 3 * sizeof(float));
+        int16_t* si = (int16_t*)stage(bi, m * sizeof(int16_t), m * 4 * sizeof(float));
+        merge_take(a_best, a_idx, a_col, sb, si, sc, m, s);
+        CK(cudaDeviceSynchronize());
+    };
+    take(a.b_best, a.b_idx, a.b_col, b.b_best, b.b_idx, b.b_col, n);
+    for (int l = 0; l < a.levels - 1; ++l) {
+        size_t m = (size_t)a.shapes[l].w * a.shapes[l].h;
+        take(a.c_sal[l], a.c_idx[l], a.c_coef[l], b.c_sal[l], b.c_idx[l], b.c_coef[l], m);
+    }
+    size_t t = (size_t)a.shapes.back().w * a.shapes.back().h * 3;
+    add_f64(a.c_base, (double*)stage(b.c_base, t * sizeof(double)), t, s);
+    CK(cudaDeviceSynchronize());
     a.count += b.count;
     if (b.noise_k < a.noise_k) {
         a.noise_k = b.noise_k;

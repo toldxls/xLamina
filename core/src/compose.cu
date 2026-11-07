@@ -10,6 +10,7 @@
 #include <stdexcept>
 
 #include "stackcore/depth.h"
+#include "stackcore/fold.h"
 #include "stackcore/volume.h"
 
 namespace stackcore {
@@ -315,15 +316,30 @@ void merge_into(HostRefine& a, const HostRefine& b) {
     for (size_t i = 0; i < a.bw.size(); ++i)
         if (b.bw[i] > a.bw[i] || (b.bw[i] == a.bw[i] && b.iw[i] < a.iw[i])) { a.bw[i] = b.bw[i]; a.iw[i] = b.iw[i]; }
 }
+void merge_device(RefineState& a, const RefineState& b) {
+    CK(cudaSetDevice(b.dev)); CK(cudaDeviceSynchronize());
+    CK(cudaSetDevice(a.dev)); CK(cudaDeviceSynchronize());
+    size_t n = (size_t)a.w * a.h;
+    float* sb = dalloc<float>(n);
+    int16_t* si = dalloc<int16_t>(n);
+    {
+        CrossCopier cc(a.dev, b.dev);
+        cc.copy(sb, b.bw, n * sizeof(float));
+        cc.copy(si, b.iw, n * sizeof(int16_t));
+    }
+    merge_take(a.bw, a.iw, nullptr, sb, si, nullptr, n, 0);
+    CK(cudaDeviceSynchronize());
+    cudaFree(sb); cudaFree(si);
+}
 
 void refine_depth(std::vector<float>& depth_s, const std::vector<float>& conf, const std::vector<float>& spill, int dw, int dh,
-                  const HostRefine& r, int ow, int oh, double scale, cudaStream_t s) {
+                  const RefineState& r, int ow, int oh, double scale, cudaStream_t s) {
     size_t n = (size_t)ow * oh;
     float* d_ds = upload(depth_s);
     float* d_conf = upload(conf);
     float* d_sp = upload(spill);
-    float* d_bw = upload(r.bw);
-    int16_t* d_iw = upload(r.iw);
+    const float* d_bw = r.bw;
+    const int16_t* d_iw = r.iw;
     float *confs = dalloc<float>(n), *tmp = dalloc<float>(n), *spup = dalloc<float>(n), *ref = dalloc<float>(n), *med = dalloc<float>(n);
     DevGaussian g;
     g.build(std::max(1.0, 6 * scale));
@@ -335,7 +351,7 @@ void refine_depth(std::vector<float>& depth_s, const std::vector<float>& conf, c
     CK(cudaMemcpyAsync(depth_s.data(), d_ds, n * sizeof(float), cudaMemcpyDeviceToHost, s));
     CK(cudaStreamSynchronize(s));
     g.free();
-    for (void* p : {(void*)d_ds, (void*)d_conf, (void*)d_sp, (void*)d_bw, (void*)d_iw, (void*)confs, (void*)tmp, (void*)spup, (void*)ref, (void*)med}) cudaFree(p);
+    for (void* p : {(void*)d_ds, (void*)d_conf, (void*)d_sp, (void*)confs, (void*)tmp, (void*)spup, (void*)ref, (void*)med}) cudaFree(p);
 }
 
 std::vector<float> smooth_depth(const std::vector<float>& depth_s, const float* d_guide_full, int ow, int oh, double scale, int nfr,
@@ -410,10 +426,24 @@ void merge_into(HostCompose& a, const HostCompose& b) {
     for (size_t i = 0; i < a.n1.size(); ++i) { a.n1[i] += b.n1[i]; a.n2[i] += b.n2[i]; }
     for (size_t i = 0; i < a.d1.size(); ++i) { a.d1[i] += b.d1[i]; a.d2[i] += b.d2[i]; }
 }
+void merge_device(ComposeState& a, const ComposeState& b) {
+    CK(cudaSetDevice(b.dev)); CK(cudaDeviceSynchronize());
+    CK(cudaSetDevice(a.dev)); CK(cudaDeviceSynchronize());
+    size_t n = (size_t)a.w * a.h;
+    double* tmp = dalloc<double>(n * 3);
+    CrossCopier cc(a.dev, b.dev);
+    struct P { double* dst; const double* src; size_t cnt; } parts[4] = {{a.n1, b.n1, n * 3}, {a.d1, b.d1, n}, {a.n2, b.n2, n * 3}, {a.d2, b.d2, n}};
+    for (auto& p : parts) {
+        cc.copy(tmp, p.src, p.cnt * sizeof(double));
+        add_f64(p.dst, tmp, p.cnt, 0);
+        CK(cudaDeviceSynchronize());
+    }
+    cudaFree(tmp);
+}
 
-std::vector<float> compose_mix(const HostCompose& c, const std::vector<float>& conf, int ow, int oh, double scale, cudaStream_t s) {
+std::vector<float> compose_mix(const ComposeState& c, const std::vector<float>& conf, int ow, int oh, double scale, cudaStream_t s) {
     size_t n = (size_t)ow * oh;
-    double *n1 = upload(c.n1), *d1 = upload(c.d1), *n2 = upload(c.n2), *d2 = upload(c.d2);
+    const double *n1 = c.n1, *d1 = c.d1, *n2 = c.n2, *d2 = c.d2;
     double *b1 = dalloc<double>(n * 3), *b2 = dalloc<double>(n * 3);
     float *y1 = dalloc<float>(n), *t1 = dalloc<float>(n), *t2 = dalloc<float>(n), *t3 = dalloc<float>(n), *t4 = dalloc<float>(n);
     k_divide<<<blocks1(n), 256, 0, s>>>(n1, d1, b1, y1, n);
@@ -440,65 +470,69 @@ std::vector<float> compose_mix(const HostCompose& c, const std::vector<float>& c
     CK(cudaMemcpyAsync(h.data(), out, n * 3 * sizeof(float), cudaMemcpyDeviceToHost, s));
     CK(cudaStreamSynchronize(s));
     g07.free(); gfs.free(); gc.free(); gm.free();
-    for (void* p : {(void*)n1, (void*)d1, (void*)n2, (void*)d2, (void*)b1, (void*)b2, (void*)y1, (void*)t1, (void*)t2, (void*)t3, (void*)t4, (void*)d_conf, (void*)out}) cudaFree(p);
+    for (void* p : {(void*)b1, (void*)b2, (void*)y1, (void*)t1, (void*)t2, (void*)t3, (void*)t4, (void*)d_conf, (void*)out}) cudaFree(p);
     return h;
 }
 
 // ----------------------------------------------------------------------------- finalize
 
-FinalOutputs finalize(const HostFoldState& st, const std::vector<float>& noise_mad, const std::vector<float>& depth_s,
+FinalOutputs finalize(const FoldState& st, const std::vector<float>& noise_mad, const std::vector<float>& depth_s,
                       const std::vector<float>& b_img, const FinalParams& p, cudaStream_t s) {
     FinalOutputs out;
     int w = st.w, h = st.h, levels = st.levels;
     size_t n = (size_t)w * h;
+    auto want = [&](const char* name) { return p.outputs.empty() || std::find(p.outputs.begin(), p.outputs.end(), name) != p.outputs.end(); };
     auto emit = [&](const std::string& name, const float* d, size_t cnt) {
         out.names.push_back(name);
         out.images.push_back(dl(d, cnt));
     };
+    // what the requested outputs need: B's pyramid for every mix with B, the depth helpers for the
+    // depth-locked ones; everything is computed in the same order as before, only the unrequested
+    // outputs are skipped (FINDINGS 29)
+    const bool want_H = want("H"), want_CBn = want("CBn") || want_H;
+    const bool need_depth = want("CB") || want_CBn || want("Cd");
+    const bool need_B = (p.c_smoothing > 0.f && want("C")) || want("Cn") || need_depth || want("Cg") || want("Cg2");
     // A, B0
-    {
-        double *num = upload(st.a_num), *den = upload(st.a_den);
+    if (want("A")) {
+        if (!st.a_num) throw std::runtime_error("A requested but the fold ran without A's sums");
         float* a = dalloc<float>(n * 3);
-        k_a_out<<<blocks1(n), 256, 0, s>>>(num, den, a, n);
+        k_a_out<<<blocks1(n), 256, 0, s>>>(st.a_num, st.a_den, a, n);
         CK(cudaStreamSynchronize(s));
         emit("A", a, n * 3);
-        cudaFree(num); cudaFree(den); cudaFree(a);
+        cudaFree(a);
     }
     out.names.push_back("B");
     out.images.push_back(b_img);
-    out.names.push_back("B0");
-    out.images.push_back(st.b_col);
-    // lapC on the device: coef levels + base / count
-    std::vector<float*> lapC;
-    for (int l = 0; l < levels - 1; ++l) lapC.push_back(upload(st.c_coef[l]));
-    {
-        double* base = upload(st.c_base);
-        float* bf = dalloc<float>(st.c_base.size());
-        k_d2f<<<blocks1(st.c_base.size()), 256, 0, s>>>(base, bf, st.c_base.size(), (double)std::max(st.count, 1));
-        lapC.push_back(bf);
-        CK(cudaStreamSynchronize(s));
-        cudaFree(base);
-    }
-    std::vector<int16_t*> c_idx;
-    std::vector<float*> c_sal;
-    for (int l = 0; l < levels - 1; ++l) { c_idx.push_back(upload(st.c_idx[l])); c_sal.push_back(upload(st.c_sal[l])); }
+    if (want("B0")) emit("B0", st.b_col, n * 3);
+    // lapC on the device: the state's coef levels + base / count
+    std::vector<const float*> lapC;
+    for (int l = 0; l < levels - 1; ++l) lapC.push_back(st.c_coef[l]);
+    float* bf = dalloc<float>((size_t)st.shapes.back().w * st.shapes.back().h * 3);
+    fold_base_f32(st, bf, s);
+    lapC.push_back(bf);
+    CK(cudaStreamSynchronize(s));
+    std::vector<const int16_t*> c_idx(st.c_idx.begin(), st.c_idx.end());
+    std::vector<const float*> c_sal(st.c_sal.begin(), st.c_sal.end());
     float *coll = dalloc<float>(n * 3), *tmpA = dalloc<float>(n * 3), *tmpB = dalloc<float>(n * 3);
-    std::vector<const float*> lapC_c(lapC.begin(), lapC.end());
     auto collapse_levels = [&](const std::vector<const float*>& lv) {
         collapse_pyramid(std::vector<const float*>(lv.begin(), lv.end() - 1), lv.back(), st.shapes, coll, tmpA, tmpB, s);
         CK(cudaStreamSynchronize(s));
     };
-    if (p.c_smoothing <= 0.f) {
-        collapse_levels(lapC_c);
+    if (p.c_smoothing <= 0.f && want("C")) {
+        collapse_levels(lapC);
         emit("C", coll, n * 3);
+    }
+    if (!need_B && !want_H) {
+        cudaFree(bf); cudaFree(coll); cudaFree(tmpA); cudaFree(tmpB);
+        return out;
     }
     // lapB
     float* d_b = upload(b_img);
     DevPyramid pyrB;
     pyrB.build(d_b, w, h, levels, s);
     // per-level helpers: depth at the level size (INTER_AREA), salience of cB
-    std::vector<float*> dl_lvl(levels - 1), sB(levels - 1);
-    {
+    std::vector<float*> dl_lvl(levels - 1, nullptr), sB(levels - 1, nullptr);
+    if (need_depth) {
         float* d_depth = upload(depth_s);
         for (int l = 0; l < levels - 1; ++l) {
             auto sh = st.shapes[l];
@@ -536,7 +570,7 @@ FinalOutputs finalize(const HostFoldState& st, const std::vector<float>& noise_m
     };
     std::vector<const float*> lv_c(levels);
     for (int l = 0; l < levels; ++l) lv_c[l] = lv[l];
-    if (p.c_smoothing > 0.f) {   // C with smoothing: the noise gate at the chosen strength
+    if (p.c_smoothing > 0.f && want("C")) {   // C with smoothing: the noise gate at the chosen strength
         for (int l = 0; l < levels - 1; ++l) level_weights(l, false, true, p.agree, p.c_smoothing);
         collapse_levels(lv_c);
         emit("C", coll, n * 3);
@@ -544,25 +578,30 @@ FinalOutputs finalize(const HostFoldState& st, const std::vector<float>& noise_m
     std::vector<float> cbn_host;
     struct V { const char* name; bool depth, noise; };
     for (V v : {V{"CB", true, false}, V{"Cn", false, true}, V{"CBn", true, true}}) {
+        bool is_cbn = std::string(v.name) == "CBn";
+        if (!(is_cbn ? want_CBn : want(v.name))) continue;
         for (int l = 0; l < levels - 1; ++l) level_weights(l, v.depth, v.noise, p.agree, p.noise_k);
         collapse_levels(lv_c);
-        emit(v.name, coll, n * 3);
-        if (std::string(v.name) == "CBn") cbn_host = out.images.back();
+        if (!is_cbn || want("CBn")) emit(v.name, coll, n * 3);
+        if (is_cbn) cbn_host = want("CBn") ? out.images.back() : dl(coll, n * 3);
     }
     // Cd: depth-locked fine levels, coarse levels from B
-    for (int l = 0; l < levels - 1; ++l) {
-        auto sh = st.shapes[l];
-        size_t m = (size_t)sh.w * sh.h;
-        if (l >= p.coarse_b_level) { CK(cudaMemcpyAsync(lv[l], pyrB.lap[l], m * 3 * sizeof(float), cudaMemcpyDeviceToDevice, s)); continue; }
-        k_far<<<blocks1(m), 256, 0, s>>>(c_idx[l], dl_lvl[l], wb[l], m, p.glint_agree);
-        k_noise_w<<<blocks1(m), 256, 0, s>>>(lapC[l], wb[l], m, p.noise_k * noise_mad[l] + 1e-12f, false);
-        gaussian_blur(wb[l], wb[l], tmpw[l], sh.w, sh.h, g1, s);
-        k_level_mix<<<blocks1(m), 256, 0, s>>>(wb[l], pyrB.lap[l], lapC[l], lv[l], m);
+    if (want("Cd")) {
+        for (int l = 0; l < levels - 1; ++l) {
+            auto sh = st.shapes[l];
+            size_t m = (size_t)sh.w * sh.h;
+            if (l >= p.coarse_b_level) { CK(cudaMemcpyAsync(lv[l], pyrB.lap[l], m * 3 * sizeof(float), cudaMemcpyDeviceToDevice, s)); continue; }
+            k_far<<<blocks1(m), 256, 0, s>>>(c_idx[l], dl_lvl[l], wb[l], m, p.glint_agree);
+            k_noise_w<<<blocks1(m), 256, 0, s>>>(lapC[l], wb[l], m, p.noise_k * noise_mad[l] + 1e-12f, false);
+            gaussian_blur(wb[l], wb[l], tmpw[l], sh.w, sh.h, g1, s);
+            k_level_mix<<<blocks1(m), 256, 0, s>>>(wb[l], pyrB.lap[l], lapC[l], lv[l], m);
+        }
+        collapse_levels(lv_c);
+        emit("Cd", coll, n * 3);
     }
-    collapse_levels(lv_c);
-    emit("Cd", coll, n * 3);
     // Cg, Cg2
     for (auto [L0, name] : {std::pair<int, const char*>{p.coarse_b_level, "Cg"}, std::pair<int, const char*>{p.coarse_b_level - 1, "Cg2"}}) {
+        if (!want(name)) continue;
         for (int l = 0; l < levels - 1; ++l) {
             auto sh = st.shapes[l];
             size_t m = (size_t)sh.w * sh.h;
@@ -575,7 +614,7 @@ FinalOutputs finalize(const HostFoldState& st, const std::vector<float>& noise_m
         emit(name, coll, n * 3);
     }
     // H: luma from CBn, chroma from B
-    {
+    if (want_H) {
         // Mi = inverse of M (float32), computed on the host once
         double M[9] = {0.2126, 0.7152, 0.0722, -0.1146, -0.3854, 0.5, 0.5, -0.4542, -0.0458};
         float Mf[9];
@@ -597,9 +636,7 @@ FinalOutputs finalize(const HostFoldState& st, const std::vector<float>& noise_m
         cudaFree(d_cbn);
     }
     g1.free();
-    for (auto q : lapC) cudaFree(q);
-    for (auto q : c_idx) cudaFree(q);
-    for (auto q : c_sal) cudaFree(q);
+    cudaFree(bf);
     for (auto q : dl_lvl) cudaFree(q);
     for (auto q : sB) cudaFree(q);
     for (int l = 0; l < levels - 1; ++l) { cudaFree(lv[l]); cudaFree(wb[l]); cudaFree(tmpw[l]); }
