@@ -571,6 +571,10 @@ int run_stack(StackOptions& so) {
     const size_t no = (size_t)ow * oh, nd = (size_t)P.vp.dw * P.vp.dh;
     const int prim = P.devs[0];
     logf("pass 1: %.2f s setup, %.2f s stream + %.2f s merge + %.2f s volume\n", P.setup_seconds, P.st.seconds, P.merge_seconds, P.vol_seconds);
+    if (so.result) {
+        so.result->pass1_seconds = since(t_all);
+        so.result->frames_per_second = P.st.seconds > 0 ? P.st.frames / P.st.seconds : 0;
+    }
 
     // ---- depth (SGM) on the primary GPU
     stage("depth map", 0.0);
@@ -608,6 +612,7 @@ int run_stack(StackOptions& so) {
     }
     logf("depth: %.2f s (cost %.0f ms, SGM %.0f ms, post %.0f ms); end-peaked %.1f%%\n", since(t1), R.ms_cost, R.ms_sgm, R.ms_post,
            100 * R.end_fraction);
+    if (so.result) so.result->depth_seconds = since(t1);
     auto preview_depth = [&](const char* name) {
         if (!hooks.preview) return;
         std::vector<float> rgb(no * 3);
@@ -668,6 +673,7 @@ int run_stack(StackOptions& so) {
     }
     std::vector<float> Ds = smooth_depth(R.depth_s, d_guide, ow, oh, P.g.scale, K, s);
     logf("refine: %.2f s\n", since(t2));
+    if (so.result) so.result->refine_seconds = since(t2);
     preview_depth("depth map (refined)");
     if (hooks.cancelled()) { cudaFree(d_guide); cudaStreamDestroy(s); return 3; }
 
@@ -721,6 +727,7 @@ int run_stack(StackOptions& so) {
         CK(cudaSetDevice(prim));
         logf("compose: %zu of %d frames carry a label; %.2f s\n", ks.size(), K, since(t3));
     }
+    if (so.result) so.result->compose_seconds = since(t3);
     if (hooks.preview) { std::vector<float> small; int pw, ph; downsample_preview(b_img, ow, oh, hooks.preview_down, small, pw, ph); hooks.preview("B", small, pw, ph); }
     if (hooks.cancelled()) { cudaFree(d_guide); cudaStreamDestroy(s); return 3; }
     stage("finalize", 0.0);
@@ -756,6 +763,7 @@ int run_stack(StackOptions& so) {
         for (float v : noise_mad) { snprintf(b, sizeof b, " %.2f", v * 1e4); sig += b; }
         logf("finalize: %.2f s; noise sigma per level (x1e-4):%s", since(t4), sig.c_str());
     }
+    if (so.result) so.result->finalize_seconds = since(t4);
     auto wanted = [&](const std::string& n) { return so.outputs.empty() || std::find(so.outputs.begin(), so.outputs.end(), n) != so.outputs.end(); };
     if (hooks.preview)
         for (size_t i = 0; i < F.names.size(); ++i)
@@ -799,6 +807,7 @@ int run_stack(StackOptions& so) {
         fclose(mf);
     }
     logf("wrote %zu outputs (%dx%d) in %.2f s -> %s", written, ow, oh, since(t5), out.c_str());
+    if (so.result) so.result->write_seconds = since(t5);
     }
     cudaFree(d_guide);
     cudaStreamDestroy(s);
@@ -1172,7 +1181,7 @@ int run_job(JobOptions& jo, AlignOut& A, Hooks hooks) {
     so.po.paths = A.paths;
     so.po.T = A.T;
     so.po.g.x0 = A.rect[0]; so.po.g.y0 = A.rect[1]; so.po.g.x1 = A.rect[2]; so.po.g.y1 = A.rect[3];
-    so.out = out;
+    so.out = so.write_outputs ? out : std::string();   // the benchmark computes everything but writes nothing
     if (int r = run_stack(so)) return r;
     logf("run: %zu frames aligned and stacked in %.2f s -> %s", A.paths.size(),
          std::chrono::duration<double>(std::chrono::steady_clock::now() - t_all).count(), out.c_str());

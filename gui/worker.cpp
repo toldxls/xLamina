@@ -3,6 +3,7 @@
 #include <QMetaObject>
 
 #include <algorithm>
+#include <chrono>
 
 #include "imageview.h"
 #include "stackcore/tiff.h"
@@ -17,18 +18,22 @@ Worker::~Worker() {
     thread_.wait();
 }
 
-void Worker::start(const JobOptions& jo_in, int liveDown) {
+void Worker::releaseCache() {
+    if (!running_) cache_.clear();
+}
+
+void Worker::start(const JobOptions& jo_in, int liveDown, bool quiet) {
     if (running_) return;
     running_ = true;
     cancel_.store(false);
     auto jo = std::make_shared<JobOptions>(jo_in);
     auto data = std::make_shared<JobResultData>();
     jo->stack.result = &data->result;
-    jo->cache = &cache_;
+    jo->cache = jo->stack.cache_frames ? &cache_ : nullptr;   // with the cache off the resident frames are left alone, just not used
     QObject* worker = new QObject();
     worker->moveToThread(&thread_);
     thread_.start();
-    QMetaObject::invokeMethod(worker, [this, jo, data, worker, liveDown] {
+    QMetaObject::invokeMethod(worker, [this, jo, data, worker, liveDown, quiet] {
         set_log([this](const std::string& s) { emit logLine(QString::fromStdString(s)); });
         Hooks hooks;
         hooks.cancel = &cancel_;
@@ -36,29 +41,33 @@ void Worker::start(const JobOptions& jo_in, int liveDown) {
         hooks.frame_down = std::max(1, liveDown);
         hooks.preview_every = liveDown >= 6 ? 3 : liveDown >= 3 ? 6 : 12;   // dearer previews, fewer of them
         hooks.progress = [this](const std::string& stage, double f) { emit progress(QString::fromStdString(stage), f); };
-        hooks.preview = [this](const std::string& name, const std::vector<float>& rgb, int w, int h) {
-            float gain = 1.f;
-            if (name.rfind("focus", 0) == 0) {   // the focus measure has no fixed scale: show it up to its 99th percentile
-                std::vector<float> v;
-                v.reserve((size_t)w * h / 4 + 1);
-                for (size_t i = 0; i < (size_t)w * h; i += 4) v.push_back(rgb[i * 3]);
-                if (!v.empty()) {
-                    size_t q = v.size() * 99 / 100;
-                    std::nth_element(v.begin(), v.begin() + q, v.end());
-                    gain = v[q] > 1e-9f ? 1.f / v[q] : 1.f;
+        if (!quiet) {
+            hooks.preview = [this](const std::string& name, const std::vector<float>& rgb, int w, int h) {
+                float gain = 1.f;
+                if (name.rfind("focus", 0) == 0) {   // the focus measure has no fixed scale: show it up to its 99th percentile
+                    std::vector<float> v;
+                    v.reserve((size_t)w * h / 4 + 1);
+                    for (size_t i = 0; i < (size_t)w * h; i += 4) v.push_back(rgb[i * 3]);
+                    if (!v.empty()) {
+                        size_t q = v.size() * 99 / 100;
+                        std::nth_element(v.begin(), v.begin() + q, v.end());
+                        gain = v[q] > 1e-9f ? 1.f / v[q] : 1.f;
+                    }
                 }
-            }
-            emit preview(QString::fromStdString(name), toQImage(rgb.data(), w, h, gain));
-        };
-        hooks.frame = [this](int k, const std::vector<float>& rgb, int w, int h) { emit frame(k, toQImage(rgb.data(), w, h)); };
+                emit preview(QString::fromStdString(name), toQImage(rgb.data(), w, h, gain));
+            };
+            hooks.frame = [this](int k, const std::vector<float>& rgb, int w, int h) { emit frame(k, toQImage(rgb.data(), w, h)); };
+        }
+        auto t0 = std::chrono::steady_clock::now();
         try {
             data->rc = run_job(*jo, data->align, hooks);
             data->reportJson = QString::fromStdString(report_json(jo->align, data->align));
-            data->outDir = QString::fromStdString(jo->stack.out);
+            data->outDir = QString::fromStdString(jo->stack.out.empty() ? jo->out : jo->stack.out);
         } catch (const std::exception& e) {
             emit logLine(QString("failed: %1").arg(e.what()));
             data->rc = 1;
         }
+        data->seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         set_log(nullptr);
         running_ = false;
         emit finished(data);

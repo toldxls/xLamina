@@ -4,6 +4,8 @@ qt_add_executable(xlamina WIN32
     mainwindow.cpp mainwindow.h
     imageview.cpp imageview.h
     worker.cpp worker.h
+    prefs.cpp prefs.h
+    benchmark.cpp benchmark.h
     xlamina.rc)
 # the window / taskbar icon, from the PNG sizes (PNG needs no image plugin)
 qt_add_resources(xlamina "icons" PREFIX "/" BASE "icon" FILES

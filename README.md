@@ -43,9 +43,28 @@ Smoothing (C) sets how much of C's weak detail is taken from B rather than from 
 sharpest frame: 0 is the raw selection (in flat areas it picks the noisiest frame),
 2 is about Helicon's Smoothing 1, 3 is Cn.
 
+Add comparison image… (File menu, or drop a file onto a finished render) loads another
+stacker's output as a tab beside xLamina's, so the two flip at the same zoom and position;
+PgUp / PgDown step through the tabs.
+
+Advanced (depth and composition), unticked by default, exposes the parameters of B's depth
+pipeline and of the composition (focus window and power, depth window, volume aggregation,
+refinement range and window, label softness, halo and dark priors) at their validated
+defaults, for one-at-a-time experiments against a 1:1 comparison.
+
+Performance holds the hardware settings: which GPUs, streams per GPU, reader threads,
+alignment pairs in flight, and whether the frames stay resident. None of them changes the
+result (B and C are bit-identical across all of them). Tools > Benchmark times the open
+stack, or a built-in synthetic one so machines can be compared, under each setting varied
+in turn and then the best of each combined, and applies the fastest; the report can be
+saved or copied.
+
 The frames are read once and kept pinned in host memory for the rest of the job (and, in
 the GUI, for the next render of the same folder), as long as they fit in about half the
 machine's RAM; the GPUs then pull them at their PCIe rate instead of the disk's.
+
+All settings, the window layout, the theme (View > Theme: dark, light or the system style)
+and the recent folders are kept in `%APPDATA%\xLamina\xLamina.ini`.
 
 The same engine runs from the command line:
 

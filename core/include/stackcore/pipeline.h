@@ -93,6 +93,7 @@ struct StackOptions {
     double halo_prior = 2.0, dark_prior = 1.0;   // B's depth priors (DepthParams); the validated defaults
     std::vector<std::string> outputs;  // which images to write / keep; empty = all
     bool cache_frames = true;          // keep the frames pinned in host memory between the passes (--cache 0: read every pass from disk)
+    bool write_outputs = true;         // false: compute everything (and fill `result`) but write no TIFFs (the GUI's benchmark)
     Hooks hooks;
     // results, filled when `result` is set
     struct Result {
@@ -103,6 +104,9 @@ struct StackOptions {
         std::vector<float> noise_mad;
         std::vector<uint8_t> icc;                 // the frames' ICC profile, embedded in the outputs
         double seconds = 0;
+        // where the time went (s): pass 1 (stream + merge + volume), depth, refinement, composition, finalize, writing
+        double pass1_seconds = 0, depth_seconds = 0, refine_seconds = 0, compose_seconds = 0, finalize_seconds = 0, write_seconds = 0;
+        double frames_per_second = 0;             // pass 1's streaming rate
     };
     Result* result = nullptr;
 };

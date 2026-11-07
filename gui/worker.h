@@ -17,6 +17,7 @@ struct JobResultData {
     QString reportJson;
     QString outDir;
     int rc = 0;
+    double seconds = 0;   // wall time of the whole job (alignment + fusion + writing)
 };
 
 class Worker : public QObject {
@@ -25,8 +26,11 @@ public:
     explicit Worker(QObject* parent = nullptr);
     ~Worker() override;
     bool running() const { return running_; }
-    void start(const stackcore::JobOptions& jo, int liveDown = 6);   // live views at 1/liveDown of the output
+    // live views at 1/liveDown of the output; quiet = no previews or frame views at all (the benchmark)
+    void start(const stackcore::JobOptions& jo, int liveDown = 6, bool quiet = false);
     void cancel() { cancel_.store(true); }
+    void releaseCache();                                 // frees the resident frames (when the cache is turned off)
+    const stackcore::FrameCache& cache() const { return cache_; }
 
 signals:
     void progress(QString stage, double fraction);

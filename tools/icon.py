@@ -1,10 +1,10 @@
-"""The xLamina icon: a stack of thin slabs (the frames), the middle one in
-focus in tyuyamunite yellow, with the name standing through the stack as a 3D
-column. The column's cross-section sits on every slab: sharp on the middle slab
-and on the top and bottom ones (the frames focused on the top and the bottom of
-the column), out of focus in between, and the column's sides in the gaps blur
-the same way. Writes the master SVGs and a preview sheet; rasterise with
-ImageMagick (librsvg renders the blur filters):
+"""The xLamina icon: a stack of five thin slabs (the frames) with the name on
+every one, as a focus stack sees it. The middle slab is in focus: a crisp purple
+xLamina. Above it the name is red and out of focus, blurrier on the top slab
+than on the second; below it blue, blurrier on the bottom slab than on the
+fourth. One light neutral slab colour carries all three inks. Writes the master
+SVGs and a preview sheet; rasterise with ImageMagick (librsvg renders the blur
+filters):
   python tools/icon.py gui/icon
   magick -background none -density 384 gui/icon/xlamina.svg -resize 256x256 gui/icon/xlamina-256.png   (64..256)
   magick -background none -density 384 gui/icon/xlamina_small.svg -resize 48x48 gui/icon/xlamina-48.png  (16..48, no text)
@@ -16,11 +16,13 @@ import math
 import os
 import sys
 
-Y, YE, G, GE, BG, INK = "#f0d027", "#b89b12", "#5a5a5a", "#3a3a3a", "#262626", "#262626"
-COL, COL_DIM = "#a88a14", "#7c6610"   # the column's sides (dark gold)
-W, D, O = 84, 11, 26                  # half-width, half-depth, perspective offset of a slab's top face
+BG = "#262626"
+SLAB, SLAB_EDGE = "#dcdcdc", "#a6a6a6"          # one neutral slab colour: red, blue and purple all read on it
+RED, BLUE, PURPLE = "#d6262c", "#2457d8", "#7a2fc9"
+W, D, O = 84, 11, 26                             # half-width, half-depth, perspective offset of a slab's top face
 SHEAR = math.degrees(math.atan(O / (2 * D)))
 FONT = 'font-family="Segoe UI, Arial, sans-serif" font-weight="600" font-size="31" letter-spacing="0.5"'
+SIGMA_END, SIGMA_MID = 3.0, 1.8                  # blur of the end slabs' text and of the two next to the middle
 
 
 def face(y, fill):
@@ -42,34 +44,30 @@ def blurred(body, sigma):
     return f'<g filter="url(#b{sigma:.1f})">{body}</g>'
 
 
+def ink(k):
+    """k: slab index, negative = above the middle (higher on screen)."""
+    return PURPLE if k == 0 else RED if k < 0 else BLUE
+
+
+def sigma(k):
+    return 0.0 if k == 0 else SIGMA_MID if abs(k) == 1 else SIGMA_END
+
+
 def icon(label=True, rounded=True, n=5, pitch=36, th=8):
     """n slabs, `pitch` px apart, `th` px thick; the middle one in focus."""
     half = n // 2
     bg = f'<rect width="256" height="256" rx="{40 if rounded else 0}" fill="{BG}"/>'
-    # focus: sharp on the middle slab and on the end slabs, out of focus in between
-    def sigma(h):   # h in slab units, signed
-        return 2.0 * math.sin(math.pi * min(abs(h), half) / half) if half else 0.0
-    sigmas = sorted({round(sigma(k + f), 1) for k in range(-half, half + 1) for f in (0.0, 0.5)} - {0.0})
+    sigmas = sorted({round(sigma(k), 1) for k in range(-half, half + 1)} - {0.0})
     defs = "<defs>" + "".join(
-        f'<filter id="b{s:.1f}" x="-30%" y="-60%" width="160%" height="220%"><feGaussianBlur stdDeviation="{s}"/></filter>'
+        f'<filter id="b{s:.1f}" x="-30%" y="-80%" width="160%" height="260%"><feGaussianBlur stdDeviation="{s}"/></filter>'
         for s in sigmas) + "</defs>"
     g = f'<g transform="translate(128,{128 + (th + 2 * D) // 2})">'
     body = ""
-    # bottom to top: slab, then the column's side in the gap above it, then the next slab over it
-    for k in range(half, -half - 1, -1):
+    for k in range(half, -half - 1, -1):   # bottom to top, so each slab paints over the one below
         y = k * pitch
-        mid = k == 0
-        body += face(y, Y if mid else G) + front(y, th, YE if mid else GE)
+        body += face(y, SLAB) + front(y, th, SLAB_EDGE)
         if label:
-            if k > -half:   # the column's side between this slab and the one above, laminated every 3 px
-                seg = "".join(text(y - j, COL if (j // 3) % 2 else COL_DIM, "xLamina") for j in range(1, pitch - D))
-                body += blurred(seg, sigma(k - 0.5))
-            # the name on the slab, over the column's base: ink on the slab in focus, yellow on the grey ones,
-            # faded where it is out of focus
-            s = sigma(k)
-            fill = INK if mid else Y
-            op = "" if s < 0.05 else ' opacity="0.75"'
-            body += blurred(f"<g{op}>{text(y, fill, 'xLamina')}</g>", s)
+            body += blurred(text(y, ink(k), "xLamina"), sigma(k))
     return bg + defs + g + body + "</g>"
 
 
