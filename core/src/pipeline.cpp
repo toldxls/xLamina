@@ -40,6 +40,20 @@ namespace fs = std::filesystem;
         cudaError_t e_ = (x);                                                                   \
         if (e_ != cudaSuccess) throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(e_)); \
     } while (0)
+// an allocation in the fusion: out of memory returns 4, which run_stack answers with a render at 1/4 depth resolution
+#define CK_MEM(x)                                                                               \
+    do {                                                                                        \
+        cudaError_t e_ = (x);                                                                   \
+        if (e_ == cudaErrorMemoryAllocation) {                                                  \
+            cudaGetLastError();                                                                 \
+            logf("GPU memory ran out (%s:%d)", __FILE__, __LINE__);                             \
+            return 4;                                                                           \
+        }                                                                                       \
+        if (e_ != cudaSuccess) {                                                                \
+            logf("CUDA error: %s (%s:%d)", cudaGetErrorString(e_), __FILE__, __LINE__);         \
+            return 1;                                                                           \
+        }                                                                                       \
+    } while (0)
 
 static LogFn g_log;
 void set_log(LogFn fn) { g_log = std::move(fn); }
@@ -395,8 +409,14 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         fold_measure(S.d_warp, fp, S.sc, f.stream);
         if (volume) {   // this frame's depth-resolution slices stay on this GPU until the aggregation
             size_t nb = (size_t)vp.dw * vp.dh * 2;
-            CK_THROW(cudaMallocAsync(&D.fm16[k], nb, f.stream));   // a failure here must stop the pass, not fault a kernel
-            CK_THROW(cudaMallocAsync(&D.lum16[k], nb, f.stream));
+            // a failure here must stop the pass, not fault a kernel; the streamer reports it and run_pass1 turns
+            // "out of memory" into the 1/4-resolution retry
+            CK_THROW(cudaMallocAsync(&D.fm16[k], nb, f.stream));
+            if (cudaError_t e = cudaMallocAsync(&D.lum16[k], nb, f.stream); e != cudaSuccess) {
+                cudaFreeAsync(D.fm16[k], f.stream);
+                D.fm16[k] = nullptr;
+                throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(e));
+            }
             volume_slice(S.d_warp, vp, S.vsc, D.fm16[k], D.lum16[k], f.stream);
         }
         if (view)   // the frame just aligned, small, for the GUI's frame view (delivered at the slot's next turn)
@@ -595,7 +615,11 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         D.st.free();
         cudaStreamDestroy(D.fold_s);
     }
-    return st.errors.empty() ? 0 : 1;
+    if (st.errors.empty()) return 0;
+    // a GPU that ran out of memory for the depth slices (the most likely place at 1/2 resolution): tell run_stack
+    // to render again at 1/4 instead of failing the job
+    for (auto& e : st.errors) if (strstr(e.c_str(), "out of memory")) return 4;
+    return 1;
 }
 
 // ----------------------------------------------------------------------------- stack: the whole pipeline
@@ -855,8 +879,8 @@ static int run_stack_once(StackOptions& so) {
             logf("depth: not enough GPU memory for the %.1f GB volume", nd * K * 6.0 / 1e9);
             return 4;   // run_stack retries at 1/4 resolution
         }
-        CK(cudaMalloc(&d_guide, no * sizeof(float)));
-        CK(cudaMalloc(&d_ga, nd * sizeof(float)));
+        CK_MEM(cudaMalloc(&d_guide, no * sizeof(float)));   // outlives this block: the smoothing and the finalize use it
+        CK_MEM(cudaMalloc(&d_ga, nd * sizeof(float)));
         dfree.p.push_back(d_ga);
         CK(cudaMemcpy(d_guide, P.guide.data(), no * sizeof(float), cudaMemcpyHostToDevice));
         CK(cudaMemcpy(d_ga, P.ga.data(), nd * sizeof(float), cudaMemcpyHostToDevice));
@@ -866,8 +890,8 @@ static int run_stack_once(StackOptions& so) {
             const int kc = std::max(1, std::min(K, (int)(((size_t)256 << 20) / (nd * sizeof(float)))));
             float* d_stage;
             void* d_stage16;
-            CK(cudaMalloc(&d_stage, (size_t)kc * nd * sizeof(float)));
-            CK(cudaMalloc(&d_stage16, (size_t)kc * nd * 2));
+            CK_MEM(cudaMalloc(&d_stage, (size_t)kc * nd * sizeof(float)));
+            if (cudaError_t e = cudaMalloc(&d_stage16, (size_t)kc * nd * 2); e != cudaSuccess) { cudaFree(d_stage); CK_MEM(e); }
             for (int k0 = 0; k0 < K; k0 += kc) {
                 int c = std::min(kc, K - k0);
                 CK(cudaMemcpyAsync(d_stage, P.V_all.data() + (size_t)k0 * nd, (size_t)c * nd * sizeof(float), cudaMemcpyHostToDevice, s));

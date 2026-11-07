@@ -589,6 +589,13 @@ std::vector<cd> wlstsq(int n, const std::vector<std::vector<std::pair<int, cd>>>
         for (int r = c + 1; r < m; ++r) if (std::abs(N[(size_t)r * m + c]) > std::abs(N[(size_t)piv * m + c])) piv = r;
         if (piv != c) { for (int k = 0; k < m; ++k) std::swap(N[(size_t)c * m + k], N[(size_t)piv * m + k]); std::swap(b[c], b[piv]); }
         cd d = N[(size_t)c * m + c];
+        if (!(std::abs(d) > 0.0) || !std::isfinite(std::abs(d))) {
+            // a zero pivot after partial pivoting: that unknown has no usable pair tying it to the rest (its
+            // row and column of N are zero), and dividing by it would spread NaN through every transform
+            int frame = -1;
+            for (int k = 0; k < n; ++k) if (k != fixed && col[k] == c) { frame = k; break; }
+            throw std::runtime_error("alignment: frame " + std::to_string(frame) + " has no usable pair connecting it to the stack");
+        }
         for (int r = c + 1; r < m; ++r) {
             cd f = N[(size_t)r * m + c] / d;
             if (f == cd(0, 0)) continue;
@@ -657,6 +664,9 @@ GlobalSolve solve_global(int n, const std::vector<PairResult>& pairs, int irls_r
     GlobalSolve g;
     g.z.resize(n); g.t = T;
     for (int k = 0; k < n; ++k) g.z[k] = std::exp(L[k]);
+    for (int k = 0; k < n; ++k)
+        if (!std::isfinite(g.z[k].real()) || !std::isfinite(g.z[k].imag()) || !std::isfinite(g.t[k].real()) || !std::isfinite(g.t[k].imag()))
+            throw std::runtime_error("alignment: the global solve gave a non-finite transform for frame " + std::to_string(k));
     g.inlier.resize(m);
     g.outliers = 0;
     for (size_t e = 0; e < m; ++e) { g.inlier[e] = nl[e] < 5 * sl && nt[e] < 5 * st; if (!g.inlier[e]) ++g.outliers; }

@@ -142,6 +142,7 @@ TiffInfo tiff_probe(const std::filesystem::path& path) {
         }
     }
     if (!t.width || !t.height || !t.samples) { t.error = "missing size tags"; return t; }
+    if (t.samples != 1 && t.samples != 3 && t.samples != 4) { t.error = "unsupported sample count " + std::to_string(t.samples); return t; }
     if (t.bits == 0) t.bits = 8;
     if (t.bits != 8 && t.bits != 16) { t.error = "unsupported bits " + std::to_string(t.bits); return t; }
     if (t.sample_format != 1) { t.error = "unsupported sample format"; return t; }

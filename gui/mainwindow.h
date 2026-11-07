@@ -119,6 +119,7 @@ private:
     QElapsedTimer elapsed_;
     QTimer tick_;
     QString stageText_;
+    QString progressStatus_;               // status-bar count for the per-frame stages ("Read 157 of 163 frames"), from the progress signal
     // the live view: the frame being processed is marked in the list (a tint, moved 4 times a second, never
     // the selection, which jumped about and ended on a random frame) and shown at most ~30 times a second
     QListWidgetItem* liveItem_ = nullptr;

@@ -1,4 +1,6 @@
 #include "stackcore/convert.h"
+#include <stdexcept>
+#include <string>
 
 namespace stackcore {
 namespace {
@@ -51,6 +53,9 @@ void launch(const uint8_t* src, const TiffInfo& info, float* dst, double* sum, c
 }  // namespace
 
 void convert_to_rgb_f32(const uint8_t* d_src, const TiffInfo& info, float* d_dst, double* d_sum, cudaStream_t s) {
+    // tiff_probe admits 1, 3 and 4 samples; anything else would read past the frame buffer at the wrong stride
+    if (info.samples != 1 && info.samples != 3 && info.samples != 4)
+        throw std::runtime_error("convert: unsupported sample count " + std::to_string(info.samples));
     if (info.bits == 16) {
         if (info.samples == 1) launch<16, 1>(d_src, info, d_dst, d_sum, s);
         else if (info.samples == 3) launch<16, 3>(d_src, info, d_dst, d_sum, s);

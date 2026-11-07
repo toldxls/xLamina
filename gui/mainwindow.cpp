@@ -627,6 +627,10 @@ void MainWindow::chooseFolder() {
 }
 
 void MainWindow::openFolder(const QString& dir) {
+    if (worker_.running()) {   // the running job refers to the list's rows (jobItems_, liveItem_, markedItem_)
+        statusBar()->showMessage("A render is running; open the folder when it has finished.", 4000);
+        return;
+    }
     QDir d(dir);
     QStringList files = d.entryList({"*.tif", "*.tiff", "*.TIF", "*.TIFF"}, QDir::Files, QDir::Name);
     if (files.size() < 2) {
@@ -641,6 +645,7 @@ void MainWindow::openFolder(const QString& dir) {
     flagged_.clear();
     dropFlagged_->setEnabled(false);
     frameList_->clear();
+    liveItem_ = markedItem_ = nullptr;   // the rows they pointed at are gone
     liveView_->hide();
     colorSpace_ = QColorSpace();
     // the stack is the TIFFs of the most common size; other files in the folder are listed greyed out
@@ -689,6 +694,10 @@ void MainWindow::openFolder(const QString& dir) {
     statusBar()->showMessage(note + " in " + QDir::toNativeSeparators(dir));
     for (int i = 0; i < frameList_->count(); ++i)
         if (frameList_->item(i)->data(Qt::UserRole).toInt() == frames_.size() / 2) { frameList_->setCurrentRow(i); break; }
+    // the middle frame is selected (shown in the viewer) but the list opens at its first frame: setCurrentRow
+    // scrolled it to the middle, and so did the list's deferred layout once the rows had their height
+    frameList_->scrollToTop();
+    QTimer::singleShot(0, frameList_, &QListWidget::scrollToTop);
     thumbs_.start(frames_, 144);
     recent_.removeAll(dir);
     recent_.prepend(dir);
@@ -783,12 +792,11 @@ void MainWindow::onFrame(int k, FloatImage rgb, int w, int h) {
     if (image.isNull()) return;
     lastView_.start();
     k = liveItem_->data(Qt::UserRole).toInt();   // the folder's frame
-    bool raw = stageText_.startsWith("reading");
     current_ = "frame";
     view_->setImage(forDisplay(image), true);
-    const QString& st = stageText_;
-    QString what = raw ? "Reading frame" : st.startsWith("pass 2") ? "Fine focus, frame" : st.startsWith("pass 3") ? "Composing, frame" : "Aligned frame";
-    statusBar()->showMessage(QString("%1 %2 of %3").arg(what).arg(k + 1).arg(frames_.size()));
+    // the count is the progress signal's (progressStatus_); the view only says which frame is on screen
+    QString name = k >= 0 && k < frames_.size() ? QFileInfo(frames_[k]).fileName() : QString();
+    statusBar()->showMessage(name.isEmpty() ? progressStatus_ : QString("%1 — on screen: %2").arg(progressStatus_, name));
 }
 
 void MainWindow::showFrame(int listRow) {
@@ -975,6 +983,20 @@ void MainWindow::onProgress(QString stage, double fraction) {
     stageText_ = stage;
     stage_->setText(QString("%1 — %2 s").arg(stage).arg(elapsed_.elapsed() / 1000.0, 0, 'f', 1));
     progress_->setValue((int)std::lround(std::clamp(fraction, 0.0, 1.0) * 1000));
+    // the frame count comes from here, not from the live view: the view is throttled and skips frames, so its
+    // last frame index stalled short of the total ("157 of 163"). Every progress call is delivered.
+    if (stage.startsWith("reading") || stage.startsWith("pass")) {
+        const int total = jobItems_.size();
+        const int n = (int)std::lround(std::clamp(fraction, 0.0, 1.0) * total);
+        const QString what = stage.startsWith("reading") ? "Read" : stage.startsWith("pass 1") ? "Aligned"
+                           : stage.startsWith("pass 2") ? "Fine-focused" : "Composed";
+        progressStatus_ = QString("%1 %2 of %3 frames").arg(what).arg(n).arg(total);
+    } else if (!stage.isEmpty()) {   // "aligning pairs" (a share of the pairs), "depth map", "finalize", "done"
+        progressStatus_ = stage;
+        progressStatus_[0] = progressStatus_[0].toUpper();
+        if (fraction > 0.0 && fraction < 1.0) progressStatus_ += QString(" — %1 %").arg((int)std::lround(fraction * 100));
+    }
+    statusBar()->showMessage(progressStatus_);
 }
 
 void MainWindow::onPreview(QString name, FloatImage rgb, int w, int h) {

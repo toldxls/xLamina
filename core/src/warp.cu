@@ -1,6 +1,7 @@
 ﻿#include "stackcore/warp.h"
 
 #include <cmath>
+#include <stdexcept>
 
 namespace stackcore {
 
@@ -57,7 +58,14 @@ __device__ __forceinline__ void cubic_weights(float x, float* c) {
 
 __device__ __forceinline__ int reflect(int p, int len) {   // cv::borderInterpolate, BORDER_REFLECT
     if (len == 1) return 0;
-    while ((unsigned)p >= (unsigned)len) p = p < 0 ? -p - 1 : 2 * len - 1 - p;
+    if ((unsigned)p >= (unsigned)len) {
+        // the reflection is periodic in 2 len: one modulo instead of OpenCV's loop, which runs ~|p| / len
+        // times and would hold the kernel past the 2 s TDR for a position far outside the frame
+        int per = 2 * len;
+        p %= per;
+        if (p < 0) p += per;
+        if (p >= len) p = per - 1 - p;
+    }
     return p;
 }
 
@@ -157,6 +165,8 @@ void load_aligned(const float* d_frame, const Grid& g, const Similarity& T, floa
                   bool quantize, cudaStream_t s) {
     double M[6];
     affine_for(T, g, M);
+    for (double v : M)
+        if (!std::isfinite(v)) throw std::runtime_error("load_aligned: the frame's transform is not finite");
     const float* src = d_frame;
     int sw = g.W, sh = g.H;
     if (g.scale != 1.0) {

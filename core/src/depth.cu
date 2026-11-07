@@ -239,7 +239,9 @@ __global__ void k_sgm_pass(const float* __restrict__ C, const float* __restrict_
         int nx = dx > 0 ? W - x0 : x0 + 1, ny = dy > 0 ? H - y0 : y0 + 1;
         n = min(nx, ny);
     }
-    if (k == 0) { prev[0] = INFINITY; prev[MAXK + 1] = INFINITY; }
+    // guards below label 0 and above label K-1. prev[K + 1] must be set here: when K is a multiple of 32 the block
+    // has exactly K threads, so no thread k >= K exists to write it in the loop (stale shared memory otherwise)
+    if (k == 0) { prev[0] = INFINITY; prev[K + 1] = INFINITY; prev[MAXK + 1] = INFINITY; }
     float pm = 0.f;
     int x = x0, y = y0;
     for (int t = 0; t < n; ++t, x += dx, y += dy) {
