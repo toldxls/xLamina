@@ -7,17 +7,7 @@
 
 namespace stackcore {
 
-PinnedPool::PinnedPool(size_t bytes_per_buffer, int count) : bytes_(bytes_per_buffer) {
-    for (int i = 0; i < count; ++i) {
-        void* p = nullptr;
-        cudaError_t e = cudaHostAlloc(&p, bytes_, cudaHostAllocPortable);
-        if (e != cudaSuccess)
-            throw std::runtime_error("cudaHostAlloc(" + std::to_string(bytes_) + " x " + std::to_string(i + 1) + "): " +
-                                     cudaGetErrorString(e));
-        all_.push_back((uint8_t*)p);
-        free_.push_back((uint8_t*)p);
-    }
-}
+PinnedPool::PinnedPool(size_t bytes_per_buffer, int count) : bytes_(bytes_per_buffer), count_(count) {}
 
 PinnedPool::~PinnedPool() {
     for (auto p : all_) cudaFreeHost(p);
@@ -25,6 +15,22 @@ PinnedPool::~PinnedPool() {
 
 uint8_t* PinnedPool::acquire() {
     std::unique_lock<std::mutex> lk(m_);
+    if (free_.empty() && (int)all_.size() + allocating_ < count_) {   // pin one more, up to the ring's size
+        ++allocating_;
+        lk.unlock();
+        void* p = nullptr;
+        cudaError_t e = cudaHostAlloc(&p, bytes_, cudaHostAllocPortable);
+        lk.lock();
+        --allocating_;
+        if (e != cudaSuccess) {
+            count_ = (int)all_.size();   // no more pinning; callers wait for what exists
+            cv_.notify_all();
+            if (all_.empty()) throw std::runtime_error("cudaHostAlloc(" + std::to_string(bytes_) + "): " + cudaGetErrorString(e));
+        } else {
+            all_.push_back((uint8_t*)p);
+            return (uint8_t*)p;
+        }
+    }
     cv_.wait(lk, [&] { return !free_.empty(); });
     uint8_t* p = free_.back();
     free_.pop_back();

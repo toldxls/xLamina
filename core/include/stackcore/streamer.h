@@ -12,6 +12,7 @@
 #include <functional>
 #include <vector>
 
+#include "stackcore/frame_cache.h"
 #include "stackcore/tiff.h"
 
 namespace stackcore {
@@ -37,6 +38,7 @@ struct StreamerOptions {
     int readers = 16;
     int pool = 0;                  // pinned buffers; 0 = readers + 2 * streams * gpus
     std::atomic<bool>* cancel = nullptr;   // when set, readers stop taking frames and the pass ends early
+    FrameCache* cache = nullptr;           // resident frames: uploaded from here; frames read this pass join it while its budget lasts
 };
 
 struct StreamerStats {
@@ -46,6 +48,8 @@ struct StreamerStats {
     std::vector<int> frames_per_device;
     double read_ms_sum = 0;        // summed over frames (reader-thread time)
     int unbuffered = 0;            // frames read with FILE_FLAG_NO_BUFFERING
+    int from_cache = 0;            // frames uploaded from resident memory (no read)
+    int to_cache = 0;              // frames read into the cache this pass
     std::vector<std::string> errors;
 };
 

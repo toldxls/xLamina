@@ -13,7 +13,7 @@ namespace stackcore {
 
 class PinnedPool {
 public:
-    PinnedPool(size_t bytes_per_buffer, int count);   // cudaHostAllocPortable: usable by every device
+    PinnedPool(size_t bytes_per_buffer, int count);   // cudaHostAllocPortable: usable by every device; pinned on first use
     ~PinnedPool();
     PinnedPool(const PinnedPool&) = delete;
     PinnedPool& operator=(const PinnedPool&) = delete;
@@ -21,10 +21,12 @@ public:
     uint8_t* acquire();          // blocks until a buffer is free
     void release(uint8_t* p);
     size_t bytes() const { return bytes_; }
-    int count() const { return (int)all_.size(); }
+    int count() const { return count_; }
 
 private:
     size_t bytes_;
+    int count_;
+    int allocating_ = 0;   // buffers being pinned outside the lock
     std::vector<uint8_t*> all_, free_;
     std::mutex m_;
     std::condition_variable cv_;

@@ -8,6 +8,7 @@
 #include <atomic>
 #include <memory>
 
+#include "stackcore/frame_cache.h"
 #include "stackcore/pipeline.h"
 
 struct JobResultData {
@@ -38,6 +39,7 @@ private:
     QThread thread_;
     std::atomic<bool> cancel_{false};
     bool running_ = false;
+    stackcore::FrameCache cache_;   // the stack stays pinned in host memory between runs (FINDINGS 26)
 };
 
 // Reads the frames one by one on a thread and emits a thumbnail of each.

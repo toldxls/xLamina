@@ -24,6 +24,13 @@ ImageView::ImageView(QWidget* parent) : QGraphicsView(parent) {
 // show the same area at the same on-screen size) until the view is fitted again.
 void ImageView::setImage(const QImage& img, bool keepView) {
     bool keep = keepView && !fitted_ && !image_.isNull() && !img.isNull();
+    if (keep && img.size() == image_.size()) {
+        // same pixel grid (frame vs frame, output vs output): swap the pixels and leave the
+        // transform and scroll position untouched, so comparing by clicking is pixel-exact
+        image_ = img;
+        item_->setPixmap(QPixmap::fromImage(img));
+        return;
+    }
     QPointF frac;
     double shownWidth = 0;
     if (keep) {

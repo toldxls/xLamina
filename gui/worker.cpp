@@ -24,6 +24,7 @@ void Worker::start(const JobOptions& jo_in, int liveDown) {
     auto jo = std::make_shared<JobOptions>(jo_in);
     auto data = std::make_shared<JobResultData>();
     jo->stack.result = &data->result;
+    jo->cache = &cache_;
     QObject* worker = new QObject();
     worker->moveToThread(&thread_);
     thread_.start();

@@ -26,6 +26,7 @@ struct Ready {
     uint8_t* buf;
     size_t offset;   // pixel data offset inside buf
     size_t bytes;
+    bool pooled;     // buf belongs to the ring (release after the upload); else to the cache
 };
 
 struct Queue {
@@ -91,29 +92,51 @@ StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, con
 
     // readers
     std::vector<std::thread> readers;
+    std::atomic<bool> readers_failed{false};   // a reader hit a fatal error (pinning): the pass ends early, reported in errors
     for (int r = 0; r < R; ++r)
         readers.emplace_back([&] {
+          try {
             for (;;) {
-                if (opt.cancel && opt.cancel->load()) break;
+                if ((opt.cancel && opt.cancel->load()) || readers_failed.load()) break;
                 int k = next++;
                 if (k >= N) break;
                 if (!infos[k].ok()) continue;
-                uint8_t* buf = pool.acquire();
+                if (opt.cache) {
+                    if (const FrameCache::Entry* e = opt.cache->find(paths[k])) {   // resident: no read
+                        { std::lock_guard<std::mutex> lk(stat_m); ++st.from_cache; st.bytes += e->bytes; }
+                        q.push({k, e->buf, e->offset, e->bytes, false});
+                        continue;
+                    }
+                }
+                uint8_t* buf = opt.cache ? opt.cache->reserve(cap) : nullptr;
+                const bool pooled = buf == nullptr;
+                if (pooled) buf = pool.acquire();
                 TiffRead rd = tiff_read_pixels(paths[k], infos[k], buf, cap);
                 if (!rd.ok()) {
                     std::lock_guard<std::mutex> lk(stat_m);
                     st.errors.push_back(paths[k].filename().string() + ": " + rd.error);
-                    pool.release(buf);
+                    if (pooled) pool.release(buf); else opt.cache->unreserve(buf, cap);
                     continue;
+                }
+                Ready ready{k, buf, rd.data_offset_in_buf, rd.bytes, pooled};
+                if (!pooled) {   // the cache may hand back an earlier copy of the same path (and free ours)
+                    const FrameCache::Entry* e = opt.cache->insert(paths[k], buf, cap, rd.data_offset_in_buf, rd.bytes);
+                    ready.buf = e->buf; ready.offset = e->offset; ready.bytes = e->bytes;
                 }
                 {
                     std::lock_guard<std::mutex> lk(stat_m);
                     st.read_ms_sum += rd.ms;
                     st.unbuffered += rd.unbuffered;
                     st.bytes += rd.bytes;
+                    if (!pooled) ++st.to_cache;
                 }
-                q.push({k, buf, rd.data_offset_in_buf, rd.bytes});
+                q.push(ready);
             }
+          } catch (const std::exception& e) {   // e.g. the ring could not pin a buffer: stop reading, keep the workers draining
+            std::lock_guard<std::mutex> lk(stat_m);
+            st.errors.push_back(std::string("reader: ") + e.what());
+            readers_failed = true;
+          }
         });
 
     // one worker thread per GPU, S streams each
@@ -138,15 +161,15 @@ StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, con
                 Ready r;
                 while (q.pop(r)) {
                     int j = n++ % S;
-                    if (pending[j]) {               // the upload from S frames ago must be done
+                    if (n > S) {                    // the upload from S frames ago must be done (S frames in flight)
                         CK(cudaEventSynchronize(uploaded[j]));
-                        pool.release(pending[j]);
+                        if (pending[j]) pool.release(pending[j]);
                         pending[j] = nullptr;
                     }
                     // the stream orders this copy after the previous frame's kernels on dbuf[j]
                     CK(cudaMemcpyAsync(dbuf[j], r.buf + r.offset, r.bytes, cudaMemcpyHostToDevice, streams[j]));
                     CK(cudaEventRecord(uploaded[j], streams[j]));
-                    pending[j] = r.buf;
+                    pending[j] = r.pooled ? r.buf : nullptr;   // a cache buffer stays where it is
                     DeviceFrame f{r.k, devs[di], j, streams[j], dbuf[j], &infos[r.k]};
                     on_frame(f);
                     CK(cudaGetLastError());
@@ -165,7 +188,7 @@ StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, con
                 // has to drain the queue so readers never block on a full pool
                 if (--live_workers == 0) {
                     Ready r;
-                    while (q.pop(r)) pool.release(r.buf);
+                    while (q.pop(r)) if (r.pooled) pool.release(r.buf);
                 }
                 return;
             }

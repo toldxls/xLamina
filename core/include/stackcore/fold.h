@@ -6,7 +6,11 @@
 //   A   weighted average:  a_num += (fm + 1e-9)^(power/2) * img,  a_den += w   (double)
 //   B0  per-pixel argmax of the focus measure: b_best / b_idx / b_col, b_fmsum (double)
 //   C   Laplacian pyramid: per level keep the coefficient with the highest 3x3
-//       luma energy, remember its frame; base level summed (double)
+//       luma energy, remember its frame; base level summed (double). With
+//       c_radius > 0 the energy of levels >= 1 is first aggregated spatially
+//       (Gaussian, sigma c_radius / 2^level), so a strong edge's frame wins the
+//       band beside it instead of the defocus rims of that edge from frames
+//       far away (FINDINGS 25).
 //   noise reference: the lowest frame index seen, its per-level MAD and median fm
 //
 // Ties break toward the lower frame index, so the merged result does not
@@ -29,6 +33,7 @@ struct FoldParams {
     int levels = 0;        // pyramid levels, fusion.n_levels(w, h)
     float radius = 3.0f;   // focus-measure blur sigma in OUTPUT px (radius_px * scale, >= 0.8)
     float power = 4.0f;    // A weight exponent
+    float c_radius = 0.f;  // C's energy aggregation sigma in OUTPUT px at level 0 (halved per level); 0 = off
 };
 
 inline int n_levels(int w, int h, int top = 32) {
@@ -78,7 +83,8 @@ struct FoldScratch {
     std::vector<float*> lap;   // levels-1 Laplacian levels, x3 (top level = g[levels-1])
     std::vector<float*> sal;   // levels-1 salience maps
     DevGaussian g_small, g_big;
-    void alloc(int w, int h, int levels, float radius);
+    std::vector<DevGaussian> g_c;   // per level, C's energy aggregation (empty when c_radius == 0)
+    void alloc(int w, int h, int levels, float radius, float c_radius = 0.f);
     void free();
     size_t bytes() const;
 };

@@ -171,7 +171,7 @@ size_t FoldState::bytes() const {
     return b + (size_t)shapes.back().w * shapes.back().h * 24;
 }
 
-void FoldScratch::alloc(int w_, int h_, int levels_, float radius) {
+void FoldScratch::alloc(int w_, int h_, int levels_, float radius, float c_radius) {
     w = w_; h = h_; levels = levels_;
     shapes = pyramid_shapes(w, h, levels);
     size_t n = (size_t)w * h;
@@ -190,6 +190,10 @@ void FoldScratch::alloc(int w_, int h_, int levels_, float radius) {
     }
     g_small.build(0.8);
     g_big.build(radius);
+    if (c_radius > 0.f) {
+        g_c.resize(levels);
+        for (int l = 1; l < levels - 1; ++l) g_c[l].build(std::max(0.5, (double)c_radius / (1 << l)));
+    }
 }
 
 void FoldScratch::free() {
@@ -200,6 +204,8 @@ void FoldScratch::free() {
     g.clear(); lap.clear(); sal.clear();
     g_small.free();
     g_big.free();
+    for (auto& k : g_c) k.free();
+    g_c.clear();
 }
 
 size_t FoldScratch::bytes() const {
@@ -231,6 +237,9 @@ void fold_measure(const float* d_img, const FoldParams& p, FoldScratch& sc, cuda
         auto a = sc.shapes[l], b = sc.shapes[l + 1];
         lap_level_rgb(gl, sc.g[l + 1], b.w, b.h, sc.lap[l], a.w, a.h, s);
         salience3(sc.lap[l], a.w, a.h, sc.sal[l], s);
+        // aggregate the energy so the frame of a strong edge owns the band beside it (c_radius):
+        // level 0 is left alone, its selection in such bands is noise that the smoothing gate handles
+        if (p.c_radius > 0.f && l >= 1) gaussian_blur(sc.sal[l], sc.sal[l], sc.t1, a.w, a.h, sc.g_c[l], s);
         gl = sc.g[l + 1];
     }
 }

@@ -3,6 +3,7 @@
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDir>
+#include <QMenu>
 #include <QDockWidget>
 #include <QDragEnterEvent>
 #include <QDropEvent>
@@ -120,11 +121,19 @@ void MainWindow::buildUi() {
     frameList_ = new QListWidget;
     frameList_->setAlternatingRowColors(true);
     frameList_->setIconSize(QSize(144, 96));
+    // uniform sizes are needed for speed (without them the live view's setCurrentRow re-measures every
+    // thumbnail row three times per frame: a 17 s fusion took 111 s), so every item, frame or left-out
+    // file, gets the same explicit row height in openFolder; mixed heights made the rows overlap
     frameList_->setUniformItemSizes(true);
-    frameList_->setToolTip("The stack's frames. Click one to see it at full resolution; greyed files are not part of the stack.");
+    frameList_->setDragDropMode(QAbstractItemView::InternalMove);   // drag to reorder: the list order is the stack order
+    frameList_->setDefaultDropAction(Qt::MoveAction);
+    frameList_->setContextMenuPolicy(Qt::CustomContextMenu);
+    frameList_->setToolTip("The stack's frames, in stack order: drag to reorder, right-click to add a frame again or move it.\n"
+                           "Click one to see it at full resolution; greyed files are not part of the stack.");
     frames->setWidget(frameList_);
     addDockWidget(Qt::LeftDockWidgetArea, frames);
     connect(frameList_, &QListWidget::currentRowChanged, this, &MainWindow::showFrame);
+    connect(frameList_, &QListWidget::customContextMenuRequested, this, &MainWindow::frameMenu);
 
     // ---- right: parameters
     QDockWidget* params = new QDockWidget("Render", this);
@@ -172,6 +181,28 @@ void MainWindow::buildUi() {
     smoothing_->setToolTip("Smoothing of C: detail weaker than this many times the noise is taken from B instead of the sharpest frame.\n"
                            "0 = raw selection (noisiest), 2 is about Helicon's Smoothing 1, 3 equals Cn.");
     fl->addRow("Smoothing (C)", smoothing_);
+    cradius_ = new QDoubleSpinBox;
+    cradius_->setRange(0, 200);
+    cradius_->setSingleStep(4);
+    cradius_->setDecimals(0);
+    cradius_->setSuffix(" px");
+    cradius_->setValue(32);
+    cradius_->setToolTip("Radius of C: each frame's pyramid energy is aggregated over this many sensor pixels before the\n"
+                         "sharpest frame is chosen, so the frame of a strong edge also wins the band beside it. Stops the\n"
+                         "defocus rims of plate edges being taken from frames far away as ghost outlines.\n"
+                         "0 = raw selection. Larger values lose small features that sit near a stronger edge at another depth.");
+    fl->addRow("Radius (C)", cradius_);
+    bradius_ = new QDoubleSpinBox;
+    bradius_->setRange(0, 200);
+    bradius_->setSingleStep(4);
+    bradius_->setDecimals(0);
+    bradius_->setSuffix(" px");
+    bradius_->setValue(0);
+    bradius_->setToolTip("Radius of B: each frame's focus slice is blurred over this many sensor pixels before the depth map\n"
+                         "is solved, so the frame of a strong edge also claims the band beside it instead of the defocus rims\n"
+                         "of that edge from frames far away. 0 = off (the validated depth pipeline). Larger values lose the\n"
+                         "depth of small features that sit near a stronger edge at another depth.");
+    fl->addRow("Radius (B)", bradius_);
     fov_ = new QDoubleSpinBox;
     fov_->setRange(0, 1000);
     fov_->setDecimals(4);
@@ -228,15 +259,14 @@ void MainWindow::chooseFolder() {
 void MainWindow::openFolder(const QString& dir) {
     QDir d(dir);
     QStringList files = d.entryList({"*.tif", "*.tiff", "*.TIF", "*.TIFF"}, QDir::Files, QDir::Name);
-    if (files.size() < 3) {
-        QMessageBox::warning(this, "xLamina", QString("%1\n\nholds %2 TIFF files; a stack needs at least 3.").arg(dir).arg(files.size()));
+    if (files.size() < 2) {
+        QMessageBox::warning(this, "xLamina", QString("%1\n\nholds %2 TIFF files; a stack needs at least 2.").arg(dir).arg(files.size()));
         return;
     }
     thumbs_.stop();
     folder_ = dir;
     frames_.clear();
-    frameRows_.clear();
-    jobFrames_.clear();
+    jobItems_.clear();
     flagged_.clear();
     dropFlagged_->setEnabled(false);
     frameList_->clear();
@@ -259,9 +289,9 @@ void MainWindow::openFolder(const QString& dir) {
     for (int i = 0; i < files.size(); ++i) {
         bool ok = infos[i].ok() && infos[i].width == best.first && infos[i].height == best.second;
         QListWidgetItem* it = new QListWidgetItem(files[i]);
+        it->setSizeHint(QSize(0, frameList_->iconSize().height() + 6));   // the same for every row (uniform sizes)
         if (ok) {
             frames_ << d.filePath(files[i]);
-            frameRows_ << i;
             it->setIcon(blank);   // holds the row height until the thumbnail arrives
             it->setFlags(it->flags() | Qt::ItemIsUserCheckable);
             it->setCheckState(Qt::Checked);
@@ -291,8 +321,52 @@ void MainWindow::openFolder(const QString& dir) {
 }
 
 void MainWindow::onThumbnail(int index, QImage image) {
-    if (index < 0 || index >= frameRows_.size()) return;
-    frameList_->item(frameRows_[index])->setIcon(QIcon(QPixmap::fromImage(forDisplay(image))));
+    if (index < 0 || index >= frames_.size()) return;
+    QIcon icon(QPixmap::fromImage(forDisplay(image)));
+    for (int r = 0; r < frameList_->count(); ++r)   // every row showing this frame (a frame can be listed more than once)
+        if (frameList_->item(r)->data(Qt::UserRole).toInt() == index) frameList_->item(r)->setIcon(icon);
+}
+
+// Right-click on a frame: add it to the stack again (Helicon's "add the same photo twice"), remove a
+// copy, or move it; the list order is the stack order, so "move to top" makes it the first frame.
+void MainWindow::frameMenu(const QPoint& pos) {
+    QListWidgetItem* it = frameList_->itemAt(pos);
+    if (!it || worker_.running()) return;
+    int idx = it->data(Qt::UserRole).toInt();
+    if (idx < 0) return;
+    int copies = 0;
+    for (int r = 0; r < frameList_->count(); ++r) if (frameList_->item(r)->data(Qt::UserRole).toInt() == idx) ++copies;
+    QMenu menu(this);
+    QAction* again = menu.addAction("Add this frame again (after this one)");
+    QAction* remove = menu.addAction("Remove this copy");
+    remove->setEnabled(copies > 1);
+    menu.addSeparator();
+    QAction* top = menu.addAction("Move to top (first frame)");
+    QAction* bottom = menu.addAction("Move to bottom (last frame)");
+    QAction* reverse = menu.addAction("Reverse the whole order");
+    QAction* chosen = menu.exec(frameList_->viewport()->mapToGlobal(pos));
+    if (!chosen) return;
+    int row = frameList_->row(it);
+    if (chosen == again) {
+        QListWidgetItem* c = new QListWidgetItem(QFileInfo(frames_[idx]).fileName() + "  (again)");
+        c->setSizeHint(it->sizeHint());
+        c->setIcon(it->icon());
+        c->setFlags(it->flags());
+        c->setCheckState(Qt::Checked);
+        c->setData(Qt::UserRole, idx);
+        c->setToolTip("A second copy of this frame in the stack. Right-click to remove it.");
+        frameList_->insertItem(row + 1, c);
+    } else if (chosen == remove) {
+        delete frameList_->takeItem(row);
+    } else if (chosen == top || chosen == bottom) {
+        QListWidgetItem* moved = frameList_->takeItem(row);
+        frameList_->insertItem(chosen == top ? 0 : frameList_->count(), moved);
+        frameList_->setCurrentItem(moved);
+    } else if (chosen == reverse) {
+        QList<QListWidgetItem*> items;
+        while (frameList_->count()) items.prepend(frameList_->takeItem(0));
+        for (QListWidgetItem* i : items) frameList_->addItem(i);
+    }
 }
 
 // The live view: while frames stream (reading, pass 1 forward, pass 2 backward,
@@ -300,10 +374,11 @@ void MainWindow::onThumbnail(int index, QImage image) {
 // reading, so the stack's wobble is visible, then warped onto the output grid)
 // and the right pane what is being built from them.
 void MainWindow::onFrame(int k, QImage image) {
-    if (k < 0 || k >= jobFrames_.size()) return;
-    k = jobFrames_[k];   // the job's frame -> the folder's frame
+    if (k < 0 || k >= jobItems_.size()) return;
+    QListWidgetItem* item = jobItems_[k];   // the job's frame -> its row (rows may have been reordered or duplicated)
+    k = item->data(Qt::UserRole).toInt();   // the folder's frame
     selecting_ = true;
-    frameList_->setCurrentRow(frameRows_[k]);
+    frameList_->setCurrentItem(item);
     selecting_ = false;
     bool raw = stage_->text().startsWith("reading");
     current_ = "frame";
@@ -317,10 +392,12 @@ void MainWindow::showFrame(int listRow) {
     if (selecting_ || listRow < 0 || listRow >= frameList_->count() || worker_.running()) return;
     int row = frameList_->item(listRow)->data(Qt::UserRole).toInt();
     if (row < 0 || row >= frames_.size()) return;
-    // the source frame at full resolution, read on a thread; the icon stands in meanwhile
+    // the source frame at full resolution, read on a thread. The image on screen stays until it
+    // arrives (showing the thumbnail meanwhile pixelated the view and moved it, which made
+    // frame-to-frame comparison impossible); only an empty view gets the thumbnail
     pendingFrame_ = row;
     QIcon icon = frameList_->item(listRow)->icon();
-    if (!icon.isNull()) { current_ = "frame"; view_->setImage(icon.pixmap(icon.availableSizes().value(0)).toImage(), true); }
+    if (view_->image().isNull() && !icon.isNull()) { current_ = "frame"; view_->setImage(icon.pixmap(icon.availableSizes().value(0)).toImage(), false); }
     statusBar()->showMessage(QString("%1 — loading at full resolution…").arg(QFileInfo(frames_[row]).fileName()));
     frameLoader_.start({frames_[row]}, 1 << 20);
 }
@@ -337,14 +414,17 @@ void MainWindow::render() {
     if (worker_.running()) return;
     JobOptions jo;
     jo.align.dir = folder_.toStdWString();
-    // the ticked frames only
-    jobFrames_.clear();
-    for (int i = 0; i < frames_.size(); ++i)
-        if (frameList_->item(frameRows_[i])->checkState() == Qt::Checked) {
-            jobFrames_ << i;
-            jo.align.paths.push_back(frames_[i].toStdWString());
+    // the ticked frames, in list order (the list may have been reordered, and a frame may appear more than once)
+    jobItems_.clear();
+    for (int r = 0; r < frameList_->count(); ++r) {
+        QListWidgetItem* it = frameList_->item(r);
+        int idx = it->data(Qt::UserRole).toInt();
+        if (idx >= 0 && it->checkState() == Qt::Checked) {
+            jobItems_ << it;
+            jo.align.paths.push_back(frames_[idx].toStdWString());
         }
-    if (jobFrames_.size() < 3) { QMessageBox::information(this, "xLamina", "A stack needs at least 3 ticked frames."); return; }
+    }
+    if (jobItems_.size() < 2) { QMessageBox::information(this, "xLamina", "A stack needs at least 2 ticked frames."); return; }
     jo.align.ref_rule = ref_->currentIndex() == 0 ? "middle" : ref_->currentIndex() == 1 ? "first" : "last";
     jo.align.lock_scale = lockScale_->isChecked();
     if (fov_->value() > 0) jo.align.um_per_px = -fov_->value();
@@ -352,6 +432,8 @@ void MainWindow::render() {
     jo.stack.po.opt.streams_per_gpu = 2;
     jo.stack.streams = 2;
     jo.stack.c_smoothing = smoothing_->value();
+    jo.stack.po.c_radius_px = cradius_->value();
+    jo.stack.po.b_radius_px = bradius_->value();
     jo.stack.outputs.clear();
     for (const char* n : kOutputs) if (outputs_[n]->isChecked()) jo.stack.outputs.push_back(n);
     if (jo.stack.outputs.empty()) { QMessageBox::information(this, "xLamina", "Choose at least one output."); return; }
@@ -428,7 +510,7 @@ void MainWindow::setStatusGeometry(const JobResultData& d) {
 void MainWindow::labelWobble(const stackcore::AlignOut& A) {
     flagged_.clear();
     int n = (int)A.T.size();
-    if (n != jobFrames_.size() || n < 2) return;
+    if (n != jobItems_.size() || n < 2) return;
     QVector<double> step(n, 0.0), sstep(n, 0.0), rstep(n, 0.0);
     for (int k = 1; k < n; ++k) {
         const Similarity &a = A.T[k - 1], &b = A.T[k];
@@ -449,8 +531,8 @@ void MainWindow::labelWobble(const stackcore::AlignOut& A) {
     double worst = 0;
     int worstk = -1;
     for (int k = 0; k < n; ++k) {
-        QListWidgetItem* it = frameList_->item(frameRows_[jobFrames_[k]]);
-        QString name = QFileInfo(frames_[jobFrames_[k]]).fileName();
+        QListWidgetItem* it = jobItems_[k];
+        QString name = QFileInfo(frames_[it->data(Qt::UserRole).toInt()]).fileName();
         if (k == 0) {
             it->setText(name + "\nfirst frame");
         } else {
@@ -464,8 +546,8 @@ void MainWindow::labelWobble(const stackcore::AlignOut& A) {
                            .arg(std::atan2(A.T[k].zi, A.T[k].zr) * kDeg, 0, 'f', 4)
                            .arg(step[k], 0, 'f', 3).arg(sstep[k], 0, 'f', 4).arg(rstep[k], 0, 'f', 4)
                            .arg(flag ? QString("\nFLAGGED: above %1 px (median %2 px)").arg(thr, 0, 'f', 2).arg(med, 0, 'f', 2) : ""));
-        if (flag) flagged_ << jobFrames_[k];
-        if (step[k] > worst) { worst = step[k]; worstk = jobFrames_[k]; }
+        if (flag) flagged_ << it;
+        if (step[k] > worst) { worst = step[k]; worstk = it->data(Qt::UserRole).toInt(); }
     }
     wobble_ = QString("wobble: median step %1 px, largest %2 px (%3), %4 flagged")
                   .arg(med, 0, 'f', 2).arg(worst, 0, 'f', 2).arg(worstk >= 0 ? QFileInfo(frames_[worstk]).fileName() : "-").arg(flagged_.size());
@@ -473,7 +555,7 @@ void MainWindow::labelWobble(const stackcore::AlignOut& A) {
 }
 
 void MainWindow::dropFlagged() {
-    for (int i : flagged_) frameList_->item(frameRows_[i])->setCheckState(Qt::Unchecked);
+    for (QListWidgetItem* it : flagged_) it->setCheckState(Qt::Unchecked);
     statusBar()->showMessage(QString("%1 frame%2 unticked; press Render to stack without them.").arg(flagged_.size()).arg(flagged_.size() == 1 ? "" : "s"));
     flagged_.clear();
     dropFlagged_->setEnabled(false);

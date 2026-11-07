@@ -789,8 +789,163 @@ Colour: the frames carry an Adobe RGB ICC profile; the outputs now embed it
 and the GUI converts to sRGB for display (`QColorSpace`), which was the "far
 off" colour. The remaining difference to Helicon is its tone curve (§10).
 
+## 25. C's ghost outlines are defocus rims from far frames; the C radius (2026-11-06)
+
+Travis: the plate edges in C (and H, CB, CBn, Cn, which share C's selection)
+carry doubled rims and parallel "outlines" 10–40 px outside the true edge, and
+"needles" inside the plate that are not real. Checked on the top edge of the
+lower-left plate (output px 1400–2000 × 3050–3350) by re-doing C's per-level
+argmax on the warped source frames and dumping the chosen frame per level:
+
+- The edge itself is chosen from frames ≈ 85 at every level.
+- The band 5–40 px outside the edge, in the dark background, is chosen from
+  **frames 120–140 at levels 2–4**: 40–50 frames away. As the camera moves away
+  the plate's defocus disc grows outward, so a background pixel at distance r
+  from the edge always has its strongest mid-scale energy in whichever far
+  frame puts the rim of that disc on it. Max-energy selection cannot tell a
+  rim from an edge. Level 0 in the band is noise (random frames).
+- Cross-level consistency (coarse levels forced to agree with the fine ones)
+  does nothing: the fine levels there are noise or the same rim.
+- Two rules remove the rim on this crop: (a) aggregating each frame's energy
+  spatially before the argmax (Gaussian, σ 24–48 sensor px at level 0, halved
+  per level, levels ≥ 1), so the edge's own frame wins the band beside it and
+  shows it dark; (b) "ownership": a pixel whose best energy is < 0.3 × the
+  strongest pixel within 64 px takes that pixel's frame. (a) fits the
+  streaming fold (per-frame, order-independent merge unchanged); (b) would
+  need a second pass because losing frames' coefficients are not kept.
+- Implemented (a) as `FoldParams::c_radius` / `--c-radius R` / GUI
+  "Radius (C)" (CLI default 0 = the validated reference C; GUI default 32).
+  No measurable cost: 163 frames at full res still run in 27.5 s.
+- Real stack, full res, radius 0 / 32 / 64 vs Helicon C: the doubled top edge
+  and the glow above it are gone at 32 and 64, matching Helicon. The stacked
+  parallel outlines at the plate's lower-left corner **remain at every
+  radius**, as they do in Helicon's C: there the rims lie inside the bright
+  plate, where every pixel's own strongest energy is a rim from some other
+  frame, so no nearby pixel is strong enough to own them. Those need a
+  different rule (frame-distance consistency to the nearest edge, or B's
+  depth once B's spill handling is fixed).
+
+### 25a. The C radius reaches B through the guide; B's own radius and priors (2026-11-06, later)
+
+- **B changes with the C radius**: the guide for B's edge-aware aggregation,
+  SGM edge penalty, guided upsampling and depth smoothing is the luma of the
+  collapsed C (`run_pass1`). On the frozen 163-frame list, B at C radius 32
+  vs 0 differs on 51 % of pixels by > 4 LSB₁₆ and on 8 % by > 1 % of range
+  (radius 0 twice: bit-identical). Not visibly better or worse at the plate
+  edge. Anyone scoring B against the baseline must run with `--c-radius 0`.
+- **B's doubled plate edge is not fixed by the same trick.** `--b-radius R`
+  (isotropic Gaussian over each aggregated focus slice, R sensor px) at 16 /
+  32 / 64 and `--halo-prior` 4 / 8 (the darkness preference beside bright
+  objects, default 2) each trim the haze above the edge a little; the second
+  edge line survives in all of them, while Helicon B shows one line. Reason:
+  B's focus measure is contrast-normalised (lap² / (mean² + 0.02²)), so the
+  rim on the dark background scores as high as the bright edge itself and
+  spreading the edge's energy cannot outvote it, unlike C's raw energy. The
+  controls stay (CLI, GUI "Radius (B)", default 0) for tuning; the fix needs
+  rim rejection in the volume (fine-scale confirmation of the coarse peak) or
+  depth ownership by the nearest strong edge.
+
+## 26. Resident frames: the stack pinned in host memory (2026-11-06, late)
+
+Trigger: the 3070's riser was fixed and both cards now link at Gen4 x8 (0
+PCIe replays under load), but the stack got no faster. Timed with the CLI on
+the 163 frames at `Q:\`, full res, outputs B,C,Cn:
+
+| | both GPUs | 3080 Ti alone |
+|---|---|---|
+| alignment pairs | 6.4 s | 9.4 s |
+| pass 1 stream | 2.5 s (64 fps, 12.5 GB/s) | 3.2 s (51 fps) |
+| pass 2 fine focus | 3.1 s | 4.5 s |
+| pass 3 composition | 2.4 s | 2.5 s |
+| fusion total | 16.3 s | 16.2 s |
+| whole run | 26.2 s | 29.3 s |
+
+The second card bought 3 s of alignment and nothing in the fusion: every
+streaming pass re-read the 31.6 GB stack from the RAM disk, which the host
+delivers at ~12.5 GB/s while the GPUs DMA from it (§16), so each pass was
+~2.5 s whatever the links did. The two-GPU fusion also pays ~1 s for the
+host merges and a slower compose, which ate the little the passes gained.
+
+**The change** (`core/frame_cache`, `StreamerOptions::cache`): the first pass
+that meets a frame reads it into a pinned buffer the `FrameCache` keeps;
+every later pass uploads from that buffer and reads nothing. The ring is now
+pinned lazily (an unused ring costs nothing). The budget is the smaller of
+60 % of physical RAM and free RAM minus 8 GB, decided per job; frames past
+it go through the ring as before, so a stack that does not fit still runs.
+Entries are keyed by path and checked against file size and mtime. The GUI
+owns one cache in its `Worker`, so a second render of the same folder uploads
+from memory from pass 0 on; a job from the CLI gets one for its own duration
+(`--cache 0` turns it off). The noise pair in finalize comes from it too.
+
+Measured first (pinning 163 x 194 MB: 1.8 s at 17 GB/s, single- or
+multi-threaded; freeing 1.5 s; H2D from pinned 13.3 GB/s on either card), then
+on the pipeline, same frames, outputs bit-identical to the streamed run and to
+the single-GPU run:
+
+| | streamed (`--cache 0`) | resident |
+|---|---|---|
+| pass 0 (alignment luma) | 2.69 s read | 3.09 s read + pin |
+| pass 1 | 2.75 s, 11.5 GB/s | 2.10 s, 15.0 GB/s |
+| pass 2 fine focus | 3.32 s | 3.02 s |
+| pass 3 composition | 2.68 s | 1.48 s, 21 GB/s |
+| fusion total | 15.9 s | 13.1 s |
+| whole run | 25.8 s | 23.5 s |
+
+Pass 3 shows what the links can do (110 fps). Passes 1 and 2 are now bound by
+their own kernels on the fold stream, not by ingest: pass 2's fine-focus
+measure in particular (54 fps, the 3070 taking 58 frames). The next speed
+work is there, and in the ~1.4 s of allocation and merge overhead in the
+fusion, not in the I/O. A GUI re-render of the same folder also skips pass 0's
+read (every pass "from memory" in the log).
+
+## 27. Alignment pairs: float kernels, pairs in flight (2026-11-06, late)
+
+After §26 the alignment's 637 pairs (6.5 s) were the largest block in the
+run. Two changes, both checked against the double-precision report.
+
+1. **Pairs in flight.** A pair's Gauss-Newton loop syncs the host every
+   iteration (~21 iterations per pair: 6 at the top level, 3–4 at each lower
+   one, 4 exact), so one pair at a time left the card mostly idle between
+   kernels. Each GPU now runs `--pair-threads` pairs (default 3) on their own
+   streams, sharing one pyramid cache per device (LRU past 16 + 8 T entries;
+   an entry in use is never evicted; a thread that needs a pyramid another
+   thread is building waits for it). The per-pair arithmetic is untouched,
+   so the report is bit-identical for 1, 2, 3, 4 or 6 threads. Gain on its
+   own: 6.46 → 5.85 s. The pairs were compute-bound, not latency-bound.
+2. **Float kernels.** Nsight Systems on the 3080 Ti alone (637 pairs, 9.4 s):
+   `k_gn_reduce` 46 % (0.55 ms per call at 1740×1160), `k_warp_bspline` 31 %
+   (1.07 ms per call), `k_bspline_prefilter` 7 % (1.9 ms per pyramid axis),
+   `k_final_reduce` 4.5 %. All ran in double on a GeForce card, where FP64 is
+   1/64 rate. Now: the exact warp keeps the sample position in double and
+   does the weights and 16 taps in float, with a mirror-free interior path
+   (`align.h` always said FP32 weights; it was the texture units' 1/256 px
+   *positions* that biased the scale, §1); the GN reduction accumulates
+   float per thread over its ~32 pixels (grid capped at 256 blocks, fixed
+   per-thread order) and double from the warp shuffle on; the prefilter's
+   scratch is transposed so neighbouring threads hit neighbouring addresses,
+   in 32-thread blocks (same arithmetic per line, bit-identical coefficients).
+
+Result, both GPUs, 3 pairs in flight: **637 pairs in 2.77 s** (4.3 ms/pair),
+alignment 9.7 → 6.0 s; on the 3080 Ti alone, one pair at a time, 9.4 → 4.6 s.
+Against the double-precision report on the same stack: max |Δt| 1.4e-7 px,
+|Δs| 5e-11 (0.2 nm at the corner), |Δθ| 3e-9°, the crop rect identical, NCC
+identical to 6 decimals (the Mac–PC agreement in §15 was 3e-6 px). Two float
+runs, and GPU 0 alone vs both, give identical reports. The fused outputs
+move by ≤ 12 LSB₁₆ on < 0.06 % of pixels (B ≤ 3 LSB).
+
+**Whole run now 19.2 s** (was 26.2 s at the start of the evening, 27.7 s in
+§23): alignment 6.1 s, fusion 12.9 s. The remaining big blocks are the three
+streaming passes' kernels (pass 2 fine focus 3.0 s, pass 1 2.1 s), compose's
+host mixing (~1.5 s), the alignment read + pinning (3.1 s) and ~1.4 s of
+allocation/merge overhead.
+
 ## Open items
 
+- **B: doubled plate edge / glow** (§25a): the C-style aggregation does not
+  work on the normalised focus measure; needs rim rejection or ownership.
+- **C: stacked rim outlines inside bright plates** (§25): present at any C
+  radius and in Helicon's C too. Same mechanism as the band outside the edge
+  but with no stronger neighbour to own the pixel.
 - **Residual flat-target roll bias**: a smooth hump of ±17 mdeg RMS per frame on far-defocused frames, antisymmetric about focus (the fitted rate is fine: 52 vs 50 mdeg/mm). Also ε reads −2.4 % (≈ 6σ). Cause unknown.
 - Validate everything on **real** stacks:
   1. a flat-target stack (the diagnostic);

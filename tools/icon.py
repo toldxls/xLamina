@@ -2,10 +2,11 @@
 (the one in focus) tyuyamunite yellow with the name on it. Writes the master
 SVGs and a preview sheet; rasterise with ImageMagick:
   python tools/icon.py gui/icon
-  magick -background none -density 384 gui/icon/xlamina.svg -resize 256x256 gui/icon/xlamina-256.png   (48..256)
-  magick -background none -density 384 gui/icon/xlamina_small.svg -resize 32x32 gui/icon/xlamina-32.png  (16..32, no text)
+  magick -background none -density 384 gui/icon/xlamina.svg -resize 256x256 gui/icon/xlamina-256.png   (64..256)
+  magick -background none -density 384 gui/icon/xlamina_small.svg -resize 48x48 gui/icon/xlamina-48.png  (16..48, no text)
   magick gui/icon/xlamina-256.png ... gui/icon/xlamina-16.png gui/icon/xlamina.ico
-Sizes <= 32 px drop the text (unreadable there)."""
+Sizes <= 48 px drop the text (unreadable there; 48 is the desktop's "medium icons" size).
+If the desktop still shows an old icon after a rebuild, Explorer's icon cache is stale: ie4uinit.exe -show."""
 import sys, os
 
 Y, YE, G, GE, BG, INK = "#f0d027", "#b89b12", "#555555", "#383838", "#262626", "#262626"

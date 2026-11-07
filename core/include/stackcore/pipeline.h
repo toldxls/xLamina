@@ -50,6 +50,8 @@ struct Pass1Options {
     std::vector<Similarity> T;
     Grid g;
     double radius_px = 6.0, power = 4.0;
+    double c_radius_px = 0.0;                     // C's energy aggregation sigma in sensor px (FoldParams::c_radius); 0 = raw selection
+    double b_radius_px = 0.0;                     // B: isotropic Gaussian over each aggregated focus slice, sigma in sensor px; 0 = off
     std::vector<int> frames_sel;
     StreamerOptions opt;
     bool volume = false;
@@ -84,7 +86,9 @@ struct StackOptions {
     int streams = 2, refine_r = 12;
     double refine_fm_px = 9.0, soft_px = 3.0;
     double c_smoothing = 0.0;          // C's smoothing (FinalParams::c_smoothing); 0 = the raw selection
+    double halo_prior = 2.0, dark_prior = 1.0;   // B's depth priors (DepthParams); the validated defaults
     std::vector<std::string> outputs;  // which images to write / keep; empty = all
+    bool cache_frames = true;          // keep the frames pinned in host memory between the passes (--cache 0: read every pass from disk)
     Hooks hooks;
     // results, filled when `result` is set
     struct Result {
@@ -110,8 +114,10 @@ struct AlignOptions {
     double align_scale = 0.25;
     std::vector<int> baselines = {1, 2, 4, 8}, devs;
     int readers = 16;
+    int pair_threads = 3;             // pairs in flight per GPU (each on its own stream); the per-pair arithmetic is unchanged
     bool lock_scale = false;
     double um_per_px = 0;             // 0 = unknown; negative = -FOV in mm, resolved once the width is known
+    FrameCache* cache = nullptr;      // resident frames (pass 0 fills it); null = stream from disk
     Hooks hooks;
 };
 bool parse_align_option(const std::string& a, const std::string& v, AlignOptions& ao);
@@ -134,6 +140,8 @@ struct JobOptions {
     AlignOptions align;
     StackOptions stack;
     std::string out;                  // empty = <dir>_stacker
+    FrameCache* cache = nullptr;      // a caller-owned frame cache that outlives the job (the GUI keeps the stack resident
+                                      // across runs); null = one for this job when stack.cache_frames is set
 };
 int run_job(JobOptions& jo, AlignOut& A, Hooks hooks);
 

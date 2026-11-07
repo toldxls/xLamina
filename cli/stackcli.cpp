@@ -58,20 +58,27 @@ static int usage() {
             "xLamina " XLAMINA_VERSION " - multi-GPU photomicroscopy stacker\n"
             "usage:\n"
             "  stackcli run DIR [--out DIR] [--prefix IMG_] [--scale 1|0.5] [--outputs B,C,Cn] [--ref middle] [--lock-scale 1]\n"
-            "               [--fov-mm X | --um-per-px X] [--gpus 0,1] [--streams 2] [--align-scale 0.25] [--baselines 1,2,4,8]\n"
-            "               [--smoothing 0]   align the TIFF frames in DIR (all of them, or those starting with --prefix) and fuse them:\n"
+            "               [--fov-mm X | --um-per-px X] [--gpus 0,1] [--streams 2] [--align-scale 0.25] [--baselines 1,2,4,8] [--pair-threads 3]\n"
+            "               [--smoothing 0] [--c-radius 0]   align the TIFF frames in DIR (all of them, or those starting with --prefix) and fuse them:\n"
             "               report.json + 16-bit TIFFs in DIR_stacker (or --out). Outputs: A B B0 C CB Cn CBn Cd Cg Cg2 H\n"
             "               --smoothing S: C takes detail weaker than S x the noise from B (0 = raw selection, 2 ~ Helicon's 1, 3 = Cn)\n"
+            "               --c-radius R: C aggregates each frame's pyramid energy over R sensor px before choosing, so a strong\n"
+            "                             edge's frame wins the band beside it instead of its defocus rims (0 = off, 32 is a good start)\n"
+            "               --b-radius R: the same for B's focus volume: each frame's focus slice is blurred over R sensor px\n"
+            "                             (isotropic, after the edge-aware aggregation) before the depth map is solved (0 = off)\n"
+            "               --halo-prior H (2) / --dark-prior D (1): B's preference for darker frames beside bright objects / in\n"
+            "                             featureless pixels; raise H to push the band beside a bright plate to its own frame\n"
+            "               --cache 0: read every pass from disk instead of keeping the frames pinned in host memory\n"
             "  developer commands:\n"
             "  stackcli probe FILE.tif\n"
             "  stackcli dump FILE.tif OUT.f32 [--gpu N]\n"
             "  stackcli stream DIR [--prefix IMG_] [--gpus 0,1] [--streams 3] [--readers 16] [--pool N] [--sums OUT.txt]\n"
             "  stackcli warp FILE.tif OUT.f32 --z ZR,ZI --t TX,TY --rect X0,Y0,X1,Y1 [--scale 1|0.5] [--quantize] [--gpu N]\n"
-            "  stackcli fold LIST.txt --rect X0,Y0,X1,Y1 --out DIR [--scale 1|0.5] [--radius-px 6] [--power 4]\n"
+            "  stackcli fold LIST.txt --rect X0,Y0,X1,Y1 --out DIR [--scale 1|0.5] [--radius-px 6] [--power 4] [--c-radius 0]\n"
             "                [--frames 0,5,9] [--gpus 0,1] [--streams 2] [--readers 16] [--volume]\n"
             "  stackcli depth VOLDIR --out DIR [--crop X0,Y0,W,H] [--gpu N] [--dirs 8]\n"
             "  stackcli stack LIST.txt --rect X0,Y0,X1,Y1 --out DIR [--scale 1|0.5] [--gpus 0,1] [--streams 2]\n"
-            "                 [--refine-r 12] [--refine-fm-px 9] [--soft-px 3] [--smoothing 0]   the whole fusion -> 16-bit TIFFs\n"
+            "                 [--refine-r 12] [--refine-fm-px 9] [--soft-px 3] [--smoothing 0] [--c-radius 0]   the whole fusion -> 16-bit TIFFs\n"
             "  stackcli align DIR --out DIR [--prefix IMG_] [--align-scale 0.25] [--baselines 1,2,4,8] [--ref middle]\n"
             "                 [--gpus 0,1] [--pairs i:j,...]      alignment -> report.json + list.txt (+ per-pair dump)\n");
     return 2;
@@ -354,6 +361,8 @@ static int cmd_fold(int argc, char** argv) {
         else if (a == "--out") out = v;
         else if (a == "--scale") g.scale = atof(v.c_str());
         else if (a == "--radius-px") po.radius_px = atof(v.c_str());
+        else if (a == "--c-radius") po.c_radius_px = atof(v.c_str());
+        else if (a == "--b-radius") po.b_radius_px = atof(v.c_str());
         else if (a == "--power") po.power = atof(v.c_str());
         else if (a == "--frames") po.frames_sel = parse_list(v);
         else if (a == "--gpus") po.opt.devices = parse_list(v);

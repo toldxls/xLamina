@@ -2,6 +2,7 @@ add_library(stackcore STATIC
     src/tiff.cpp
     src/pinned_pool.cpp
     src/streamer.cpp
+    src/frame_cache.cpp
     src/convert.cu
     src/warp.cu
     src/imgops.cu

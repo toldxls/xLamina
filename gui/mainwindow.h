@@ -49,6 +49,7 @@ private slots:
     void onLog(QString line);
     void onFinished(std::shared_ptr<JobResultData> data);
     void dropFlagged();
+    void frameMenu(const QPoint& pos);
 
 private:
     void buildUi();
@@ -60,9 +61,10 @@ private:
 
     QString folder_;
     QStringList frames_;
-    QList<int> frameRows_;                 // list row of each frame
-    QList<int> jobFrames_;                 // the frames (indices into frames_) of the current / last render
-    QList<int> flagged_;                   // frames whose wobble is an outlier
+    // rows carry the frame index (into frames_) in Qt::UserRole, -1 for files left out; the list order is
+    // the stack order and a frame may be listed more than once, so jobs refer to rows, not frames
+    QList<QListWidgetItem*> jobItems_;     // the rows of the current / last render, in stack order
+    QList<QListWidgetItem*> flagged_;      // rows whose wobble is an outlier
     QString wobble_;                       // the wobble summary line
     QAction* dropFlagged_ = nullptr;
     QColorSpace colorSpace_;               // the frames' ICC profile (invalid = assume sRGB)
@@ -93,6 +95,8 @@ private:
     QCheckBox* lockScale_ = nullptr;
     QDoubleSpinBox* fov_ = nullptr;
     QDoubleSpinBox* smoothing_ = nullptr;
+    QDoubleSpinBox* cradius_ = nullptr;
+    QDoubleSpinBox* bradius_ = nullptr;
     QLineEdit* outDir_ = nullptr;
     QMap<QString, QCheckBox*> outputs_;
     Worker worker_;

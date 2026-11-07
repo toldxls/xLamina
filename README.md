@@ -44,9 +44,13 @@ Smoothing (C) sets how much of C's weak detail is taken from B rather than from 
 sharpest frame: 0 is the raw selection (in flat areas it picks the noisiest frame),
 2 is about Helicon's Smoothing 1, 3 is Cn.
 
+The frames are read once and kept pinned in host memory for the rest of the job (and, in
+the GUI, for the next render of the same folder), as long as they fit in about half the
+machine's RAM; the GPUs then pull them at their PCIe rate instead of the disk's.
+
 The same engine runs from the command line:
 
-    stackcli run <folder> [--out DIR] [--outputs B,C,Cn] [--fov-mm X] [--scale 0.5] [--smoothing 2] ...
+    stackcli run <folder> [--out DIR] [--outputs B,C,Cn] [--fov-mm X] [--scale 0.5] [--smoothing 2] [--cache 0] ...
 
 ## Build
 

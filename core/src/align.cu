@@ -91,29 +91,40 @@ __global__ void k_warp_bspline(const float* __restrict__ coef, int w, int h, flo
     };
     if (u < 0 || u > w - 1) u = mirror_c(u, w);
     if (v < 0 || v > h - 1) v = mirror_c(v, h);
+    // the sample position is exact (double); the weights and the 16 taps are float: GeForce FP64 runs
+    // at 1/64 rate and made this kernel 1 ms per call (FINDINGS 27). Float weights were the design
+    // anyway (align.h); it was the texture units' 1/256 px positions that biased the scale (FINDINGS 1).
     double fu = floor(u), fv = floor(v);
-    double tu = u - fu, tv = v - fv;
+    float tu = (float)(u - fu), tv = (float)(v - fv);
     int su = (int)fu - 1, sv = (int)fv - 1;
-    double wu[4], wv[4];
-    auto bsp = [](double t, double* wgt) {
-        double t2 = t * t, t3 = t2 * t;
-        wgt[0] = (1 - 3 * t + 3 * t2 - t3) / 6.0;
-        wgt[1] = (4 - 6 * t2 + 3 * t3) / 6.0;
-        wgt[2] = (1 + 3 * t + 3 * t2 - 3 * t3) / 6.0;
-        wgt[3] = t3 / 6.0;
+    float wu[4], wv[4];
+    auto bsp = [](float t, float* wgt) {
+        float t2 = t * t, t3 = t2 * t;
+        wgt[0] = (1.f - 3.f * t + 3.f * t2 - t3) * (1.f / 6.f);
+        wgt[1] = (4.f - 6.f * t2 + 3.f * t3) * (1.f / 6.f);
+        wgt[2] = (1.f + 3.f * t + 3.f * t2 - 3.f * t3) * (1.f / 6.f);
+        wgt[3] = t3 * (1.f / 6.f);
     };
     bsp(tu, wu);
     bsp(tv, wv);
-    double sum = 0.0;
+    float sum = 0.f;
+    if (su >= 0 && su + 3 < w && sv >= 0 && sv + 3 < h) {   // interior: no mirroring
 #pragma unroll
-    for (int i = 0; i < 4; ++i) {
-        const float* row = coef + (size_t)mirror_idx(sv + i, h) * w;
-        double r = 0.0;
+        for (int i = 0; i < 4; ++i) {
+            const float* row = coef + (size_t)(sv + i) * w + su;
+            sum += wv[i] * (wu[0] * row[0] + wu[1] * row[1] + wu[2] * row[2] + wu[3] * row[3]);
+        }
+    } else {
 #pragma unroll
-        for (int j = 0; j < 4; ++j) r += wu[j] * row[mirror_idx(su + j, w)];
-        sum += wv[i] * r;
+        for (int i = 0; i < 4; ++i) {
+            const float* row = coef + (size_t)mirror_idx(sv + i, h) * w;
+            float r = 0.f;
+#pragma unroll
+            for (int j = 0; j < 4; ++j) r += wu[j] * row[mirror_idx(su + j, w)];
+            sum += wv[i] * r;
+        }
     }
-    dst[(size_t)y * w + x] = (float)sum;
+    dst[(size_t)y * w + x] = sum;
 }
 
 // scipy spline_filter(order 3, mode mirror) along one axis: one thread per line, the whole line in
@@ -128,7 +139,12 @@ __global__ void k_bspline_prefilter(float* __restrict__ img, int w, int h, int a
     if (line >= lines) return;
     size_t stride = along_x ? 1 : (size_t)w;
     float* src = img + (along_x ? (size_t)line * w : (size_t)line);
-    double* c = scratch + (size_t)line * n;
+    // element i of this line lives at scratch[i * lines + line]: neighbouring threads touch neighbouring
+    // addresses (coalesced); the arithmetic per line is unchanged
+    struct Line {
+        double* base; size_t lines;
+        __device__ double& operator[](int i) const { return base[(size_t)i * lines]; }
+    } c{scratch + line, (size_t)lines};
     const double z = -0.2679491924311227;   // sqrt(3) - 2
     const double gain = (1.0 - z) * (1.0 - 1.0 / z);   // 6
     for (int i = 0; i < n; ++i) c[i] = (double)src[(size_t)i * stride] * gain;
@@ -161,8 +177,11 @@ __global__ void k_gn_reduce(const float* __restrict__ I0, const float* __restric
                             float cx, float cy, float R, double* __restrict__ partials) {
     __shared__ double red[8][NSUM];
     size_t n = (size_t)w * h;
-    double acc[NSUM];
-    for (int q = 0; q < NSUM; ++q) acc[q] = 0.0;
+    // per-thread partials in float over its few dozen pixels (a thread's share is fixed by the grid,
+    // so the order is deterministic), double from the warp reduction on: the all-double version ran at
+    // GeForce's 1/64 FP64 rate with 72 registers of accumulators (FINDINGS 27)
+    float acc[NSUM];
+    for (int q = 0; q < NSUM; ++q) acc[q] = 0.f;
     for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (size_t)gridDim.x * blockDim.x) {
         int x = (int)(i % w), y = (int)(i / w);
         float X = (float)(m0 * x + m1 * y + m2), Y = (float)(m3 * x + m4 * y + m5);
@@ -173,17 +192,20 @@ __global__ void k_gn_reduce(const float* __restrict__ I0, const float* __restric
         float J[6] = {Gx * dx + Gy * dy, -Gx * dy + Gy * dx, Gx, Gy, Iw, 1.0f};
         float r = g * Iw + beta - I0[i];
         int q = 0;
+#pragma unroll
         for (int a = 0; a < 6; ++a)
-            for (int b = a; b < 6; ++b) acc[q++] += (double)J[a] * J[b];
-        for (int a = 0; a < 6; ++a) acc[q++] += (double)J[a] * r;
-        acc[q++] += (double)r * r;
-        acc[q++] += 1.0;
+#pragma unroll
+            for (int b = a; b < 6; ++b) acc[q++] += J[a] * J[b];
+#pragma unroll
+        for (int a = 0; a < 6; ++a) acc[q++] += J[a] * r;
+        acc[q++] += r * r;
+        acc[q++] += 1.f;
         float a0 = I0[i];
-        acc[q++] += a0; acc[q++] += Iw; acc[q++] += (double)a0 * a0; acc[q++] += (double)Iw * Iw; acc[q++] += (double)a0 * Iw;
+        acc[q++] += a0; acc[q++] += Iw; acc[q++] += a0 * a0; acc[q++] += Iw * Iw; acc[q++] += a0 * Iw;
     }
     int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     for (int q = 0; q < NSUM; ++q) {
-        double v = acc[q];
+        double v = (double)acc[q];
         for (int o = 16; o > 0; o >>= 1) v += __shfl_down_sync(0xffffffffu, v, o);
         if (lane == 0) red[warp][q] = v;
     }
@@ -355,8 +377,8 @@ void AlignPyramid::build(const float* d_luma, int w, int h, cudaStream_t s, int 
     CK(cudaMemcpyAsync(coef, l0.I, n * sizeof(float), cudaMemcpyDeviceToDevice, s));
     double* lines;
     CK(cudaMalloc(&lines, n * sizeof(double)));
-    k_bspline_prefilter<<<blocks1(w), 256, 0, s>>>(coef, w, h, 0, lines);   // scipy filters axis 0 (columns) first
-    k_bspline_prefilter<<<blocks1(h), 256, 0, s>>>(coef, w, h, 1, lines);
+    k_bspline_prefilter<<<(w + 31) / 32, 32, 0, s>>>(coef, w, h, 0, lines);   // scipy filters axis 0 (columns) first
+    k_bspline_prefilter<<<(h + 31) / 32, 32, 0, s>>>(coef, w, h, 1, lines);
     CK(cudaStreamSynchronize(s));
     cudaFree(lines);
     g08.free();
@@ -377,7 +399,7 @@ void AlignWork::alloc(int w_, int h_) {
     CK(cudaMalloc(&I1w, n * sizeof(float)));
     CK(cudaMalloc(&gxw, n * sizeof(float)));
     CK(cudaMalloc(&gyw, n * sizeof(float)));
-    max_blocks = 1024;
+    max_blocks = 256;   // ~32 px per thread at 1740x1160: the per-thread partial sums amortise the block reduction (FINDINGS 27)
     CK(cudaMalloc(&partials, (size_t)(max_blocks + 1) * NSUM * sizeof(double)));
 }
 
