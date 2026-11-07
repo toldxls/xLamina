@@ -10,6 +10,7 @@
 #include <string>
 
 #include "stackcore/imgops.h"
+#include "stackcore/pipeline.h"   // logf
 
 namespace stackcore {
 
@@ -377,7 +378,7 @@ void guided_filter(const float* d_guide, const float* d_src, float* d_out, int w
     k_gf_out<<<blocks1(n), 256, 0, s>>>(mIp, mp, d_guide, d_out, n);
 }
 
-DepthResult depth_from_volume(const float* d_V_in, const void* d_Lv16, const float* d_guide_full, const float* d_ga,
+DepthResult depth_from_volume(const float* d_V_in, void* d_Lv16, const float* d_guide_full, const float* d_ga,
                               int dw, int dh, int K, int ow, int oh, const DepthParams& p, cudaStream_t s) {
     if (K > 512) throw std::runtime_error("depth: K > 512 not supported");
     DepthResult R;
@@ -432,6 +433,7 @@ DepthResult depth_from_volume(const float* d_V_in, const void* d_Lv16, const flo
     k_p2<<<grid2(dw, dh), BLK, 0, s>>>(d_ga, P2, dw, dh, p.p1, p.p2, p.edge);
     CK(cudaStreamSynchronize(s));
     CK(cudaGetLastError());
+    cudaFree(d_Lv16);   // consumed: the luma volume's memory goes to the SGM
     R.ms_cost = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     {
         std::vector<uint8_t> e(n);
@@ -455,7 +457,11 @@ DepthResult depth_from_volume(const float* d_V_in, const void* d_Lv16, const flo
     }
     size_t fr = 0, tot = 0;
     CK(cudaMemGetInfo(&fr, &tot));
-    size_t budget = fr > (768u << 20) ? fr - (768u << 20) : 0;   // room for the post stage's maps
+    // the band layout decides the result (a path's memory is cut at the band's edge), so it must not depend on
+    // what else happens to be on the card: the path-sum volume gets a fixed 1.5 GB unless even that is short
+    size_t budget = std::min<size_t>((size_t)1536 << 20, fr > (768u << 20) ? fr - (768u << 20) : 0);
+    if (budget < S_bytes && fr - (768u << 20) < ((size_t)1536 << 20))
+        logf("depth: only %.2f GB free for the SGM volume; the band layout, and so the result, depends on it this time\n", fr / 1e9);
     int bands = 1;
     if (S_bytes > budget) {
         size_t row_bytes = (size_t)dw * K * sizeof(float);
@@ -497,7 +503,9 @@ DepthResult depth_from_volume(const float* d_V_in, const void* d_Lv16, const flo
     auto t2 = std::chrono::steady_clock::now();
     float *up = dmalloc(no), *gfo = dmalloc(no), *sc5 = dmalloc(no * 5);
     k_resize_linear<<<grid2(ow, oh), BLK, 0, s>>>(d, dw, dh, up, ow, oh, (double)dw / ow, (double)dh / oh);
-    int r = std::max(2, (int)std::nearbyint(2.0 * ow / dw));
+    // the guided filter's radius on the output grid: 8 px for a full-size output whatever the volume's grid (it used
+    // to be 2 volume pixels, which halved on the 1/2-resolution grid and left the finer map less smoothed)
+    int r = std::max(2, (int)std::nearbyint(2.0 * ow / dw * (p.depth_full_fraction / 0.25)));
     guided_filter(d_guide_full, up, gfo, ow, oh, r, p.gf_eps, sc5, s);
     k_rint<<<blocks1(no), 256, 0, s>>>(gfo, no);
     k_median3<<<grid2(ow, oh), BLK, 0, s>>>(gfo, up, ow, oh);

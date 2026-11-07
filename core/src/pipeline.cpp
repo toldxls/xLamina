@@ -679,6 +679,11 @@ bool parse_stack_option(const std::string& a, const std::string& v, StackOptions
     else if (a == "--b-radius") so.po.b_radius_px = atof(v.c_str());
     else if (a == "--halo-prior") so.halo_prior = atof(v.c_str());
     else if (a == "--dark-prior") so.dark_prior = atof(v.c_str());
+    else if (a == "--sgm-p1") so.sgm_p1 = atof(v.c_str());
+    else if (a == "--sgm-p2") so.sgm_p2 = atof(v.c_str());
+    else if (a == "--sgm-scale") so.sgm_scale = atoi(v.c_str()) != 0;
+    else if (a == "--conf-lo") so.conf_lo = atof(v.c_str());
+    else if (a == "--conf-hi") so.conf_hi = atof(v.c_str());
     // the depth volume's parameters (the GUI's Advanced panel; the `fold` command has the same names)
     else if (a == "--radius-px") so.po.radius_px = atof(v.c_str());
     else if (a == "--power") so.po.power = atof(v.c_str());
@@ -839,8 +844,20 @@ static int run_stack_once(StackOptions& so) {
         dp.halo_prior = (float)so.halo_prior;
         dp.dark_prior = (float)so.dark_prior;
         dp.depth_full_fraction = (float)po.depth_fraction;   // the spill-zone radii are in sensor px
+        if (so.sgm_p1 > 0) dp.p1 = (float)so.sgm_p1;
+        if (so.sgm_p2 > 0) dp.p2 = (float)so.sgm_p2;
+        if (so.conf_lo > 0) dp.c_lo = (float)so.conf_lo;
+        if (so.conf_hi > 0) dp.c_hi = (float)so.conf_hi;
+        if (so.sgm_scale && po.depth_fraction != 0.25) {   // the same smoothness per micron on a finer grid
+            float k = (float)(po.depth_fraction / 0.25);
+            dp.p1 *= k;
+            dp.p2 *= k;
+        }
+        logf("depth: SGM P1 %.3f P2 %.3f, confidence ramp %.2f..%.2f, dark prior %.2f, halo prior %.2f, volume %dx%d\n", dp.p1, dp.p2, dp.c_lo, dp.c_hi,
+             dp.dark_prior, dp.halo_prior, P.vp.dw, P.vp.dh);
+        dfree.p.erase(std::find(dfree.p.begin(), dfree.p.end(), (void*)d_L16));   // consumed inside depth_from_volume
         R = depth_from_volume(d_V, d_L16, d_guide, d_ga, P.vp.dw, P.vp.dh, K, ow, oh, dp, s);
-        // d_V, d_L16 and d_ga are freed here by dfree going out of scope
+        // d_V and d_ga are freed here by dfree going out of scope
     }
     logf("depth: %.2f s (cost %.0f ms, SGM %.0f ms%s, post %.0f ms); end-peaked %.1f%%\n", since(t1), R.ms_cost, R.ms_sgm,
          R.sgm_bands > 1 ? (" in " + std::to_string(R.sgm_bands) + " bands").c_str() : "", R.ms_post, 100 * R.end_fraction);

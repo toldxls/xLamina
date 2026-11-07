@@ -45,7 +45,9 @@ struct DepthResult {
 // d_V: dh*dw*K float32, k fastest (post-aggregation, post-sqrt). d_Lv16: same layout, float16.
 // d_guide_full: oh*ow float (luma of collapsed C, clipped); d_ga: dh*dw (the same at depth res).
 // Runs on the current device and stream; needs ~2 x the volume in free memory.
-DepthResult depth_from_volume(const float* d_V, const void* d_Lv16, const float* d_guide_full, const float* d_ga,
+// d_V is overwritten by the cost; d_Lv16 (the luma volume) is consumed: freed once the cost is built, so the
+// SGM's path sums have its 2.5 GB (at 1/2 resolution) and the band layout does not depend on what is left
+DepthResult depth_from_volume(const float* d_V, void* d_Lv16, const float* d_guide_full, const float* d_ga,
                               int dw, int dh, int K, int ow, int oh, const DepthParams& p, cudaStream_t s);
 
 // plane-major (K, dh, dw) -> k-fastest (dh, dw, K), float32 and float16 variants; the _chunk forms take

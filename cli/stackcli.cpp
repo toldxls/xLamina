@@ -71,6 +71,7 @@ static int usage() {
             "               --cache 0: read every pass from disk instead of keeping the frames pinned in host memory\n"
             "               depth volume (the GUI's Advanced panel): --radius-px 6 --power 4 --depth-fraction 0.25 --depth-fm-px 6 --vol-agg-px 32\n"
             "               refinement / composition: --refine-r 12 --refine-fm-px 9 --soft-px 3\n"
+            "               SGM: --sgm-p1 0.03 --sgm-p2 0.4 (scaled by depth-fraction/0.25 unless --sgm-scale 0), confidence ramp --conf-lo 0.45 --conf-hi 0.65\n"
             "  developer commands:\n"
             "  stackcli probe FILE.tif\n"
             "  stackcli dump FILE.tif OUT.f32 [--gpu N]\n"
@@ -506,7 +507,7 @@ static int cmd_depth(int argc, char** argv) {
                 dp.dirs, R.end_fraction, R.ms_cost, R.ms_sgm, R.ms_post);
         fclose(mf);
     }
-    cudaFree(d_V); cudaFree(d_L16); cudaFree(d_guide); cudaFree(d_ga);
+    cudaFree(d_V); cudaFree(d_guide); cudaFree(d_ga);   // d_L16 was consumed by depth_from_volume
     cudaStreamDestroy(s);
     if (!okw) { fprintf(stderr, "cannot write %s\n", out.c_str()); return 1; }
     printf("  -> %s\n", out.c_str());

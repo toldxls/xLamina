@@ -1202,6 +1202,53 @@ mid-pass, and the slice budget assumes 70 % of the frames per card when the
 queue is shared. The archive's `score_b.py` baseline numbers refer to the 1/4
 reference and no longer describe the default B.
 
+## 33. The 1/2-resolution volume's blotches: the dark prior (2026-11-07, late)
+
+With the 1/2-resolution depth (sec. 32) Travis found the plate edges fixed
+but "blotchy garbage" elsewhere: a dark patch inside a needle fan, where the
+matrix far behind the fan was rendered in place of the needles, and grainier
+flat areas. On the fan region (output grid x 3480-4608, y 3152-3756), with the
+reference B beside, in 1:1 sheets (`report_real/sgm_fan.png`, `fan2.png`):
+
+| 1/2-resolution variant | fan blotch | plate ghost (sec. 32) |
+|---|---|---|
+| as sec. 32 (P1 0.03, P2 0.4, dark prior 1) | present | gone |
+| SGM P1, P2 x2 (the grid is twice as fine, so the same penalty per pixel is half the smoothness per micron) | present | gone |
+| P1, P2 x4 | present | gone |
+| dark prior 0.5 | present | gone |
+| halo prior 0 | present | gone |
+| B radius 24 px | present | gone |
+| **dark prior 0** | **gone** | gone |
+| no priors, B radius 24 | gone | gone |
+
+The dark prior ("prefer the darker frame in a featureless pixel", sec. 9)
+is what fills the gaps between needles with the dark matrix frames once the
+grid resolves those gaps; at 1/4 they were below the grid. It is the same
+mechanism that put the band inside a bright rim onto far frames on the
+synthetic stack (sec. 31). With it off at 1/2 resolution the four other
+regions (dark background with a plate edge, crystal edge, plates, matrix
+with a background edge; `report_real/dark0_*.png`) show no glow returning,
+and the per-region scores against the reference are equal to the 1/4
+default's or marginally better (plates .0409 / .0763 against .0412 / .0766).
+
+Two scale fixes went in with it, both bit-identical at 1/4: SGM's P1 and P2
+are multiplied by depth_fraction / 0.25 (`--sgm-scale 0` turns that off; P1,
+P2 and the confidence ramp are also on the CLI now), and the post-SGM guided
+filter's radius is 8 output px whatever the grid (it was 2 volume pixels,
+which halved on the finer grid). So 0.6.2's defaults are: volume at 1/2,
+dark prior 0, P1 0.06 / P2 0.8 in effect, guided radius 8. The 0.5.x
+reference B is `--depth-fraction 0.25 --dark-prior 1` (still bit-identical
+to 0.5.5).
+
+Reproducibility of the banded SGM: a path's memory is cut at a band's edge,
+so the band layout decides the result, and two runs with different free
+memory gave different B's (16 against 12 bands). The path-sum volume now
+gets a fixed 1.5 GB budget (4 bands at 1/2 resolution on this stack), and to
+make that budget reliably available the luma volume (2.5 GB) is freed as
+soon as the cost is built. Two consecutive default runs are byte-identical;
+a card too short even for 1.5 GB falls back to more bands and says so in
+the log.
+
 ## Open items
 
 - **B: doubled plate edge / glow** (§25a): the C-style aggregation does not

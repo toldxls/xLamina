@@ -366,14 +366,16 @@ void MainWindow::buildUi() {
     haloPrior_ = dspin(0, 10, 0.5, 2, 1, "", "B's preference for darker frames beside bright objects (the spill zone). Default 2; raise it to push the band\n"
                                               "beside a bright plate to its own frame.");
     al->addRow("Halo prior", haloPrior_);
-    darkPrior_ = dspin(0, 10, 0.5, 1, 1, "", "B's preference for darker frames in featureless pixels. Default 1.");
+    darkPrior_ = dspin(0, 10, 0.5, 0, 1, "", "B's preference for darker frames in featureless pixels. Default 0 since 0.6.2: on the 1/2-resolution\n"
+                                              "depth grid it put dark far frames into the gaps of needle fans and inside bright rims (FINDINGS 33); 1 was the\n"
+                                              "1/4-resolution value.");
     al->addRow("Dark prior", darkPrior_);
     QPushButton* resetAdv = new QPushButton("Defaults");
     resetAdv->setToolTip("Put every advanced parameter back to its validated default.");
     connect(resetAdv, &QPushButton::clicked, this, [this] {
         depthRes_->setCurrentIndex(1);
         focusRadius_->setValue(6); focusPower_->setValue(4); depthFmPx_->setValue(6); volAggPx_->setValue(32);
-        refineR_->setValue(12); refineFmPx_->setValue(9); softPx_->setValue(3); haloPrior_->setValue(2); darkPrior_->setValue(1);
+        refineR_->setValue(12); refineFmPx_->setValue(9); softPx_->setValue(3); haloPrior_->setValue(2); darkPrior_->setValue(0);
     });
     al->addRow("", resetAdv);
     pl->addWidget(advanced_);
@@ -502,7 +504,7 @@ void MainWindow::loadSettings() {
     refineFmPx_->setValue(s.value("refineFmPx", 9.0).toDouble());
     softPx_->setValue(s.value("softPx", 3.0).toDouble());
     haloPrior_->setValue(s.value("haloPrior", 2.0).toDouble());
-    darkPrior_->setValue(s.value("darkPrior", 1.0).toDouble());
+    darkPrior_->setValue(s.value("darkPrior", 0.0).toDouble());
     s.endGroup();
     perfToUi(PerfSettings::load(s));
 }
@@ -553,7 +555,7 @@ void MainWindow::resetSettings() {
     advanced_->setChecked(false);
     depthRes_->setCurrentIndex(1);
     focusRadius_->setValue(6); focusPower_->setValue(4); depthFmPx_->setValue(6); volAggPx_->setValue(32);
-    refineR_->setValue(12); refineFmPx_->setValue(9); softPx_->setValue(3); haloPrior_->setValue(2); darkPrior_->setValue(1);
+    refineR_->setValue(12); refineFmPx_->setValue(9); softPx_->setValue(3); haloPrior_->setValue(2); darkPrior_->setValue(0);
     perfToUi(PerfSettings());
     statusBar()->showMessage("Settings reset to the defaults.", 4000);
 }

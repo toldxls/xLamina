@@ -139,7 +139,15 @@ struct StackOptions {
     int streams = 2, refine_r = 12;
     double refine_fm_px = 9.0, soft_px = 3.0;
     double c_smoothing = 0.0;          // C's smoothing (FinalParams::c_smoothing); 0 = the raw selection
-    double halo_prior = 2.0, dark_prior = 1.0;   // B's depth priors (DepthParams); the validated defaults
+    // B's depth priors (DepthParams). The dark prior was 1 with the 1/4-resolution volume; on the 1/2 grid it
+    // puts dark far frames into the gaps of needle fans and inside bright rims, so it is off (FINDINGS 33).
+    // The 0.5.x reference B is --depth-fraction 0.25 --dark-prior 1.
+    double halo_prior = 2.0, dark_prior = 0.0;
+    // SGM's smoothness penalties and the focus-curve confidence ramp (DepthParams); 0 = the DepthParams default.
+    // sgm_scale: multiply P1 and P2 by (depth_fraction / 0.25), so the regularisation per micron does not halve
+    // when the volume's grid is twice as fine (FINDINGS 33)
+    double sgm_p1 = 0, sgm_p2 = 0, conf_lo = 0, conf_hi = 0;
+    bool sgm_scale = true;
     std::vector<std::string> outputs;  // which images to write / keep; empty = all
     bool cache_frames = true;          // keep the frames pinned in host memory between the passes (--cache 0: read every pass from disk)
     bool write_outputs = true;         // false: compute everything (and fill `result`) but write no TIFFs (the GUI's benchmark)

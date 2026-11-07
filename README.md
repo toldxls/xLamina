@@ -52,7 +52,9 @@ pipeline and of the composition (depth resolution, focus window and power, depth
 volume aggregation, refinement range and window, label softness, halo and dark priors) at
 their defaults, for one-at-a-time experiments against a 1:1 comparison. The depth volume is
 estimated at 1/2 of the sensor resolution since 0.6.1 (1/4 left doubled outlines on bright
-plates); it needs about 5 GB of GPU memory for 163 full-size frames.
+plates), with the dark prior off since 0.6.2 (on the finer grid it filled the gaps of needle
+fans with far frames); it needs about 5 GB of GPU memory for 163 full-size frames. The
+0.5.x B is depth resolution 1/4 with dark prior 1.
 
 Cn is C at smoothing 3; with the panel's C smoothing at 2 the two differ on about 3 % of
 pixels, so tick Cn only when C's smoothing is lower.
