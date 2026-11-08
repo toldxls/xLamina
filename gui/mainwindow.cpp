@@ -330,6 +330,15 @@ void MainWindow::buildUi() {
                          "Every image copied off a GPU costs its uploads about 3 ms, so the views are rate-limited; the live view\n"
                          "still adds about a second to a 163-frame render. Off shows only the finished outputs.");
     fl->addRow("Live view", liveRes_);
+    // the warp's resampling filter (Travis, 2026-11-08: Helicon's Preferences offer the same choice)
+    interp_ = new QComboBox;
+    interp_->addItems({"Bilinear", "Bicubic", "Lanczos 3", "Lanczos 8"});   // the order of stackcore::Interp
+    interp_->setCurrentIndex(1);
+    interp_->setToolTip("How every frame is resampled onto the output grid when it is aligned.\n"
+                        "Bicubic (the default, OpenCV's a = -0.75) is the reference the engine was validated with. Lanczos 3 keeps a\n"
+                        "little more fine detail and costs about twice the warp time; Lanczos 8 is sharper still and roughly 15 times\n"
+                        "the warp time (some 10 s more on 163 frames). Bilinear is softest and fastest. Changing it changes every output.");
+    fl->addRow("Interpolation", interp_);
     mainForm_ = fl;
     smoothing_ = new QDoubleSpinBox;
     smoothing_->setRange(0, 6);
@@ -554,6 +563,7 @@ void MainWindow::loadSettings() {
     ref_->setCurrentIndex(s.value("ref", 0).toInt());
     lockScale_->setChecked(s.value("lockScale", false).toBool());
     liveRes_->setCurrentIndex(s.value("liveRes", 2).toInt());
+    interp_->setCurrentIndex(s.value("interp", 1).toInt());
     smoothing_->setValue(s.value("smoothing", 2.0).toDouble());
     cradius_->setValue(s.value("cradius", 32.0).toDouble());
     bradius_->setValue(s.value("bradius", 0.0).toDouble());
@@ -592,6 +602,7 @@ void MainWindow::saveSettings() {
     s.setValue("ref", ref_->currentIndex());
     s.setValue("lockScale", lockScale_->isChecked());
     s.setValue("liveRes", liveRes_->currentIndex());
+    s.setValue("interp", interp_->currentIndex());
     s.setValue("smoothing", smoothing_->value());
     s.setValue("cradius", cradius_->value());
     s.setValue("bradius", bradius_->value());
@@ -622,6 +633,7 @@ void MainWindow::resetSettings() {
     ref_->setCurrentIndex(0);
     lockScale_->setChecked(false);
     liveRes_->setCurrentIndex(2);
+    interp_->setCurrentIndex(1);
     smoothing_->setValue(2);
     cradius_->setValue(32);
     bradius_->setValue(0);
@@ -1040,6 +1052,7 @@ bool MainWindow::buildJob(JobOptions& jo, bool interactive) {
     jo.align.lock_scale = lockScale_->isChecked();
     if (fov_->value() > 0) jo.align.um_per_px = -fov_->value();
     jo.stack.po.g.scale = scale_->currentIndex() == 0 ? 1.0 : 0.5;
+    jo.stack.po.g.interp = interp_->currentIndex();
     jo.stack.c_smoothing = smoothing_->value();
     jo.stack.po.c_radius_px = cradius_->value();
     jo.stack.po.b_radius_px = bradius_->value();
@@ -1360,6 +1373,7 @@ void MainWindow::benchmark() {
         jo.stack.c_smoothing = smoothing_->value();
         jo.stack.po.c_radius_px = cradius_->value();
         jo.stack.po.g.scale = scale_->currentIndex() == 0 ? 1.0 : 0.5;
+        jo.stack.po.g.interp = interp_->currentIndex();
     }
     if (frames.size() < 2) frames.clear();
     bench_ = new BenchmarkDialog(worker_, jo, frames, QDir::toNativeSeparators(folder_), perfFromUi(), this);

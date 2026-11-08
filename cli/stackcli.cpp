@@ -72,6 +72,7 @@ static int usage() {
             "               depth volume (the GUI's Advanced panel): --radius-px 6 --power 4 --depth-fraction 0.25 --depth-fm-px 6 --vol-agg-px 32\n"
             "               refinement / composition: --refine-r 12 --refine-fm-px 9 --soft-px 3\n"
             "               SGM: --sgm-p1 0.03 --sgm-p2 0.4 (scaled by depth-fraction/0.25 unless --sgm-scale 0), confidence ramp --conf-lo 0.45 --conf-hi 0.65\n"
+            "               --interp bicubic: the warp's resampling filter: bilinear | bicubic (the reference) | lanczos3 | lanczos8 (sharpest, slowest)\n"
             "               --conf-noise-ref 0.028 --conf-noise-gamma 1: on a noisier stack the ramp is scaled by (ref / its focus-measure noise\n"
             "                             floor)^gamma, at least 0.5, never above 1: raw (not denoised) frames keep their weak detail (gamma 0 = off)\n"
             "               --dark-reach 24: no dark prior within this many sensor px of sharp content (0 = the 0.5.x behaviour)\n"

@@ -125,6 +125,7 @@ private:
     QString pendingCompare_;
     int pendingFrame_ = -1;
     QComboBox* liveRes_ = nullptr;
+    QComboBox* interp_ = nullptr;      // the warp's resampling filter (Grid::interp)
     std::shared_ptr<JobResultData> result_;
     QMap<QString, QImage> cache_;          // 8-bit versions of outputs and previews
     QMap<QString, QImage> compare_;        // comparison images by tab name; they survive renders

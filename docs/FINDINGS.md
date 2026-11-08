@@ -1571,6 +1571,30 @@ blurbg_a p50 88 -> 33, denoised 46). More noise flips pass in flat areas
 `report_noise\fan_gamma_1to1.png`, `plates_gamma_1to1.png`. Left open: C's
 smoothing gate already adapts (it reads the MADs); the SGM penalties do not.
 
+## 39. The warp's resampling filter as an option (2026-11-08)
+
+Travis asked for Helicon's Preferences choice of interpolation ("to improve
+the preservation of details"). `Grid::interp` / `--interp` / the render
+panel's "Interpolation": bilinear, bicubic (a = -0.75, the reference; the
+only one with the OpenCV 4 `quantize` path), Lanczos 3 (6 x 6 taps), Lanczos
+8 (16 x 16 taps), all at exact double positions with reflect borders, weights
+normalised. The default is unchanged and bit-identical (hashes of §38).
+On the 163-frame stack, B and C with smoothing 2 / C radius 32:
+
+| filter | pass 1 stream | pass 3 | total | B luma RMSE vs bicubic | high-pass energy, fan / plates |
+|---|---|---|---|---|---|
+| bilinear | 3.85 s | 1.41 s | 15.2 s | 0.0056 | 0.915 / 0.918 |
+| bicubic | 3.96 s | 1.41 s | 15.3 s | 0 | 1 |
+| Lanczos 3 | 4.06 s | 1.52 s | 15.6 s | 0.0014 | 1.012 / 1.014 |
+| Lanczos 8 | 5.17 s | 2.41 s | 18.6 s | 0.0016 | 1.028 / 1.031 |
+
+So Lanczos 8 keeps about 3 % more fine-detail energy than bicubic for 3.3 s
+more per render, Lanczos 3 about 1 % for 0.3 s; bilinear loses 8 %. At 1:1
+the fan and plates crops are hard to tell apart by eye
+(`report_noise\fan_interp_1to1.png`, `plates_interp_1to1.png`); the two-up
+viewer's Difference overlay shows where they differ. Every output changes
+with the filter (the alignment does not: it has its own B-spline sampler).
+
 ## Open items
 
 - **B: doubled plate edge / glow** (§25a): the C-style aggregation does not

@@ -1,7 +1,9 @@
 ﻿#include "stackcore/warp.h"
 
+#include <cctype>
 #include <cmath>
 #include <stdexcept>
+#include <string>
 
 namespace stackcore {
 
@@ -144,7 +146,102 @@ __global__ void k_warp_bicubic(const float* __restrict__ src, int sw, int sh, fl
     }
 }
 
+// ---- the other filters (FINDINGS 39): 2R taps per axis, weights normalised, exact double positions, reflect borders.
+// KIND 0 = bilinear (R = 1), 1 = Lanczos (R = 3 or 8): sinc(x) sinc(x / R) over |x| < R.
+__device__ __forceinline__ float sinc_pi(float x) {
+    if (fabsf(x) < 1e-6f) return 1.f;
+    float px = 3.14159265358979f * x;
+    return __sinf(px) / px;
+}
+
+template <int R, int KIND>
+__device__ __forceinline__ void filter_weights(float f, float* w) {   // f: the fractional position, taps at -R+1 .. R
+    float sum = 0.f;
+#pragma unroll
+    for (int i = 0; i < 2 * R; ++i) {
+        float d = f - (float)(i - R + 1);   // distance from the sample to tap i
+        float v;
+        if (KIND == 0) v = fmaxf(0.f, 1.f - fabsf(d));
+        else v = fabsf(d) < (float)R ? sinc_pi(d) * sinc_pi(d / (float)R) : 0.f;
+        w[i] = v;
+        sum += v;
+    }
+    float inv = 1.f / sum;
+#pragma unroll
+    for (int i = 0; i < 2 * R; ++i) w[i] *= inv;
+}
+
+template <int R, int KIND>
+__global__ void k_warp_filter(const float* __restrict__ src, int sw, int sh, float* __restrict__ dst, int ow, int oh,
+                              double m0, double m1, double m2, double m3, double m4, double m5) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= ow || y >= oh) return;
+    double u = m0 * x + m1 * y + m2, v = m3 * x + m4 * y + m5;
+    double fu = floor(u), fv = floor(v);
+    int sx = (int)fu, sy = (int)fv;
+    float fx = (float)(u - fu), fy = (float)(v - fv);
+    float wx[2 * R], wy[2 * R];
+    filter_weights<R, KIND>(fx, wx);
+    filter_weights<R, KIND>(fy, wy);
+    int xs[2 * R], ys[2 * R];
+    const int bx = sx - R + 1, by = sy - R + 1;
+    const bool inside = (unsigned)bx < (unsigned)(sw - 2 * R + 1) && (unsigned)by < (unsigned)(sh - 2 * R + 1);
+#pragma unroll
+    for (int i = 0; i < 2 * R; ++i) {
+        xs[i] = inside ? bx + i : reflect(bx + i, sw);
+        ys[i] = inside ? by + i : reflect(by + i, sh);
+    }
+    float acc[3] = {0.f, 0.f, 0.f};
+#pragma unroll 2
+    for (int i = 0; i < 2 * R; ++i) {
+        const float* row = src + (size_t)ys[i] * sw * 3;
+        float r0 = 0.f, r1 = 0.f, r2 = 0.f;
+#pragma unroll
+        for (int j = 0; j < 2 * R; ++j) {
+            const float* S = row + xs[j] * 3;
+            r0 += S[0] * wx[j];
+            r1 += S[1] * wx[j];
+            r2 += S[2] * wx[j];
+        }
+        acc[0] += r0 * wy[i];
+        acc[1] += r1 * wy[i];
+        acc[2] += r2 * wy[i];
+    }
+    float* o = dst + ((size_t)y * ow + x) * 3;
+    o[0] = acc[0]; o[1] = acc[1]; o[2] = acc[2];
+}
+
 }  // namespace
+
+const char* interp_name(int interp) {
+    switch (interp) {
+        case kBilinear: return "bilinear";
+        case kLanczos3: return "lanczos3";
+        case kLanczos8: return "lanczos8";
+        default: return "bicubic";
+    }
+}
+
+int interp_from_name(const char* name) {
+    std::string n(name ? name : "");
+    for (auto& c : n) c = (char)tolower((unsigned char)c);
+    if (n == "bilinear" || n == "linear") return kBilinear;
+    if (n == "bicubic" || n == "cubic") return kBicubic;
+    if (n == "lanczos3" || n == "lanczos") return kLanczos3;
+    if (n == "lanczos8") return kLanczos8;
+    return -1;
+}
+
+void warp_rgb(const float* d_src, int sw, int sh, const double M[6], float* d_dst, int ow, int oh, int interp,
+              bool quantize, cudaStream_t s) {
+    dim3 blk(32, 8), grd((ow + 31) / 32, (oh + 7) / 8);
+    switch (interp) {
+        case kBilinear: k_warp_filter<1, 0><<<grd, blk, 0, s>>>(d_src, sw, sh, d_dst, ow, oh, M[0], M[1], M[2], M[3], M[4], M[5]); break;
+        case kLanczos3: k_warp_filter<3, 1><<<grd, blk, 0, s>>>(d_src, sw, sh, d_dst, ow, oh, M[0], M[1], M[2], M[3], M[4], M[5]); break;
+        case kLanczos8: k_warp_filter<8, 1><<<grd, blk, 0, s>>>(d_src, sw, sh, d_dst, ow, oh, M[0], M[1], M[2], M[3], M[4], M[5]); break;
+        default: warp_bicubic_rgb(d_src, sw, sh, M, d_dst, ow, oh, quantize, s); break;
+    }
+}
 
 void box_down2_rgb(const float* d_src, int w, int h, float* d_dst, cudaStream_t s) {
     int w2 = w / 2, h2 = h / 2;
@@ -175,7 +272,7 @@ void load_aligned(const float* d_frame, const Grid& g, const Similarity& T, floa
         sw = g.work_w();
         sh = g.work_h();
     }
-    warp_bicubic_rgb(src, sw, sh, M, d_out, g.out_w(), g.out_h(), quantize, s);
+    warp_rgb(src, sw, sh, M, d_out, g.out_w(), g.out_h(), g.interp, quantize, s);
 }
 
 }  // namespace stackcore

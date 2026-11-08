@@ -726,6 +726,11 @@ static StreamerStats run_pass(const std::vector<fs::path>& run_paths, const std:
 bool parse_stack_option(const std::string& a, const std::string& v, StackOptions& so) {
     Grid& g = so.po.g;
     if (a == "--scale") g.scale = atof(v.c_str());
+    else if (a == "--interp") {   // the warp's resampling filter (FINDINGS 39)
+        int i = interp_from_name(v.c_str());
+        if (i < 0) { logf("--interp: bilinear, bicubic, lanczos3 or lanczos8, not '%s'\n", v.c_str()); return false; }
+        g.interp = i;
+    }
     else if (a == "--gpus") so.po.opt.devices = parse_list(v);
     else if (a == "--streams") { so.streams = atoi(v.c_str()); so.po.opt.streams_per_gpu = so.streams; }
     else if (a == "--readers") so.po.opt.readers = atoi(v.c_str());

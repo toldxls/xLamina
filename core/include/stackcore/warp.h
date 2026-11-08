@@ -25,11 +25,18 @@ struct Grid {
     int W = 0, H = 0;            // full-resolution frame size
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;   // output rectangle, inclusive, reference full-res px
     double scale = 1.0;          // working scale: 1.0 or 0.5 (INTER_AREA 2x2 box)
+    // the resampling filter of the warp (Interp): bicubic a = -0.75 is the reference (the prototype's cv2
+    // warpAffine); Lanczos keeps more fine detail at a cost in time (FINDINGS 39)
+    int interp = 1;
     int work_w() const;          // frame size at the working scale (round(W * scale))
     int work_h() const;
     int out_w() const;           // output size (round((x1 - x0 + 1) * scale))
     int out_h() const;
 };
+
+enum Interp : int { kBilinear = 0, kBicubic = 1, kLanczos3 = 2, kLanczos8 = 3 };
+const char* interp_name(int interp);      // "bilinear", "bicubic", "lanczos3", "lanczos8"
+int interp_from_name(const char* name);   // -1 when unknown
 
 // The 2x3 matrix (row-major, double) mapping output pixels to working-scale
 // frame pixels, exactly as load_aligned builds it for cv2.warpAffine.
@@ -42,7 +49,12 @@ void box_down2_rgb(const float* d_src, int w, int h, float* d_dst, cudaStream_t 
 void warp_bicubic_rgb(const float* d_src, int sw, int sh, const double M[6], float* d_dst, int ow, int oh,
                       bool quantize, cudaStream_t s);
 
-// Convenience: full-res float RGB frame -> output grid, using a scratch buffer
+// Any Interp: bilinear, the bicubic above (quantize applies to it alone), Lanczos 3 (6x6 taps) or Lanczos 8
+// (16x16 taps), all with BORDER_REFLECT and exact double positions.
+void warp_rgb(const float* d_src, int sw, int sh, const double M[6], float* d_dst, int ow, int oh, int interp,
+              bool quantize, cudaStream_t s);
+
+// Convenience: full-res float RGB frame -> output grid with the grid's Interp, using a scratch buffer
 // of work_w * work_h * 3 floats when scale == 0.5 (unused otherwise).
 void load_aligned(const float* d_frame, const Grid& g, const Similarity& T, float* d_scratch, float* d_out,
                   bool quantize, cudaStream_t s);
