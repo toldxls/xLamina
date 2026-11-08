@@ -47,6 +47,14 @@ struct DepthParams {
     // mask's share. 0 = flat pixels keep the 0.6.3 cost (no data term, priors decide). Experimental: the fine
     // focus measure is noise in defocused background, so this term settled on intermediate frames (FINDINGS 34)
     float flat_min = 0.f;
+    // the width of the band beside sharp detail that takes its frame (and of the band-to-far transition), in
+    // sensor px; 0 = flat_blur_px, the 0.6.4 behaviour where one number set both the background's smoothness and
+    // how far a sharp object reaches (FINDINGS 36)
+    float flat_band_px = 0.f;
+    // weak features keep this share x min(contrast / c_lo, 1) of their own SGM depth where the flat fill would
+    // otherwise replace it: features with focus evidence of their own, far from confident detail, survive a wide
+    // background blur. 0 = off (the fill replaces everything beyond the reach of confident detail)
+    float flat_keep = 0.f;
 };
 
 struct DepthResult {

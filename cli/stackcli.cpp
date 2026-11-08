@@ -77,6 +77,8 @@ static int usage() {
             "               --flat-blur 128 --flat-reach 24: in regions without texture within the reach, focus slices are box-blurred over the\n"
             "                             blur width (sensor px), so defocused background keeps one depth (0 = off)\n"
             "               --flat-min 1: in those regions prefer the frame with the least structure, by this weight (0 = priors decide)\n"
+            "               --flat-band W: the band beside sharp detail that takes its frame, W sensor px (0 = the blur width)\n"
+            "               --flat-keep S: a weak feature keeps S x (its focus contrast / conf-lo) of its own depth in flat regions (0 = none)\n"
             "               --b-reference 1: the 0.5.x B exactly (1/4 volume, dark prior 1, none of the 0.6.x additions)\n"
             "  developer commands:\n"
             "  stackcli probe FILE.tif\n"

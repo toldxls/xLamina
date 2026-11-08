@@ -887,7 +887,10 @@ void MainWindow::addComparison() {
 void MainWindow::twoUp() {
     if (!twoUp_) twoUp_ = new CompareWindow(this);
     if (result_ && result_->rc == 0) {
-        for (const auto& n : result_->result.names) twoUp_->addImage(QString::fromStdString(n), outputImage(QString::fromStdString(n)), "this render");
+        for (const auto& n : result_->result.names) {   // the written TIFF, when there is one, gives retouching its 16-bit data
+            QString name = QString::fromStdString(n), tif = QDir(result_->outDir).filePath(name + ".tif");
+            twoUp_->addImage(name, outputImage(name), "this render", QFileInfo::exists(tif) ? tif : QString());
+        }
         twoUp_->addImage("depth", outputImage("depth"), "this render");
     }
     for (auto it = compare_.begin(); it != compare_.end(); ++it) twoUp_->addImage(it.key(), it.value(), "comparison image");

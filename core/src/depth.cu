@@ -100,11 +100,12 @@ __global__ void k_curve_stats(const float* __restrict__ V, const __half* __restr
 // confidence w from contrast, end-frame mask; w *= (1 - h); w = 0 on end-peaked pixels
 __global__ void k_confidence(const float* __restrict__ vmax, const float* __restrict__ vmed, const int* __restrict__ kmax,
                              const float* __restrict__ h, const float* __restrict__ trend, int n, int K, float lo, float hi, int eg,
-                             float* __restrict__ w, uint8_t* __restrict__ endm, float* __restrict__ wc) {
+                             float* __restrict__ w, uint8_t* __restrict__ endm, float* __restrict__ wc, float* __restrict__ cont) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float vm = vmax[i];
     float contrast = (vm - vmed[i]) / fmaxf(vm, 1e-12f);
+    if (cont) cont[i] = contrast;   // the raw focus-curve contrast (flat_keep: weak features keep their own depth)
     float ww = fminf(fmaxf((contrast - lo) / (hi - lo), 0.f), 1.f);
     ww = ww * (1.0f - h[i]);
     int km = kmax[i];
@@ -451,6 +452,15 @@ __global__ void k_push(const float* __restrict__ num, const float* __restrict__ 
     float a = fminf(den[i], 1.f);
     fill[i] = a * v + (1.f - a) * up[i];
 }
+// flat_keep: a pixel with focus evidence of its own keeps that share of its SGM depth. The override ov (1 beyond
+// the reach of confident detail) is scaled by 1 - keep * min(contrast / c_lo, 1): a weak feature at half the
+// confidence threshold keeps half its own depth, one at the threshold all of it, featureless background none
+__global__ void k_keep(float* __restrict__ ov, const float* __restrict__ cont, int n, float c_lo, float keep) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float kw = fminf(fmaxf(cont[i] / fmaxf(c_lo, 1e-6f), 0.f), 1.f);
+    ov[i] *= 1.f - keep * kw;
+}
 __global__ void k_flat_target(const float* __restrict__ fill, const float* __restrict__ band_g, const float* __restrict__ e0,
                               const float* __restrict__ e1, float* __restrict__ out, int n, float kfar, float gain) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -563,7 +573,8 @@ DepthResult depth_from_volume(const float* d_V_in, void* d_Lv16, const float* d_
     }
     const bool flat_fill = p.flat && p.flat_blur_px > 0;
     float* wc = flat_fill ? dmalloc(n) : nullptr;   // sharp detail, for the flat regions' band (after the SGM)
-    k_confidence<<<blocks1(n), 256, 0, s>>>(vmax, vmed, kmax, h, trend, n, K, p.c_lo, p.c_hi, p.end_guard, w, endm, wc);
+    float* cont = (flat_fill && p.flat_keep > 0.f) ? dmalloc(n) : nullptr;   // the raw contrast, for flat_keep
+    k_confidence<<<blocks1(n), 256, 0, s>>>(vmax, vmed, kmax, h, trend, n, K, p.c_lo, p.c_hi, p.end_guard, w, endm, wc, cont);
     if (trend) { CK(cudaStreamSynchronize(s)); cudaFree(trend); }
     // out-of-range pixels follow their neighbourhood's vote on which end they are beyond
     if (p.end_vote_px > 0 && p.end_prior > 0) {
@@ -690,19 +701,23 @@ DepthResult depth_from_volume(const float* d_V_in, void* d_Lv16, const float* d_
             CK(cudaMemcpyAsync(d_se, se.data(), se.size() * sizeof(int2), cudaMemcpyHostToDevice, s));
             k_morph<<<grid2(dw, dh), BLK, 0, s>>>(wc, wd, dw, dh, d_se, (int)se.size(), true);   // dilate
             k_textured<<<blocks1(n), 256, 0, s>>>(wd, d, ov, f1, n);                                // ov = 1 - dilated
+            if (cont) k_keep<<<blocks1(n), 256, 0, s>>>(ov, cont, n, p.c_lo, p.flat_keep);          // weak features keep theirs
             CK(cudaStreamSynchronize(s));
             cudaFree(d_se);
         }
+        // the band's width: flat_band_px when given, else the blur width (0.6.4: one number for both)
+        const float bandw = p.flat_band_px > 0.f ? p.flat_band_px : p.flat_blur_px;
         DevGaussian gb, gt;
-        gb.build(std::max(1.0, 1.5 * p.flat_blur_px * p.depth_full_fraction));            // the band's reach
+        gb.build(std::max(1.0, 1.5 * bandw * p.depth_full_fraction));            // the band's reach
         gaussian_blur(wd, band, f2, dw, dh, gb, s);
         k_flat_target<<<blocks1(n), 256, 0, s>>>(fill, band, e0, e1, f1, n, (float)(K - 1), 4.f);
-        gt.build(std::max(1.0, 0.25 * p.flat_blur_px * p.depth_full_fraction));          // soft band-to-far transition
+        gt.build(std::max(1.0, 0.25 * bandw * p.depth_full_fraction));          // soft band-to-far transition
         gaussian_blur(f1, f2, fill, dw, dh, gt, s);
         lerp_mask(d, f2, ov, d, n, s);
         CK(cudaStreamSynchronize(s));
         gb.free(); gt.free();
         for (float* q : {fill, band, f1, f2, ov, wd, e0, e1, wc}) cudaFree(q);
+        if (cont) cudaFree(cont);
     }
 
     // --- upsample, guided filter on the output grid, rint, 3x3 median; conf

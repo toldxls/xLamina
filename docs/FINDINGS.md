@@ -1423,6 +1423,42 @@ What it says:
   thorough adds background blur 256, aggregation 0 / 64, dark reach 48, halo
   prior off, B radius 32 (12 B's, ~2.5 min). The sweep records each
   variant's change share in `sweep.json` (`change_pct`).
+- **Travis's verdict on the thorough set** (11/07, night, at 1:1 in the
+  two-up viewer): background blur 256 is the best of the twelve. The 1/4
+  volume looked good at first and was then rejected for its doubled plate
+  edge (§32 again, even with the 0.6.2–0.6.4 additions on top). The others
+  "sacrifice blur in parts where there should be features, or create a really
+  ugly background". Next: blur 192 / 256 / 384 / 512 and the flat reach at
+  12 / 48, all on the 1/2 volume.
+
+## 36. Background blur vs features: the band decoupled, weak features kept (2026-11-07, night)
+
+Follow-up sweeps on the 1/2 volume (`Q:\_sweep_bg`, `Q:\_sweep_keep`).
+Blur 192 / 256 / 384 / 512 change 1.8 / 3.5 / 5.4 / 6.8 % of B's pixels
+(the change grows almost linearly with the width); blur 256 with flat reach
+12 / 48: 4.1 / 3.8 %. Travis: **512 gives the best background but is among
+the worst for detail** in parts that should have features.
+
+Why one number does both: `flat_blur_px` sets the slice blur in flat pixels,
+the coarse-energy averaging, the band's reach (1.5 x) and the band-to-far
+transition (0.25 x); and every pixel farther than `dark_reach_px` (24) from
+*confident* detail is overridden by the fill, whatever focus evidence it has.
+At 512 a sharp object's frame reaches 768 px and weak features far from
+strong detail take it.
+
+Two controls, CLI only (`--flat-band W`, `--flat-keep S`; DepthParams
+`flat_band_px`, `flat_keep`): the band width decoupled from the blur width,
+and the override scaled by `1 - S min(contrast / c_lo, 1)` so a pixel with
+focus evidence of its own keeps that share of its SGM depth. Change vs base:
+512 alone 7.4 %; 512 + band 128: 2.9 % (so most of 512's effect was the
+band's reach, not the smoothing); 512 + keep 1: 8.3 %; 512 + band 128 +
+keep 1 / 0.5: 5.1 / 3.0 %; 256 + keep 1: 5.1 %.
+
+**Travis: none of them is good.** Helicon "still handles things much better";
+the failures to fix are banding and "waxy lines" in the background while
+features keep their detail. Parked in favour of the retouch tool; the next
+step here is another black-box study of Helicon's background (§31) aimed at
+those two artefacts. The two controls stay (default off, bit-identical B).
 
 ## Open items
 
