@@ -22,6 +22,7 @@
 #include <QScrollArea>
 #include <QSplitter>
 #include <QStatusBar>
+#include <QDateTime>
 #include <QToolBar>
 #include <QToolButton>
 #include <tuple>
@@ -1287,7 +1288,8 @@ void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
         return;
     }
     result_ = data;
-    result_->settingsTag = jobTag_;
+    // the render's finish time first, as Helicon names its files (Travis, 2026-11-08): B_2026-11-08_14-15-27_bicubic_s2_c32_b0
+    result_->settingsTag = QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss") + "_" + jobTag_;
     setBusy(false);
     liveView_->hide();
     resumeThumbnails();
