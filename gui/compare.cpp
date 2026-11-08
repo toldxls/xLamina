@@ -243,32 +243,39 @@ int CompareWindow::indexOf(const QString& name) const {
     return -1;
 }
 
+// the same file, whatever the spelling (Windows paths compare without case)
+static bool sameFile(const QString& a, const QString& b) {
+    return !a.isEmpty() && !b.isEmpty() &&
+           QFileInfo(a).absoluteFilePath().compare(QFileInfo(b).absoluteFilePath(), Qt::CaseInsensitive) == 0;
+}
+
 void CompareWindow::addEntry(Entry e) {
+    auto replace = [&](int i) {
+        bool shown = sel_[0] == i || sel_[1] == i;
+        entries_[i] = std::move(e);
+        rebuildList();
+        if (shown) { if (sel_[0] == i) refresh(0); if (sel_[1] == i) refresh(1); }
+    };
     int i = indexOf(e.name);
     if (i >= 0) {
-        // the same name again: a new render's output, the same file re-opened, or a sweep opened twice -> replace.
-        // The same file name from another folder (B.tif of two renders) is a different image: keep both, the
-        // newcomer named by its folder (Travis, 2026-11-08)
-        const bool same_source = e.path.isEmpty() || entries_[i].path.isEmpty() ||
-                                 QFileInfo(e.path).absoluteFilePath() == QFileInfo(entries_[i].path).absoluteFilePath();
-        if (same_source) {
-            bool shown = sel_[0] == i || sel_[1] == i;
-            entries_[i] = std::move(e);
-            rebuildList();
-            if (shown) { if (sel_[0] == i) refresh(0); if (sel_[1] == i) refresh(1); }
-            return;
-        }
+        // the same name again -> replace: a new render's outputs (in-memory images, whichever folder they were
+        // written to: the path is only for retouching's 16-bit data), the same file re-opened, a sweep opened twice.
+        // A FILE of the same name from another folder (B.tif of two renders) is a different image: keep both, the
+        // newcomer named by its folder, and by its full path when that folder name is taken too (Travis, 2026-11-08)
+        const bool same_source = (!e.fileBacked && !entries_[i].fileBacked) || e.path.isEmpty() || entries_[i].path.isEmpty() ||
+                                 sameFile(e.path, entries_[i].path);
+        if (same_source) { replace(i); return; }
         QFileInfo fi(e.path);
-        QString named = QFileInfo(fi.absolutePath()).fileName() + "/" + e.name;
-        if (indexOf(named) >= 0) named = QDir::toNativeSeparators(fi.absoluteFilePath());
-        e.name = named;
-        if (int j = indexOf(e.name); j >= 0) {   // that very file again
-            bool shown = sel_[0] == j || sel_[1] == j;
-            entries_[j] = std::move(e);
-            rebuildList();
-            if (shown) { if (sel_[0] == j) refresh(0); if (sel_[1] == j) refresh(1); }
-            return;
+        QString folder = QFileInfo(fi.absolutePath()).fileName();
+        if (folder.isEmpty()) folder = QDir::toNativeSeparators(fi.absolutePath());   // a drive root: Q:\ /B.tif
+        QString named = folder + "/" + e.name;
+        int j = indexOf(named);
+        if (j >= 0 && !sameFile(e.path, entries_[j].path)) {   // another file of that name in a folder of that name
+            named = QDir::toNativeSeparators(fi.absoluteFilePath());
+            j = indexOf(named);
         }
+        e.name = named;
+        if (j >= 0) { replace(j); return; }   // that very file again
     }
     entries_.push_back(std::move(e));
     rebuildList();

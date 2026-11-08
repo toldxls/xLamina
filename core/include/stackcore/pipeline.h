@@ -163,12 +163,16 @@ struct StackOptions {
     // least 0.5, and exactly 1 within 5 % of the reference), so raw frames keep their weak detail instead of
     // handing it to the priors and the fill. conf_noise_gamma 0 = off (the ramp as given, whatever the noise)
     double conf_noise_ref = 0.028, conf_noise_gamma = 1.0;
+    // the SGM argmin returns an end frame as itself (0.6.10, FINDINGS 37a); false = the end frame's neighbour, 1 or
+    // K-2, as 0.5.x and the prototype (--b-reference sets it)
+    bool sgm_end_frames = true;
     // flat regions, depth stage (FINDINGS 36): the band's width decoupled from the blur width (0 = the blur width,
     // as 0.6.4), and the share of its own SGM depth a weak feature keeps, by its focus-curve contrast (0 = none)
     double flat_band_px = 0, flat_keep = 0;
     // what the background beyond the band takes (DepthParams::flat_end, FINDINGS 40): 2 = the smoothed frame where
-    // each pixel's focus measure peaks (default since 0.6.16), 0 = the quiet end (0.6.4 .. 0.6.15), 1 = the loud end,
-    // 3 = the field snapped to the ends; flat_end_soft = the transition width of 1 and 3
+    // each pixel's focus measure peaks (default since 0.6.16), 0 = the quiet end (the 0.6.4 .. 0.6.15 depth stage; the
+    // 0.6.15 B also needs --flat-blend 0), 1 = the loud end, 3 = the field snapped to the ends; flat_end_soft = half
+    // the transition of 1 and 3 (the frame slides over -soft .. +soft)
     int flat_end = 2;
     double flat_end_soft = 0.3;
     // the composition's smooth-depth blend widened to this many frames in flat regions (FINDINGS 41): the background's

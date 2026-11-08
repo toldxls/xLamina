@@ -336,9 +336,9 @@ void MainWindow::buildUi() {
     interp_->addItems({"Bilinear", "Bicubic", "Lanczos 3", "Lanczos 8"});   // the order of stackcore::Interp
     interp_->setCurrentIndex(1);
     interp_->setToolTip("How every frame is resampled onto the output grid when it is aligned.\n"
-                        "Bicubic (the default, OpenCV's a = -0.75) is the reference the engine was validated with. Lanczos 3 keeps a\n"
-                        "little more fine detail and costs about twice the warp time; Lanczos 8 is sharper still and roughly 15 times\n"
-                        "the warp time (some 10 s more on 163 frames). Bilinear is softest and fastest. Changing it changes every output.");
+                        "Bicubic (the default, OpenCV's a = -0.75) is the reference the engine was validated with. Lanczos 3 keeps about\n"
+                        "1 % more fine detail for 0.3 s more per render; Lanczos 8 about 3 % more for 3.3 s more (163 frames, FINDINGS 39).\n"
+                        "Bilinear is softest and fastest (8 % less). Changing it changes every output.");
     fl->addRow("Interpolation", interp_);
     mainForm_ = fl;
     smoothing_ = new QDoubleSpinBox;
@@ -440,8 +440,9 @@ void MainWindow::buildUi() {
                                                  "every featureless pixel (the 0.5.x behaviour, which put far frames into the gaps of needle fans at 1/2 resolution).");
     al->addRow("Dark reach", darkReach_);
     flatBlur_ = dspin(0, 512, 16, 128, 0, " px", "Defocused background (no sharp detail within the dark reach): a band of about this width beside sharp detail\n"
-                                                  "takes that detail's frame, beyond it the background takes the end of the stack where it is quietest, with\n"
-                                                  "soft transitions; its focus curves are also smoothed over this width (FINDINGS 34). Default 128; 0 = off\n"
+                                                  "takes that detail's frame, beyond it each pixel takes the frame where its own focus measure peaks, smoothed\n"
+                                                  "blob by blob (FINDINGS 40), and the composition blends up to 16 frames there (FINDINGS 41); its focus curves\n"
+                                                  "are also smoothed over this width (FINDINGS 34). Default 128; 0 = off\n"
                                                   "(the depth stage's own choice, which breaks the background into patches with visible seams).");
     al->addRow("Flat smoothing", flatBlur_);
     QPushButton* resetAdv = new QPushButton("Defaults");
@@ -564,7 +565,7 @@ void MainWindow::loadSettings() {
     ref_->setCurrentIndex(s.value("ref", 0).toInt());
     lockScale_->setChecked(s.value("lockScale", false).toBool());
     liveRes_->setCurrentIndex(s.value("liveRes", 2).toInt());
-    interp_->setCurrentIndex(s.value("interp", 1).toInt());
+    interp_->setCurrentIndex(std::clamp(s.value("interp", 1).toInt(), 0, interp_->count() - 1));   // an odd ini value: never a blank combo
     smoothing_->setValue(s.value("smoothing", 2.0).toDouble());
     cradius_->setValue(s.value("cradius", 32.0).toDouble());
     bradius_->setValue(s.value("bradius", 0.0).toDouble());
@@ -1338,7 +1339,8 @@ void MainWindow::saveCurrent() {
     if (current_.isEmpty() || current_ == "frame") return;
     bool isCompare = compare_.contains(current_);
     if (!result_ && !isCompare) return;
-    // a render's file carries its settings: B_bicubic_s2_c32_b0.tif (interpolation, smoothing, C and B radii)
+    // a render's file carries its finish time and settings: B_2026-11-08_14-15-27_bicubic_s2_c32_b0.tif (interpolation,
+    // smoothing, C and B radii); the engine itself writes B.tif etc. to the output folder
     QString base = isCompare ? QFileInfo(current_).completeBaseName() + "_copy"
                              : (result_->settingsTag.isEmpty() ? current_ : current_ + "_" + result_->settingsTag);
     QString def = QDir(outDir_->text().isEmpty() ? folder_ + "_stacker" : outDir_->text()).filePath(base + (isCompare ? ".png" : ".tif"));

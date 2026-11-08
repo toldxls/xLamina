@@ -82,19 +82,21 @@ static int usage() {
             "               --flat-min 1: in those regions prefer the frame with the least structure, by this weight (0 = priors decide)\n"
             "               --flat-band W: the band beside sharp detail that takes its frame, W sensor px (0 = the blur width)\n"
             "               --flat-keep S: a weak feature keeps S x (its focus contrast / conf-lo) of its own depth in flat regions (0 = none)\n"
-            "               --flat-end quiet|loud|argmax|snap: what the background beyond the band takes: the quiet end of the stack (0.6.4), the\n"
-            "                             loud end, the frame where each pixel's coarse structure peaks (smoothed, blob by blob, as Helicon), or\n"
-            "                             that field snapped to the ends; --flat-end-soft 0.3 = the width of loud's / snap's transition\n"
-            "               --flat-blend W: in flat regions the composition blends the frames within W of the depth instead of two, so a\n"
-            "                             depth ramp through the stack draws no iso-frame rings (0 = off)\n"
-            "               --b-reference 1: the 0.5.x B exactly (1/4 volume, dark prior 1, none of the 0.6.x additions)\n"
+            "               --flat-end argmax: what the background beyond the band takes: argmax = the frame where each pixel's focus measure\n"
+            "                             peaks (smoothed, blob by blob, as Helicon; the default since 0.6.16), quiet = the quiet end of the stack\n"
+            "                             (the 0.6.4 .. 0.6.15 depth stage; with --flat-blend 0 the 0.6.15 B), loud = the loud end, snap = the\n"
+            "                             argmax field snapped to the ends; --flat-end-soft 0.3 = half the width of loud's / snap's transition\n"
+            "               --flat-blend 16: in flat regions the composition blends the frames within W of the depth instead of two, so a\n"
+            "                             depth ramp through the stack draws no iso-frame rings (0 = off, the two-frame blend everywhere)\n"
+            "               --b-reference 1: the 0.5.x B exactly (1/4 volume, dark prior 1, none of the 0.6.x additions: no flat regions,\n"
+            "                             no noise-adaptive ramp, the SGM argmin's end frames clamped to 1 / K-2 as the prototype)\n"
             "  developer commands:\n"
             "  stackcli probe FILE.tif\n"
             "  stackcli dump FILE.tif OUT.f32 [--gpu N]\n"
             "  stackcli stream DIR [--prefix IMG_] [--gpus 0,1] [--streams 3] [--readers 16] [--pool N] [--sums OUT.txt]\n"
-            "  stackcli warp FILE.tif OUT.f32 --z ZR,ZI --t TX,TY --rect X0,Y0,X1,Y1 [--scale 1|0.5] [--quantize] [--gpu N]\n"
-            "  stackcli fold LIST.txt --rect X0,Y0,X1,Y1 --out DIR [--scale 1|0.5] [--radius-px 6] [--power 4] [--c-radius 0]\n"
-            "                [--frames 0,5,9] [--gpus 0,1] [--streams 2] [--readers 16] [--volume]\n"
+            "  stackcli warp FILE.tif OUT.f32 --z ZR,ZI --t TX,TY --rect X0,Y0,X1,Y1 [--scale 1|0.5] [--interp bicubic] [--quantize] [--gpu N]\n"
+            "  stackcli fold LIST.txt --rect X0,Y0,X1,Y1 --out DIR [--scale 1|0.5] [--interp bicubic] [--radius-px 6] [--power 4] [--c-radius 0]\n"
+            "                [--frames 0,5,9] [--gpus 0,1] [--streams 2] [--readers 16] [--volume] [--cache 1: the frames pinned, as the stack]\n"
             "  stackcli depth VOLDIR --out DIR [--crop X0,Y0,W,H] [--gpu N] [--dirs 8]\n"
             "  stackcli stack LIST.txt --rect X0,Y0,X1,Y1 --out DIR [--scale 1|0.5] [--gpus 0,1] [--streams 2]\n"
             "                 [--refine-r 12] [--refine-fm-px 9] [--soft-px 3] [--smoothing 0] [--c-radius 0]   the whole fusion -> 16-bit TIFFs\n"
@@ -172,6 +174,7 @@ static int cmd_warp(int argc, char** argv) {
         else if (a == "--t") { auto d = parse_doubles(v); if (d.size() != 2) return usage(); T.tx = d[0]; T.ty = d[1]; }
         else if (a == "--rect") { auto d = parse_doubles(v); if (d.size() != 4) return usage(); g.x0 = (int)d[0]; g.y0 = (int)d[1]; g.x1 = (int)d[2]; g.y1 = (int)d[3]; have_rect = true; }
         else if (a == "--scale") g.scale = atof(v.c_str());
+        else if (a == "--interp") { g.interp = interp_from_name(v.c_str()); if (g.interp < 0) { fprintf(stderr, "--interp: bilinear, bicubic, lanczos3 or lanczos8\n"); return 2; } }
         else if (a == "--gpu") gpu = atoi(v.c_str());
         else return usage();
     }
@@ -382,6 +385,7 @@ static int cmd_fold(int argc, char** argv) {
         if (a == "--rect") { auto d = parse_doubles(v); if (d.size() != 4) return usage(); g.x0 = (int)d[0]; g.y0 = (int)d[1]; g.x1 = (int)d[2]; g.y1 = (int)d[3]; have_rect = true; }
         else if (a == "--out") out = v;
         else if (a == "--scale") g.scale = atof(v.c_str());
+        else if (a == "--interp") { g.interp = interp_from_name(v.c_str()); if (g.interp < 0) { fprintf(stderr, "--interp: bilinear, bicubic, lanczos3 or lanczos8\n"); return 2; } }
         else if (a == "--radius-px") po.radius_px = atof(v.c_str());
         else if (a == "--c-radius") po.c_radius_px = atof(v.c_str());
         else if (a == "--b-radius") po.b_radius_px = atof(v.c_str());

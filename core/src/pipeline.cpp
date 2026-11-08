@@ -761,6 +761,7 @@ bool parse_stack_option(const std::string& a, const std::string& v, StackOptions
     else if (a == "--flat-blend") so.flat_blend = atof(v.c_str());   // frames (FINDINGS 41)
     else if (a == "--b-reference") {   // the 0.5.x B, bit-identical: the 1/4 volume with the priors and no 0.6.x additions
         so.po.depth_fraction = 0.25; so.dark_prior = 1.0; so.dark_reach_px = 0; so.end_vote_px = 0; so.po.flat_blur_px = 0; so.sgm_scale = false;
+        so.conf_noise_gamma = 0; so.sgm_end_frames = false;   // 0.6.11's noise-adaptive ramp and 0.6.10's end-frame argmin off too
     }
     else if (a == "--sgm-p1") so.sgm_p1 = atof(v.c_str());
     else if (a == "--sgm-p2") so.sgm_p2 = atof(v.c_str());
@@ -1008,9 +1009,12 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
             conf_scale = (float)std::pow(so.conf_noise_ref / ne.depth_floor, so.conf_noise_gamma);
             conf_scale = std::min(1.f, std::max(0.5f, conf_scale));
             if (std::fabs(conf_scale - 1.f) < 0.05f) conf_scale = 1.f;   // the calibration stack itself: bit-identical
-            dp.c_lo *= conf_scale;
-            dp.c_hi = std::min(0.95f, dp.c_hi * conf_scale);
+            if (conf_scale < 1.f) {   // (the ramp as given, whatever its values, when the scale is 1)
+                dp.c_lo *= conf_scale;
+                dp.c_hi = std::min(0.95f, dp.c_hi * conf_scale);
+            }
         }
+        dp.end_frames = so.sgm_end_frames;
         logf("depth: SGM P1 %.3f P2 %.3f, confidence ramp %.2f..%.2f (noise floor %.4f, ramp x%.2f), dark prior %.2f (reach %.0f px), halo prior %.2f, volume %dx%d\n",
              dp.p1, dp.p2, dp.c_lo, dp.c_hi, ne.depth_floor, conf_scale, dp.dark_prior, dp.dark_reach_px, dp.halo_prior, P.vp.dw, P.vp.dh);
         float* d_flat = nullptr;
@@ -1246,9 +1250,11 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
 // Everything in Pass1Options that changes pass 1's result: variants with the same key share one pass 1 + volume.
 static std::string pass1_key(const Pass1Options& po) {
     char b[512];
-    snprintf(b, sizeof b, "%g|%g|%g|%g|%g|%g|%g|%g|%g|%g|%d,%d,%d,%d|%g|%d", po.radius_px, po.power, po.c_radius_px, po.b_radius_px,
+    // the warp's filter is in the key: the frames are warped in pass 1, so two --interp variants cannot share one
+    // (0.6.14 .. 0.6.18 left it out: an --interp variant silently took the group's first filter)
+    snprintf(b, sizeof b, "%g|%g|%g|%g|%g|%g|%g|%g|%g|%g|%d,%d,%d,%d|%g|%d|%d", po.radius_px, po.power, po.c_radius_px, po.b_radius_px,
              po.depth_fraction, po.depth_fm_px, po.vol_agg_px, po.flat_blur_px, po.flat_reach_px, po.flat_min, po.g.x0, po.g.y0, po.g.x1,
-             po.g.y1, po.g.scale, (int)po.frames_sel.size());
+             po.g.y1, po.g.scale, po.g.interp, (int)po.frames_sel.size());
     std::string k = b;
     for (int f : po.frames_sel) k += "," + std::to_string(f);
     return k;

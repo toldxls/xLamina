@@ -1632,7 +1632,10 @@ them; the quiet one is a flat brown wax with a brightness step. The change
 is confined to the flat mask: 45 % of the flat pixels move (mean 51
 frames), 0.7 % outside it; ghost, plates, matrix and crystal_edge
 statistics are unchanged. **argmax is the default from 0.6.16**;
-`--flat-end quiet` is the 0.6.4 .. 0.6.15 background, bit-identical.
+`--flat-end quiet` is the 0.6.4 .. 0.6.15 depth-stage background,
+bit-identical to 0.6.15's depth map (the 0.6.15 B also needs `--flat-blend 0`
+since §41; 0.6.4's B differs further by §37a's end-frame argmin and §38's
+ramp scaling, which sit under every mode).
 Still open: Helicon reaches the far end more often in blurbg_a (p95 155
 vs 103), and its map carries frame-0 speckle inside far regions that ours
 does not reproduce (and need not).
@@ -1669,6 +1672,48 @@ rings; the 1:1 sheet (`flat1_blend_1to1.png`) is decisive: 8 frames already
 removes every ring, 16 and 32 look alike and nearer Helicon's soft blobs.
 Detail tiles are untouched (mean change under 1e-4). Default 16 from 0.6.18;
 compose time 2.5 -> 2.9 s because every frame now carries weight somewhere.
+
+A property to keep in mind, not changed: the window is clipped at the
+stack's ends, so a flat pixel whose depth is exactly frame 0 takes weights
+1, 15/16 .. 1/16 over frames 0 .. 15, whose centroid is frame 5. "The quiet
+end" in a flat region is therefore a 16-frame mixture leaning 5 frames
+inward, not the end frame; with argmax (the default) the field rarely sits
+on an end, so this shows mainly with `--flat-end quiet` or `snap`.
+
+## 42. Review of 0.6.10 .. 0.6.18 (2026-11-08, 0.6.19)
+
+Four read-only reviewers over the day's commits (core depth / compose, warp
+and file naming, GUI, FINDINGS against the code), every finding checked in
+the source. Fixed in 0.6.19, none of which changes a default render:
+
+- The sweep's pass-1 grouping key (`pass1_key`) did not include the warp's
+  filter, so `--interp` variants in one grid shared the first variant's pass
+  1 (volume, guide, C) and sweep.json reported them as unchanged. No sweep
+  with `--interp` was run before the fix.
+- The two-up viewer kept the previous render's B and C under the plain names
+  after a render into another output folder (the outputs arrive with the
+  folder's B.tif path for retouching), and its folder-qualified fallback
+  renamed before checking for the same file, so repeat adds duplicated the
+  entry. In-memory render outputs now replace by name whatever their folder;
+  only files from different folders coexist.
+- `--b-reference 1` had drifted from "the 0.5.x B exactly": §38's ramp
+  scaling applied to it, and §37a's end-frame argmin. It now sets
+  `conf_noise_gamma 0` and clamps the argmin's end frames to 1 / K-2 as the
+  prototype (`StackOptions::sgm_end_frames`, `DepthParams::end_frames`).
+- The ramp's `c_hi` was clipped at 0.95 even when the noise scale was exactly
+  1; the scaling now applies only when the scale is below 1.
+- `warp` and `fold` take `--interp`, so a Lanczos stack and its fold check
+  share a warp; the end-frame energies are not computed for argmax / snap.
+- Text: the "bit-identical" claims above and in the CLI help and headers
+  were narrowed to what holds; the argmax field was described in three
+  places as the rejected |G3 - G12| luma version; the Lanczos tooltip said
+  "some 10 s more" against §39's measured 3.3 s; the Flat smoothing tooltip
+  and README described the quiet-end default.
+
+Unsupported rather than wrong, and still open: §40's case for argmax rests on
+agreement with Helicon's depth map and on 1:1 crops matching Helicon's; no
+measurement from the source frames shows the far matrix sharpest at the
+chosen frames (the §25 rule).
 
 ## Open items
 

@@ -274,7 +274,7 @@ __global__ void k_sgm_pass(const float* __restrict__ C, const float* __restrict_
 
 // ---- argmin with sub-frame parabola (sgm.argmin_subpixel)
 
-__global__ void k_argmin(const float* __restrict__ S, int n, int K, float* __restrict__ d) {
+__global__ void k_argmin(const float* __restrict__ S, int n, int K, float* __restrict__ d, bool ends) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const float* s = S + (size_t)i * K;
@@ -282,8 +282,11 @@ __global__ void k_argmin(const float* __restrict__ S, int n, int K, float* __res
     float best = s[0];
     for (int j = 1; j < K; ++j) if (s[j] < best) { best = s[j]; k = j; }
     if (K < 3) { d[i] = (float)k; return; }   // no neighbours for the parabola (2-frame stacks)
-    if (k == 0 || k == K - 1) { d[i] = (float)k; return; }   // an end frame has one neighbour: no parabola, and the
-    float a = s[k - 1], b = s[k], c = s[k + 1];              // frame itself (0.6.9 and the prototype returned 1 / K-2)
+    if (k == 0 || k == K - 1) {   // an end frame has one neighbour: no parabola, and the frame itself (0.6.10) or, with
+        d[i] = (float)(ends ? k : min(max(k, 1), K - 2));   // ends false, its neighbour 1 / K-2 as 0.6.9 and the prototype
+        return;
+    }
+    float a = s[k - 1], b = s[k], c = s[k + 1];
     float den = a - 2.f * b + c;
     float off = den > 1e-9f ? 0.5f * (a - c) / den : 0.f;
     d[i] = (float)k + fminf(fmaxf(off, -0.5f), 0.5f);
@@ -463,9 +466,10 @@ __global__ void k_keep(float* __restrict__ ov, const float* __restrict__ cont, i
 // Beyond the band each pixel takes an end of the stack from the coarse energies of the end frames (e0: frame 0,
 // e1: frame K-1, both averaged over the flat blur width). end_mode 0 (0.6.4): the QUIET end, where the defocused
 // background shows the fewest ghosts of nearby objects (a flat wax, FINDINGS 36). end_mode 1 (FINDINGS 40): the
-// LOUD end, where the blob's own bokeh is strongest, which is what Helicon's B does blob by blob (FINDINGS 37b-c);
-// where the two ends are within `soft` (relative) of each other the frame slides between them, so neighbouring
-// blobs meet in a wide continuous transition instead of a seam.
+// LOUD end, where the blob's own bokeh is strongest: the first guess at Helicon's blob-by-blob background (FINDINGS
+// 37b-c), rejected in FINDINGS 40 (it picks the near end almost everywhere: the end frames alone do not know where
+// the far matrix is in focus); where the two ends are within `soft` (relative) of each other the frame slides
+// between them, so neighbouring blobs meet in a wide continuous transition instead of a seam.
 // (two kernels, not a branch: the 0.6.4 kernel's body is kept verbatim so its arithmetic stays bit-identical)
 __global__ void k_flat_target(const float* __restrict__ fill, const float* __restrict__ band_g, const float* __restrict__ e0,
                               const float* __restrict__ e1, float* __restrict__ out, int n, float kfar, float gain) {
@@ -686,7 +690,7 @@ DepthResult depth_from_volume(const float* d_V_in, void* d_Lv16, const float* d_
     CK(cudaGetLastError());
     // the coarse structure of the background at the two ends of the stack (for the flat regions, after the SGM)
     float *e0 = nullptr, *e1 = nullptr;
-    if (flat_fill) {
+    if (flat_fill && !kbg) {   // flat_end 0 / 1 only: 2 / 3 take the field
         float *pl = dmalloc(n), *t1 = dmalloc(n), *t2 = dmalloc(n);
         int ke = std::min(8, std::max(1, K / 4));
         e0 = dmalloc(n); e1 = dmalloc(n);
@@ -696,10 +700,9 @@ DepthResult depth_from_volume(const float* d_V_in, void* d_Lv16, const float* d_
         coarse_energy(pl, e1, t1, t2, dw, dh, p.depth_full_fraction, p.flat_blur_px, s);
         cudaFree(pl); cudaFree(t1); cudaFree(t2);
     }
-    // flat_end 2 / 3 (FINDINGS 40): the frame where each pixel's coarse structure (|G3 - G12| of the luma, averaged over
-    // 24 px) peaks over the whole stack, then spread by an energy-weighted 32 px blur: the blob-wise field Helicon's
-    // background follows (FINDINGS 37c, Spearman 0.88 / 0.96 against its map). Sensor px scaled to the depth grid.
-    // (kbg, the field for flat_end 2 / 3, is built above from the focus measure before k_cost overwrites V)
+    // (kbg, the field for flat_end 2 / 3, is built above from the focus measure V before k_cost overwrites it. A first
+    // version took |G3 - G12| of the luma volume here instead and failed like the loud end, FINDINGS 40: that volume is
+    // blurred over 12 px, which removes the structure the argmax needs. e0 / e1 are only read by flat_end 0 and 1.)
     cudaFree(d_Lv16);   // consumed: the luma volume's memory goes to the SGM
     R.ms_cost = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     {
@@ -758,7 +761,7 @@ DepthResult depth_from_volume(const float* d_V_in, void* d_Lv16, const float* d_
         };
         pass(1, 0); pass(-1, 0); pass(0, 1); pass(0, -1);   // the prototype's order: x+, x-, y+, y-
         if (p.dirs == 8) { pass(1, 1); pass(-1, 1); pass(1, -1); pass(-1, -1); }   // (dy, dx) = (1,1), (1,-1), (-1,1), (-1,-1)
-        k_argmin<<<blocks1((y1 - y0) * dw), 256, 0, s>>>(S + (size_t)(y0 - ya) * dw * K, (y1 - y0) * dw, K, d + (size_t)y0 * dw);
+        k_argmin<<<blocks1((y1 - y0) * dw), 256, 0, s>>>(S + (size_t)(y0 - ya) * dw * K, (y1 - y0) * dw, K, d + (size_t)y0 * dw, p.end_frames);
     }
     CK(cudaStreamSynchronize(s));
     CK(cudaGetLastError());
