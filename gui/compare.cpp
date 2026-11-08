@@ -245,12 +245,30 @@ int CompareWindow::indexOf(const QString& name) const {
 
 void CompareWindow::addEntry(Entry e) {
     int i = indexOf(e.name);
-    if (i >= 0) {   // the same name again: a new render's output, or a sweep opened twice
-        bool shown = sel_[0] == i || sel_[1] == i;
-        entries_[i] = std::move(e);
-        rebuildList();
-        if (shown) { if (sel_[0] == i) refresh(0); if (sel_[1] == i) refresh(1); }
-        return;
+    if (i >= 0) {
+        // the same name again: a new render's output, the same file re-opened, or a sweep opened twice -> replace.
+        // The same file name from another folder (B.tif of two renders) is a different image: keep both, the
+        // newcomer named by its folder (Travis, 2026-11-08)
+        const bool same_source = e.path.isEmpty() || entries_[i].path.isEmpty() ||
+                                 QFileInfo(e.path).absoluteFilePath() == QFileInfo(entries_[i].path).absoluteFilePath();
+        if (same_source) {
+            bool shown = sel_[0] == i || sel_[1] == i;
+            entries_[i] = std::move(e);
+            rebuildList();
+            if (shown) { if (sel_[0] == i) refresh(0); if (sel_[1] == i) refresh(1); }
+            return;
+        }
+        QFileInfo fi(e.path);
+        QString named = QFileInfo(fi.absolutePath()).fileName() + "/" + e.name;
+        if (indexOf(named) >= 0) named = QDir::toNativeSeparators(fi.absoluteFilePath());
+        e.name = named;
+        if (int j = indexOf(e.name); j >= 0) {   // that very file again
+            bool shown = sel_[0] == j || sel_[1] == j;
+            entries_[j] = std::move(e);
+            rebuildList();
+            if (shown) { if (sel_[0] == j) refresh(0); if (sel_[1] == j) refresh(1); }
+            return;
+        }
     }
     entries_.push_back(std::move(e));
     rebuildList();
