@@ -127,6 +127,7 @@ private:
     QComboBox* liveRes_ = nullptr;
     QComboBox* interp_ = nullptr;      // the warp's resampling filter (Grid::interp)
     std::shared_ptr<JobResultData> result_;
+    QString jobTag_;                   // the running render's settings for file names (interpolation, smoothing, radii)
     QMap<QString, QImage> cache_;          // 8-bit versions of outputs and previews
     QMap<QString, QImage> compare_;        // comparison images by tab name; they survive renders
     QString current_;                      // name of the image on screen

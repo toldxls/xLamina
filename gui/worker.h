@@ -28,6 +28,7 @@ struct JobResultData {
     double seconds = 0;   // wall time of the whole job (alignment + fusion + writing)
     bool sweep = false;   // a sweep (outDir holds sweep.json and the variants), not a render: `result` is empty
     int variants = 0;
+    QString settingsTag;  // the render's settings for file names ("bicubic_s2_c32_b0"), set by the main window
 };
 
 class Worker : public QObject {

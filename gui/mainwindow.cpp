@@ -1056,6 +1056,9 @@ bool MainWindow::buildJob(JobOptions& jo, bool interactive) {
     jo.stack.c_smoothing = smoothing_->value();
     jo.stack.po.c_radius_px = cradius_->value();
     jo.stack.po.b_radius_px = bradius_->value();
+    // the settings that name the saved files (Travis, 2026-11-08): interpolation, smoothing, C and B radii
+    jobTag_ = QString("%1_s%2_c%3_b%4").arg(interp_->currentText().toLower().remove(' ')).arg(smoothing_->value(), 0, 'g', 2)
+                  .arg((int)cradius_->value()).arg((int)bradius_->value());
     if (advanced_->isChecked()) {
         jo.stack.po.depth_fraction = depthRes_->currentData().toDouble();
         jo.stack.po.radius_px = focusRadius_->value();
@@ -1284,6 +1287,7 @@ void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
         return;
     }
     result_ = data;
+    result_->settingsTag = jobTag_;
     setBusy(false);
     liveView_->hide();
     resumeThumbnails();
@@ -1332,7 +1336,9 @@ void MainWindow::saveCurrent() {
     if (current_.isEmpty() || current_ == "frame") return;
     bool isCompare = compare_.contains(current_);
     if (!result_ && !isCompare) return;
-    QString base = isCompare ? QFileInfo(current_).completeBaseName() + "_copy" : current_;
+    // a render's file carries its settings: B_bicubic_s2_c32_b0.tif (interpolation, smoothing, C and B radii)
+    QString base = isCompare ? QFileInfo(current_).completeBaseName() + "_copy"
+                             : (result_->settingsTag.isEmpty() ? current_ : current_ + "_" + result_->settingsTag);
     QString def = QDir(outDir_->text().isEmpty() ? folder_ + "_stacker" : outDir_->text()).filePath(base + (isCompare ? ".png" : ".tif"));
     QString filter = isCompare ? "PNG (*.png);;JPEG (*.jpg)" : "16-bit TIFF (*.tif);;JPEG (*.jpg);;PNG (*.png)";
     QString fn = QFileDialog::getSaveFileName(this, "Save " + current_, def, filter);
