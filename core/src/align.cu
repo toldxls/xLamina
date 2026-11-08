@@ -424,7 +424,7 @@ std::complex<double> phase_init(const AlignPyramid::Level& L0, const AlignPyrami
         for (void* p : {wk.tw_fw, wk.tw_fh, wk.tw_iw, wk.tw_ih, wk.fft_a, wk.fft_b, wk.fft_t}) cudaFree(p);
         cudaFree(wk.fft_c);
         wk.fft_w = pw; wk.fft_h = ph;
-        auto up = [](const std::vector<cpx>& v) { void* d; CK(cudaMalloc(&d, v.size() * sizeof(cpx))); CK(cudaMemcpy(d, v.data(), v.size() * sizeof(cpx), cudaMemcpyHostToDevice)); return d; };
+        auto up = [](const std::vector<cpx>& v) { void* d; CK(cudaMalloc(&d, v.size() * sizeof(cpx))); CK(cudaMemcpy(d, v.data(), v.size() * sizeof(cpx), cudaMemcpyHostToDevice)); CK(cudaStreamSynchronize(0)); return d; };   // the DMA landed (FINDINGS 43)
         wk.tw_fw = up(twiddles(pw, false)); wk.tw_fh = up(twiddles(ph, false));
         wk.tw_iw = up(twiddles(pw, true));  wk.tw_ih = up(twiddles(ph, true));
         CK(cudaMalloc(&wk.fft_a, (size_t)pw * ph * sizeof(cpx)));

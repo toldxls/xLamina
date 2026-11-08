@@ -373,11 +373,17 @@ void area_tab(int ssize, int dsize, double scale, std::vector<int>& off, std::ve
     }
 }
 
+// A small table (filter taps, resampling coefficients) to the device, complete before the caller can launch
+// a kernel on ANY stream. cudaMemcpy from pageable memory returns once the data is in the driver's staging
+// buffer, not when the DMA has landed (CUDA Runtime API, "API synchronization behavior"); a kernel launched
+// right after on a non-blocking stream (pass 1's fold_s and the slot streams) can read half-written taps.
+// That was the flat mask's run-to-run difference (FINDINGS 43): the legacy stream's sync waits for the DMA.
 template <class T>
 T* up(const std::vector<T>& v) {
     T* d = nullptr;
     CK(cudaMalloc(&d, v.size() * sizeof(T)));
     CK(cudaMemcpy(d, v.data(), v.size() * sizeof(T), cudaMemcpyHostToDevice));
+    CK(cudaStreamSynchronize(0));
     return d;
 }
 

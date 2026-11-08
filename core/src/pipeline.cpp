@@ -552,13 +552,38 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
                 // two kernels, freed after the stage's sync: freeing (and rebuilding at the same address) right after
                 // the launch let the first blur read the second kernel's taps, which made the flat mask, and so the
                 // depth map, differ run to run with two streams and the frame cache (FINDINGS 38)
+                // STACKER_FLAT_DEBUG=DIR: the chain's stages on the first GPU, snapshotted on the stream (device copies,
+                // no extra host syncs that would change the timing) and written to DIR as .f32 after the stage
+                const char* dbg = getenv("STACKER_FLAT_DEBUG");
+                const char* dbg_names[5] = {"ga", "blur1", "lap", "blur2", "flat"};
+                float* dbg_buf = nullptr;
+                int dbg_n = 0;
+                if (dbg && d == devs[0]) CK(cudaMalloc(&dbg_buf, 5 * nd * sizeof(float)));
+                auto snap = [&](const float* d_src) {
+                    if (dbg_buf) CK(cudaMemcpyAsync(dbg_buf + (size_t)dbg_n++ * nd, d_src, nd * sizeof(float), cudaMemcpyDeviceToDevice, s));
+                };
+                snap(d_g);
                 gr1.build(std::max(1.0, po.flat_reach_px * po.depth_fraction / 4));
                 gaussian_blur(d_g, d_flat, d_T2, vp.dw, vp.dh, gr1, s);
+                snap(d_flat);
                 laplacian3_abs(d_flat, d_Vb, vp.dw, vp.dh, s);
+                snap(d_Vb);
                 gr2.build(std::max(1.0, po.flat_reach_px * po.depth_fraction));
                 gaussian_blur(d_Vb, d_flat, d_T2, vp.dw, vp.dh, gr2, s);
+                snap(d_flat);
                 float lo = percentile(d_flat, d_T2, nd, 20.0, s), hi = percentile(d_flat, d_T2, nd, 90.0, s);
                 flatness(d_flat, lo, std::max(0.5f * (hi - lo), 1e-6f), d_flat, nd, s);
+                snap(d_flat);
+                if (dbg_buf) {
+                    CK(cudaStreamSynchronize(s));
+                    std::vector<float> h(nd);
+                    for (int i = 0; i < dbg_n; ++i) {
+                        CK(cudaMemcpy(h.data(), dbg_buf + (size_t)i * nd, nd * sizeof(float), cudaMemcpyDeviceToHost));
+                        write_raw(fs::path(dbg) / (std::string(dbg_names[i]) + ".f32"), h.data(), nd);
+                    }
+                    cudaFree(dbg_buf);
+                    logf("flat debug: lo %.9g hi %.9g R %d / %d, %d stages -> %s\n", lo, hi, gr1.R, gr2.R, dbg_n, dbg);
+                }
                 rbox = std::max(1, (int)std::nearbyint(po.flat_blur_px * po.depth_fraction));
                 if (d == devs[0]) {   // for inspection: the fusion writes it as flat.f32 when it writes the depth
                     P.flat.resize(nd);

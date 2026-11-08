@@ -1538,6 +1538,9 @@ always gave the same (correct) answer. The kernels now live until the stage's
 sync. Verified: one GPU, two GPUs, one or two streams, cache on or off all
 give the same hashes for flat, depth and B. The argmin numbers of §37a stand
 (the two runs compared there happened to land in the correct state).
+*Correction (§43, 0.6.20): the mechanism above was wrong and the fix only
+moved the timing. On the 201-frame stack B still differed run to run, also
+with one GPU and one stream; the real cause is the taps' upload itself.*
 
 **b. Why B degrades on raw frames (§37d).** The confidence `(vmax - vmed) /
 vmax` of a focus curve is an SNR test: the curve's median in a flat or
@@ -1714,6 +1717,46 @@ Unsupported rather than wrong, and still open: §40's case for argmax rests on
 agreement with Helicon's depth map and on 1:1 crops matching Helicon's; no
 measurement from the source frames shows the far matrix sharpest at the
 chosen frames (the §25 rule).
+
+## 43. The flat mask's race, found for real: a synchronous cudaMemcpy that is not (2026-11-08, 0.6.20)
+
+Checking 0.6.19 against 0.6.18 on the 201-frame stack at full resolution, B
+differed (11.4 M of 91 M samples, peak 0.44 of full scale) while C was
+byte-identical. Two runs of the same build differed as much (9.5 M samples,
+peak 0.24), so did two runs of 0.6.18, with one GPU, and with one stream per
+GPU; `--flat-blur 0` gave identical B and depth every time. `flat.f32`
+differed on 47 % of its pixels (mean 0.05, max 0.62), and the hashes of flat
+and B repeated from a small set of states across all those runs: not noise,
+a race with a few outcomes. With `STACKER_FLAT_DEBUG=DIR` (pass 1 snapshots
+the mask's five stages on the stream and writes them after the stage) two
+runs were identical at every stage, in the state the lucky runs had shared:
+the one extra `cudaMalloc` before the chain hid it.
+
+The cause is in `up()` (imgops.cu), which puts a Gaussian kernel's taps on
+the device with `cudaMalloc` + `cudaMemcpy`. The Runtime API's "API
+synchronization behavior" says of the synchronous copy: *for transfers from
+pageable host memory to device memory, the function returns once the
+pageable buffer has been copied to the staging memory for DMA transfer, but
+the DMA to the final destination may not have completed.* The DMA is on the
+legacy default stream, which blocking streams wait for and non-blocking
+streams do not. Pass 1 runs on `cudaStreamNonBlocking` streams and the flat
+mask builds its two kernels immediately before the blurs, so the blur could
+read taps that had not landed; the fusion's stream is a blocking one, which
+is why the depth stage's kernels (built the same way) never showed it, and
+§38's rearrangement only changed the timing. `up()` (and the same helper in
+compose.cu, and the alignment's twiddle upload) now end with
+`cudaStreamSynchronize(0)`, which waits for the staged DMA. The resampler's
+coefficient tables went through the same helper.
+
+Verified on the 201-frame stack at full resolution: two default runs, one
+GPU, and one stream per GPU give one hash each for flat, depth, B and C
+(flat c02d7116, B 06a4010d), the state the debug runs and the lucky runs had
+shared. That B is also the hash one 0.6.18 run produced, so 0.6.19's code
+changes left the default render bit-identical, as §42 claimed. A render is
+also faster now (22 s against 38 s for the stack command with B and C),
+presumably because the corrupt masks marked more of the image flat and the
+16-frame blend then drew every frame into the composition there; not
+measured separately.
 
 ## Open items
 

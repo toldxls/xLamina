@@ -37,6 +37,7 @@ template <class T>
 T* upload(const std::vector<T>& v) {
     T* p = dalloc<T>(v.size());
     CK(cudaMemcpy(p, v.data(), v.size() * sizeof(T), cudaMemcpyHostToDevice));
+    CK(cudaStreamSynchronize(0));   // the staged DMA has landed before any stream's kernel reads it (FINDINGS 43)
     return p;
 }
 template <class T>
