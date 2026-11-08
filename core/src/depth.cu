@@ -282,12 +282,11 @@ __global__ void k_argmin(const float* __restrict__ S, int n, int K, float* __res
     float best = s[0];
     for (int j = 1; j < K; ++j) if (s[j] < best) { best = s[j]; k = j; }
     if (K < 3) { d[i] = (float)k; return; }   // no neighbours for the parabola (2-frame stacks)
-    int kc = min(max(k, 1), K - 2);
-    float a = s[kc - 1], b = s[kc], c = s[kc + 1];
+    if (k == 0 || k == K - 1) { d[i] = (float)k; return; }   // an end frame has one neighbour: no parabola, and the
+    float a = s[k - 1], b = s[k], c = s[k + 1];              // frame itself (0.6.9 and the prototype returned 1 / K-2)
     float den = a - 2.f * b + c;
     float off = den > 1e-9f ? 0.5f * (a - c) / den : 0.f;
-    off = (k >= 1 && k <= K - 2) ? fminf(fmaxf(off, -0.5f), 0.5f) : 0.f;
-    d[i] = (float)kc + off;
+    d[i] = (float)k + fminf(fmaxf(off, -0.5f), 0.5f);
 }
 
 // ---- cv::resize INTER_LINEAR (float coefficients, row pass then column pass)

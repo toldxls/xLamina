@@ -1460,6 +1460,68 @@ features keep their detail. Parked in favour of the retouch tool; the next
 step here is another black-box study of Helicon's background (§31) aimed at
 those two artefacts. The two controls stay (default off, bit-identical B).
 
+## 37. End frames, Helicon's background depth, and raw vs denoised frames (2026-11-08)
+
+**a. The SGM argmin never returned an end frame (fixed, 0.6.10).** `k_argmin`
+and the prototype's `argmin_subpixel` clamped the winning label to `1 .. K-2`
+before the parabola and returned the clamped label even when the parabola was
+skipped, so a pixel sharpest in frame 0 or K-1 was rendered from frame 1 or
+K-2. Now an end-frame winner returns the frame itself (no parabola). On the
+real stack (denoised frames, same transforms) the depth changed on 9.9 % of
+pixels, by 1.00 frame on average (max 25 through the fill's spread); 14 % of
+the crystal_edge region now sits at frame 0 (Helicon: 8 %, 0.6.9: 0.2 %) and
+8 % of blurbg_a (Helicon: 20 %). B differs by more than 512 LSB16 on 1.1 % of
+pixels, all in those end-frame areas; at 1:1 the crops are indistinguishable.
+Sheets: `helicon_B_analysis\report_argmin`.
+
+**b. What Helicon's B does in the defocused background** (its `_dmap`, 162
+grey levels = integer frames, against ours; `bg_depth_stats.py`,
+`report_bg\bgdepth_*.png`). Helicon does not send the background to one end
+of the stack. Its depth there is a smooth, blob-shaped field that spans the
+whole range and follows the coarse content: the crystal's shadow in blurbg_b
+is at frames 0-30 in Helicon, at 156 in our 0.6.4 band fill (xl_h11_band);
+the upper left of blurbg_a is frame 0 in Helicon, the far end in ours. Within
+a blob Helicon is near one end (black or white in the overview), and the
+transitions between blobs are wide and continuous. Its map is 2-3x smoother
+at 4 px (RMS Laplacian) than ours in every region, but it still has 20-33 %
+step pixels in the blur regions, so smoothness is not the difference: the
+choice of frame per blob is. Our fill renders the whole region as a monotone
+ramp from one end over ~200 px, which is the flat "wax" and, where the ramp
+crosses many frames, the faint concentric lines Travis sees.
+
+**c. A model of it** (`bg_helicon_model.py`: all 163 frames warped onto the
+regions at 1/4, band-pass energies |G(a) - G(b)| per frame, per-pixel
+argmax / centroid, smoothed plainly or weighted by the peak energy, scored
+against Helicon's map by Spearman rank correlation). Best candidates:
+
+| region | best candidate | Spearman | RMSE fr | ours (band fill) |
+|---|---|---|---|---|
+| blurbg_a | bp 2-8 px argmax, energy-weighted smooth 32 px | 0.88 | 42 | 0.71 / 49 |
+| ghost | bp 3-12 px, window 24, weighted smooth 32 px | 0.96 | 8.5 | 0.89 / 13.9 |
+| blurbg_b | bp 2-8 px argmax, weighted smooth 96 px | 0.73 | 57 | **0.77** / 86 |
+
+The band-pass argmax has Helicon's shape (same blobs, same side of the stack)
+but stays mid-grey where Helicon snaps to the ends: Helicon's background is
+closer to "each blob takes the end its coarse evidence points to, with wide
+soft transitions" than to a literal smoothed argmax. The near-frame shadow in
+blurbg_b is predicted by no band-pass scale up to 24-96 px. Not adopted yet;
+the next step is to try that rule in the fill (per-blob end from the
+band-pass argmax instead of one global end vote) and judge at 1:1.
+
+**d. Raw vs denoised frames.** Travis denoises every frame in Camera Raw
+before stacking (Helicon saw the same denoised frames, so all comparisons so
+far are fair). The same 163 shots exported without denoise
+(`Q:\163 noise`, noise MAD 0.0071 vs 0.0028 at level 0, 2.5x) stacked with the
+same transforms: the depth map differs by 20.7 frames RMS (49 % of pixels by
+4 or more frames), B's luma by 0.0167 RMSE. At 1:1 the raw-frame B loses half
+the fan's needles to a yellow blotch (the 0.6.4 fill: with `--b-reference 1`
+the needles survive apart from a small blotch at the base) and the plates'
+internal striations go soft in both B variants. So B's confidence thresholds
+and the fill's "sharp detail" gate are tuned to the denoised noise level and
+are not noise-adaptive; the measured `noise_mad` is not used by the depth
+stage. Open item: scale `c_lo`/`c_hi` (and the fill's gate) by the measured
+noise, then re-check both frame sets. Sheets: `report_noise\*_1to1.png`.
+
 ## Open items
 
 - **B: doubled plate edge / glow** (§25a): the C-style aggregation does not
