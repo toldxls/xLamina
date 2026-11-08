@@ -460,6 +460,13 @@ __global__ void k_keep(float* __restrict__ ov, const float* __restrict__ cont, i
     float kw = fminf(fmaxf(cont[i] / fmaxf(c_lo, 1e-6f), 0.f), 1.f);
     ov[i] *= 1.f - keep * kw;
 }
+// Beyond the band each pixel takes an end of the stack from the coarse energies of the end frames (e0: frame 0,
+// e1: frame K-1, both averaged over the flat blur width). end_mode 0 (0.6.4): the QUIET end, where the defocused
+// background shows the fewest ghosts of nearby objects (a flat wax, FINDINGS 36). end_mode 1 (FINDINGS 40): the
+// LOUD end, where the blob's own bokeh is strongest, which is what Helicon's B does blob by blob (FINDINGS 37b-c);
+// where the two ends are within `soft` (relative) of each other the frame slides between them, so neighbouring
+// blobs meet in a wide continuous transition instead of a seam.
+// (two kernels, not a branch: the 0.6.4 kernel's body is kept verbatim so its arithmetic stays bit-identical)
 __global__ void k_flat_target(const float* __restrict__ fill, const float* __restrict__ band_g, const float* __restrict__ e0,
                               const float* __restrict__ e1, float* __restrict__ out, int n, float kfar, float gain) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -467,6 +474,49 @@ __global__ void k_flat_target(const float* __restrict__ fill, const float* __res
     float b = fminf(band_g[i] * gain, 1.f);
     float far = e0[i] < e1[i] ? 0.f : kfar;
     out[i] = b * fill[i] + (1.f - b) * far;
+}
+__global__ void k_flat_target_loud(const float* __restrict__ fill, const float* __restrict__ band_g, const float* __restrict__ e0,
+                                   const float* __restrict__ e1, float* __restrict__ out, int n, float kfar, float gain, float soft) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float b = fminf(band_g[i] * gain, 1.f);
+    float a = e0[i], c = e1[i];
+    float r = (c - a) / fmaxf(a + c, 1e-12f);              // -1: frame 0 far louder .. +1: frame K-1 far louder
+    float s = fminf(fmaxf((r + soft) / fmaxf(2.f * soft, 1e-6f), 0.f), 1.f);
+    s = s * s * (3.f - 2.f * s);                           // smoothstep
+    float far = kfar * s;
+    out[i] = b * fill[i] + (1.f - b) * far;
+}
+// flat_end 2 / 3: beyond the band the pixel takes `field`, the (smoothed) frame where its coarse structure peaks
+// over the whole stack (FINDINGS 40); snap > 0 pushes the field to the ends over a transition of that width
+__global__ void k_flat_target_field(const float* __restrict__ fill, const float* __restrict__ band_g, const float* __restrict__ field,
+                                    float* __restrict__ out, int n, float kfar, float gain, float snap) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float b = fminf(band_g[i] * gain, 1.f);
+    float far = field[i];
+    if (snap > 0.f) {
+        float u = far / fmaxf(kfar, 1.f) - 0.5f;
+        float s = fminf(fmaxf((u + snap) / (2.f * snap), 0.f), 1.f);
+        s = s * s * (3.f - 2.f * s);
+        far = kfar * s;
+    }
+    out[i] = b * fill[i] + (1.f - b) * far;
+}
+// running argmax over frames: where e beats best, best = e and arg = k
+__global__ void k_argmax_update(const float* __restrict__ e, int k, float* __restrict__ best, float* __restrict__ arg, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    if (e[i] > best[i]) { best[i] = e[i]; arg[i] = (float)k; }
+}
+// plane k of the k-fastest volume
+__global__ void k_vplane(const float* __restrict__ V, int n, int K, int k, float* __restrict__ out) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = V[(size_t)i * K + k];
+}
+__global__ void k_div(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = a[i] / fmaxf(b[i], 1e-12f);
 }
 
 // coarse structure of one luma plane: |G(3 px) - G(12 px)| (sensor px), averaged over the flat blur width
@@ -600,6 +650,33 @@ DepthResult depth_from_volume(const float* d_V_in, void* d_Lv16, const float* d_
         CK(cudaStreamSynchronize(s));
         cudaFree(d_se);
     }
+    // flat_end 2 / 3 (FINDINGS 40): the frame where each pixel's focus measure, pooled over 24 px, peaks over the
+    // whole stack, then spread by an energy-weighted 32 px blur: the blob-wise field Helicon's background follows
+    // (FINDINGS 37c: a 2-8 px band-pass argmax with that smoothing scored Spearman 0.88 / 0.96 against its map; the
+    // focus measure is that band at the depth grid). Built here, before k_cost overwrites V. Sensor px x fraction.
+    float* kbg = nullptr;
+    if (flat_fill && (p.flat_end == 2 || p.flat_end == 3)) {
+        const double frac = p.depth_full_fraction;
+        float *pl = dmalloc(n), *t1 = dmalloc(n), *t2 = dmalloc(n), *best = dmalloc(n), *arg = dmalloc(n);
+        kbg = dmalloc(n);
+        CK(cudaMemsetAsync(best, 0, n * sizeof(float), s));
+        CK(cudaMemsetAsync(arg, 0, n * sizeof(float), s));
+        DevGaussian gw, gs;
+        gw.build(std::max(1.0, 24.0 * frac));
+        gs.build(std::max(1.0, 32.0 * frac));
+        for (int k = 0; k < K; ++k) {
+            k_vplane<<<blocks1(n), 256, 0, s>>>(V, n, K, k, pl);
+            gaussian_blur(pl, t1, t2, dw, dh, gw, s);
+            k_argmax_update<<<blocks1(n), 256, 0, s>>>(t1, k, best, arg, n);
+        }
+        mul(arg, best, pl, n, s);                      // energy-weighted mean of the peak frame
+        gaussian_blur(pl, t1, t2, dw, dh, gs, s);
+        gaussian_blur(best, pl, t2, dw, dh, gs, s);
+        k_div<<<blocks1(n), 256, 0, s>>>(t1, pl, kbg, n);
+        CK(cudaStreamSynchronize(s));
+        gw.free(); gs.free();
+        for (float* q : {pl, t1, t2, best, arg}) cudaFree(q);
+    }
     k_cost<<<blocks1(n), 256, 0, s>>>(V, (const __half*)d_Lv16, w, endm, vmax, lmin, lmax, h, wnb, p.flat, n, K, p.end_prior,
                                        p.dark_prior, p.halo_prior, p.flat_min);
     if (wnb) { CK(cudaStreamSynchronize(s)); cudaFree(wnb); }
@@ -619,6 +696,10 @@ DepthResult depth_from_volume(const float* d_V_in, void* d_Lv16, const float* d_
         coarse_energy(pl, e1, t1, t2, dw, dh, p.depth_full_fraction, p.flat_blur_px, s);
         cudaFree(pl); cudaFree(t1); cudaFree(t2);
     }
+    // flat_end 2 / 3 (FINDINGS 40): the frame where each pixel's coarse structure (|G3 - G12| of the luma, averaged over
+    // 24 px) peaks over the whole stack, then spread by an energy-weighted 32 px blur: the blob-wise field Helicon's
+    // background follows (FINDINGS 37c, Spearman 0.88 / 0.96 against its map). Sensor px scaled to the depth grid.
+    // (kbg, the field for flat_end 2 / 3, is built above from the focus measure before k_cost overwrites V)
     cudaFree(d_Lv16);   // consumed: the luma volume's memory goes to the SGM
     R.ms_cost = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     {
@@ -709,13 +790,15 @@ DepthResult depth_from_volume(const float* d_V_in, void* d_Lv16, const float* d_
         DevGaussian gb, gt;
         gb.build(std::max(1.0, 1.5 * bandw * p.depth_full_fraction));            // the band's reach
         gaussian_blur(wd, band, f2, dw, dh, gb, s);
-        k_flat_target<<<blocks1(n), 256, 0, s>>>(fill, band, e0, e1, f1, n, (float)(K - 1), 4.f);
+        if (kbg) k_flat_target_field<<<blocks1(n), 256, 0, s>>>(fill, band, kbg, f1, n, (float)(K - 1), 4.f, p.flat_end == 3 ? p.flat_end_soft : 0.f);
+        else if (p.flat_end == 1) k_flat_target_loud<<<blocks1(n), 256, 0, s>>>(fill, band, e0, e1, f1, n, (float)(K - 1), 4.f, p.flat_end_soft);
+        else k_flat_target<<<blocks1(n), 256, 0, s>>>(fill, band, e0, e1, f1, n, (float)(K - 1), 4.f);
         gt.build(std::max(1.0, 0.25 * bandw * p.depth_full_fraction));          // soft band-to-far transition
         gaussian_blur(f1, f2, fill, dw, dh, gt, s);
         lerp_mask(d, f2, ov, d, n, s);
         CK(cudaStreamSynchronize(s));
         gb.free(); gt.free();
-        for (float* q : {fill, band, f1, f2, ov, wd, e0, e1, wc}) cudaFree(q);
+        for (float* q : {fill, band, f1, f2, ov, wd, e0, e1, wc, kbg}) cudaFree(q);
         if (cont) cudaFree(cont);
     }
 

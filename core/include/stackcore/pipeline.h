@@ -166,6 +166,11 @@ struct StackOptions {
     // flat regions, depth stage (FINDINGS 36): the band's width decoupled from the blur width (0 = the blur width,
     // as 0.6.4), and the share of its own SGM depth a weak feature keeps, by its focus-curve contrast (0 = none)
     double flat_band_px = 0, flat_keep = 0;
+    // what the background beyond the band takes (DepthParams::flat_end, FINDINGS 40): 2 = the smoothed frame where
+    // each pixel's focus measure peaks (default since 0.6.16), 0 = the quiet end (0.6.4 .. 0.6.15), 1 = the loud end,
+    // 3 = the field snapped to the ends; flat_end_soft = the transition width of 1 and 3
+    int flat_end = 2;
+    double flat_end_soft = 0.3;
     std::vector<std::string> outputs;  // which images to write / keep; empty = all
     bool cache_frames = true;          // keep the frames pinned in host memory between the passes (--cache 0: read every pass from disk)
     bool write_outputs = true;         // false: compute everything (and fill `result`) but write no TIFFs (the GUI's benchmark)

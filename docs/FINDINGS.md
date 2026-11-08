@@ -1595,6 +1595,48 @@ the fan and plates crops are hard to tell apart by eye
 viewer's Difference overlay shows where they differ. Every output changes
 with the filter (the alignment does not: it has its own B-spline sampler).
 
+## 40. The background takes the frame where its own structure peaks (2026-11-08, 0.6.16)
+
+The follow-up to §37 b-c. Beyond the band beside sharp detail, 0.6.4 sent
+every flat pixel to the *quiet* end of the stack (the end frame with the
+lower coarse |G3 - G12| energy): a monotone ramp from one end, the flat
+wax and the concentric lines Travis saw. Three alternatives, all behind
+`--flat-end` (DepthParams::flat_end):
+
+- **loud** (1): the end frame with the *higher* coarse energy, a soft
+  transition where the two are within `--flat-end-soft` of each other.
+  Picks the near end almost everywhere in the blur regions (blurbg_a p50
+  2, blurbg_b p50 1 against Helicon's 13 and 29): the end frames alone
+  do not know where the far matrix is in focus. Rejected.
+- **argmax** (2): per pixel, the frame where the focus measure V (the
+  aggregated slice, pooled over 24 px) peaks over the whole stack, then an
+  energy-weighted 32 px blur (the §37c model, which scored Spearman 0.88 /
+  0.96 against Helicon's map). A first version measured |G3 - G12| of the
+  luma volume instead and failed the same way as loud (p95 41-52 where
+  Helicon has 155): that volume is blurred over 12 px, which removes the
+  2-8 px band the far matrix lives in. Built before `k_cost` overwrites V;
+  0.35 s per render.
+- **snap** (3): the argmax field pushed to the ends over a transition of
+  `--flat-end-soft`. Faint arcs where blobs meet. Rejected.
+
+Depth percentiles p5 / p50 / p95 against Helicon's map:
+
+| region | Helicon | quiet (0.6.15) | argmax |
+|---|---|---|---|
+| blurbg_a | 0 / 13 / 155 | 0 / 51 / 144 | 0 / 13 / 103 |
+| blurbg_b | 1 / 29 / 155 | 15 / 150 / 162 | 3 / 19 / 158 |
+
+At 1:1 (`report_loud\blurbg_*_V_1to1.png`) the argmax background shows
+the crystal's dark shadow and the warm haze blobs where Helicon shows
+them; the quiet one is a flat brown wax with a brightness step. The change
+is confined to the flat mask: 45 % of the flat pixels move (mean 51
+frames), 0.7 % outside it; ghost, plates, matrix and crystal_edge
+statistics are unchanged. **argmax is the default from 0.6.16**;
+`--flat-end quiet` is the 0.6.4 .. 0.6.15 background, bit-identical.
+Still open: Helicon reaches the far end more often in blurbg_a (p95 155
+vs 103), and its map carries frame-0 speckle inside far regions that ours
+does not reproduce (and need not).
+
 ## Open items
 
 - **B: doubled plate edge / glow** (§25a): the C-style aggregation does not
@@ -1612,6 +1654,10 @@ with the filter (the alignment does not: it has its own B-spline sampler).
   than Helicon B at 1:1 (see 9).
 - Optional output tone stage (black point / contrast) to match Helicon's look,
   and optional highlight/sparkle suppression (see 10).
+- **DNG input** (Travis, 11/08): the reader takes uncompressed 8/16-bit TIFF only; a DNG (a raw mosaic, or
+  Camera Raw's enhanced linear raw) is lossless-JPEG compressed and in camera colour before white balance, so
+  reading it means a raw developer stage (LibRaw), not a reader tweak. The Camera Raw 16-bit TIFF export stays
+  the path for now.
 - **AutoFOV link**: bring AutoFOV's per-frame blur values (and focus position)
   into the frame list next to the alignment wobble, from a capture-side
   sidecar, so frames can be culled or weighted from capture data too.

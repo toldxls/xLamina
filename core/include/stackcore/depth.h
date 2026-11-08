@@ -55,6 +55,14 @@ struct DepthParams {
     // otherwise replace it: features with focus evidence of their own, far from confident detail, survive a wide
     // background blur. 0 = off (the fill replaces everything beyond the reach of confident detail)
     float flat_keep = 0.f;
+    // what the background beyond the band takes (FINDINGS 40): 0 = the quiet end of the stack (0.6.4, the fewest
+    // ghosts, a flat wax); 1 = the loud end, sliding between the ends where the end frames' coarse energies are
+    // within flat_end_soft (relative) of each other; 2 = the frame where each pixel's coarse structure peaks over
+    // the whole stack, energy-weighted and smoothed (the blob-wise field Helicon's background follows, FINDINGS 37c);
+    // 3 = that field snapped to the ends over a transition of flat_end_soft (fraction of the stack).
+    // 2 is the default since 0.6.16 (FINDINGS 40); 0 = --flat-end quiet, the 0.6.4 .. 0.6.15 background
+    int flat_end = 2;
+    float flat_end_soft = 0.3f;
 };
 
 struct DepthResult {

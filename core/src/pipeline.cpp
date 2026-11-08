@@ -750,6 +750,14 @@ bool parse_stack_option(const std::string& a, const std::string& v, StackOptions
     else if (a == "--flat-min") so.po.flat_min = atof(v.c_str());
     else if (a == "--flat-band") so.flat_band_px = atof(v.c_str());
     else if (a == "--flat-keep") so.flat_keep = atof(v.c_str());
+    else if (a == "--flat-end") {   // quiet | loud | argmax | snap (FINDINGS 40)
+        if (v == "quiet" || v == "0") so.flat_end = 0;
+        else if (v == "loud" || v == "1") so.flat_end = 1;
+        else if (v == "argmax" || v == "2") so.flat_end = 2;
+        else if (v == "snap" || v == "3") so.flat_end = 3;
+        else { logf("--flat-end: quiet, loud, argmax or snap, not '%s'\n", v.c_str()); return false; }
+    }
+    else if (a == "--flat-end-soft") so.flat_end_soft = atof(v.c_str());
     else if (a == "--b-reference") {   // the 0.5.x B, bit-identical: the 1/4 volume with the priors and no 0.6.x additions
         so.po.depth_fraction = 0.25; so.dark_prior = 1.0; so.dark_reach_px = 0; so.end_vote_px = 0; so.po.flat_blur_px = 0; so.sgm_scale = false;
     }
@@ -1014,6 +1022,8 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
             dp.flat_min = (float)po.flat_min;
             dp.flat_band_px = (float)so.flat_band_px;
             dp.flat_keep = (float)so.flat_keep;
+            dp.flat_end = so.flat_end;
+            dp.flat_end_soft = (float)so.flat_end_soft;
         }
         dfree.p.erase(std::find(dfree.p.begin(), dfree.p.end(), (void*)d_L16));   // consumed inside depth_from_volume
         R = depth_from_volume(d_V, d_L16, d_guide, d_ga, P.vp.dw, P.vp.dh, K, ow, oh, dp, s);
