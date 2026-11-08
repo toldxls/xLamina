@@ -85,6 +85,8 @@ static int usage() {
             "               --flat-end quiet|loud|argmax|snap: what the background beyond the band takes: the quiet end of the stack (0.6.4), the\n"
             "                             loud end, the frame where each pixel's coarse structure peaks (smoothed, blob by blob, as Helicon), or\n"
             "                             that field snapped to the ends; --flat-end-soft 0.3 = the width of loud's / snap's transition\n"
+            "               --flat-blend W: in flat regions the composition blends the frames within W of the depth instead of two, so a\n"
+            "                             depth ramp through the stack draws no iso-frame rings (0 = off)\n"
             "               --b-reference 1: the 0.5.x B exactly (1/4 volume, dark prior 1, none of the 0.6.x additions)\n"
             "  developer commands:\n"
             "  stackcli probe FILE.tif\n"

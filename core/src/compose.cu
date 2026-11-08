@@ -78,12 +78,22 @@ __global__ void k_clipf(float* a, size_t n, float lo, float hi) {
     if (i < n) a[i] = fminf(fmaxf(a[i], lo), hi);
 }
 
-__global__ void k_labels(const float* __restrict__ D, const float* __restrict__ Ds, float* __restrict__ lab, float* __restrict__ wi,
-                         size_t n, float k) {
+// wmap (optional): the width in frames of the smooth-depth blend, per pixel. 1 = the two neighbouring frames (the
+// reference). Wider in defocused background (FINDINGS 41): there the depth ramps through the stack, and a two-frame
+// blend that changes from pixel to pixel draws iso-frame rings; averaging the frames within +-w of the depth makes
+// neighbouring pixels' mixtures almost the same, and the rings vanish.
+__global__ void k_labels(const float* __restrict__ D, const float* __restrict__ Ds, const float* __restrict__ wmap,
+                         float* __restrict__ lab, float* __restrict__ wi, size_t n, float k) {
     size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     lab[i] = fabsf(D[i] - k) < 0.5f ? 1.f : 0.f;
-    wi[i] = fminf(fmaxf(1.0f - fabsf(Ds[i] - k), 0.f), 1.f);
+    float w = wmap ? fmaxf(wmap[i], 1.f) : 1.f;
+    wi[i] = fminf(fmaxf(1.0f - fabsf(Ds[i] - k) / w, 0.f), 1.f);
+}
+// width map from the flat mask at depth resolution: 1 + flat * (wflat - 1), resized to the output grid
+__global__ void k_flat_width(const float* __restrict__ f, float* __restrict__ w, size_t n, float wflat) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) w[i] = 1.f + fminf(fmaxf(f[i], 0.f), 1.f) * (wflat - 1.f);
 }
 __global__ void k_compose_acc(double* __restrict__ n1, double* __restrict__ d1, double* __restrict__ n2, double* __restrict__ d2,
                               const float* __restrict__ w, const float* __restrict__ wi, const float* __restrict__ img, size_t n) {
@@ -380,23 +390,29 @@ void ComposeScratch::alloc(int w_, int h_, float soft_sigma) {
 }
 void ComposeScratch::free() { cudaFree(lab); cudaFree(wn); cudaFree(tmp); g_s1.free(); }
 
-std::vector<int> compose_frames(const std::vector<float>& D, const std::vector<float>& Ds, int n) {
+std::vector<int> compose_frames(const std::vector<float>& D, const std::vector<float>& Ds, int n, float wmax) {
     std::vector<char> use(n, 0);
+    const float w = std::max(1.f, wmax);
     for (size_t i = 0; i < D.size(); ++i) {
         int k = (int)std::nearbyint(D[i]);                     // |D - k| < 0.5
         if (k >= 0 && k < n && std::fabs(D[i] - k) < 0.5f) use[k] = 1;
-        int lo = (int)std::floor(Ds[i]) , hi = (int)std::ceil(Ds[i]);   // |Ds - k| < 1
-        for (int k2 = lo; k2 <= hi; ++k2) if (k2 >= 0 && k2 < n && std::fabs(Ds[i] - k2) < 1.f) use[k2] = 1;
+        int lo = (int)std::floor(Ds[i] - w) + 1, hi = (int)std::ceil(Ds[i] + w) - 1;   // |Ds - k| < w
+        for (int k2 = std::max(0, lo); k2 <= std::min(n - 1, hi); ++k2) if (std::fabs(Ds[i] - k2) < w) use[k2] = 1;
     }
     std::vector<int> out;
     for (int k = 0; k < n; ++k) if (use[k]) out.push_back(k);
     return out;
 }
 
+void flat_width_map(const float* d_flat, int dw, int dh, float* d_W, int ow, int oh, float wflat, cudaStream_t s) {
+    resize_linear(d_flat, dw, dh, d_W, ow, oh, s);
+    k_flat_width<<<blocks1((size_t)ow * oh), 256, 0, s>>>(d_W, d_W, (size_t)ow * oh, wflat);
+}
+
 void compose_frame(ComposeState& st, int k, const float* d_img, const float* d_D, const float* d_Ds, ComposeScratch& sc,
-                   cudaStream_t s) {
+                   cudaStream_t s, const float* d_W) {
     size_t n = (size_t)st.w * st.h;
-    k_labels<<<blocks1(n), 256, 0, s>>>(d_D, d_Ds, sc.lab, sc.wn, n, (float)k);
+    k_labels<<<blocks1(n), 256, 0, s>>>(d_D, d_Ds, d_W, sc.lab, sc.wn, n, (float)k);
     gaussian_blur(sc.lab, sc.lab, sc.tmp, st.w, st.h, sc.g_s1, s);   // soft label (in place via tmp)
     k_compose_acc<<<blocks1(n), 256, 0, s>>>(st.n1, st.d1, st.n2, st.d2, sc.lab, sc.wn, d_img, n);
 }

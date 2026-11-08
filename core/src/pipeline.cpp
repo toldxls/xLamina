@@ -758,6 +758,7 @@ bool parse_stack_option(const std::string& a, const std::string& v, StackOptions
         else { logf("--flat-end: quiet, loud, argmax or snap, not '%s'\n", v.c_str()); return false; }
     }
     else if (a == "--flat-end-soft") so.flat_end_soft = atof(v.c_str());
+    else if (a == "--flat-blend") so.flat_blend = atof(v.c_str());   // frames (FINDINGS 41)
     else if (a == "--b-reference") {   // the 0.5.x B, bit-identical: the 1/4 volume with the priors and no 0.6.x additions
         so.po.depth_fraction = 0.25; so.dark_prior = 1.0; so.dark_reach_px = 0; so.end_vote_px = 0; so.po.flat_blur_px = 0; so.sgm_scale = false;
     }
@@ -1099,14 +1100,16 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
     auto t3 = std::chrono::steady_clock::now();
     std::vector<float> b_img;
     {
-        std::vector<int> ks = compose_frames(R.depth_s, Ds, K);
+        // the smooth-depth blend widened in flat regions (FINDINGS 41): a per-pixel width map from the flat mask
+        const bool wide = so.flat_blend > 1.0 && !P.flat.empty() && po.flat_blur_px > 0;
+        std::vector<int> ks = compose_frames(R.depth_s, Ds, K, wide ? (float)so.flat_blend : 1.f);
         std::vector<fs::path> sub;
         for (int k : ks) sub.push_back(P.paths[k]);
         int ndev = 0;
         CK(cudaGetDeviceCount(&ndev));
         std::vector<ComposeState> cst(ndev);
         std::vector<std::vector<ComposeScratch>> csc(ndev);
-        std::vector<float*> d_D(ndev, nullptr), d_Ds(ndev, nullptr);
+        std::vector<float*> d_D(ndev, nullptr), d_Ds(ndev, nullptr), d_W(ndev, nullptr);
         float s1 = (float)std::max(0.8, soft_px * P.g.scale);
         for (int d : P.devs) {
             CK(cudaSetDevice(d));
@@ -1117,13 +1120,23 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
             CK(cudaMalloc(&d_Ds[d], no * sizeof(float)));
             CK(cudaMemcpy(d_D[d], R.depth_s.data(), no * sizeof(float), cudaMemcpyHostToDevice));
             CK(cudaMemcpy(d_Ds[d], Ds.data(), no * sizeof(float), cudaMemcpyHostToDevice));
+            if (wide) {
+                float* d_fs = nullptr;
+                CK(cudaMalloc(&d_fs, P.flat.size() * sizeof(float)));
+                CK(cudaMalloc(&d_W[d], no * sizeof(float)));
+                CK(cudaMemcpy(d_fs, P.flat.data(), P.flat.size() * sizeof(float), cudaMemcpyHostToDevice));
+                flat_width_map(d_fs, P.vp.dw, P.vp.dh, d_W[d], ow, oh, (float)so.flat_blend, 0);
+                CK(cudaDeviceSynchronize());
+                cudaFree(d_fs);
+            }
         }
+        if (wide) logf("compose: the smooth-depth blend spans up to %.0f frames in flat regions; %zu frames carry weight\n", so.flat_blend, ks.size());
         std::vector<PassDev> ctx;
         std::atomic<int> composed{0};
         run_pass(sub, ks, P.T, P.g, P.devs, streams, po.opt.readers, po.opt.cache, ctx,
                  [&](int, PassSlot&, int, cudaStream_t) {},
                  [&](int dev, PassSlot& S, int k, cudaStream_t fs) {
-                     compose_frame(cst[dev], k, S.d_warp, d_D[dev], d_Ds[dev], csc[dev][S.index], fs);
+                     compose_frame(cst[dev], k, S.d_warp, d_D[dev], d_Ds[dev], csc[dev][S.index], fs, d_W[dev]);
                      // live view: the first GPU's composition so far, every preview_every frames
                      if (hooks.preview && dev == P.devs[0] && (++composed % std::max(1, hooks.preview_every) == 0) && ctx[dev].bp.tryFlush(hooks) &&
                          ctx[dev].bp.due(hooks.preview_min_ms))
@@ -1136,7 +1149,7 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
         for (int d : P.devs) {
             CK(cudaSetDevice(d));
             for (auto& sc : csc[d]) sc.free();
-            cudaFree(d_D[d]); cudaFree(d_Ds[d]);
+            cudaFree(d_D[d]); cudaFree(d_Ds[d]); cudaFree(d_W[d]);
         }
         CK(cudaSetDevice(prim));
         b_img = compose_mix(cst[prim], R.conf, ow, oh, P.g.scale, s);

@@ -1637,6 +1637,39 @@ Still open: Helicon reaches the far end more often in blurbg_a (p95 155
 vs 103), and its map carries frame-0 speckle inside far regions that ours
 does not reproduce (and need not).
 
+## 41. The rings in a flat background come from the two-frame blend, not from the depth (2026-11-08, 0.6.18)
+
+A new 201-frame stack (IMG_5535 .. 5735) rendered with 0.6.16 against Helicon's
+B R9 S1 and C S1 (`helicon_B_analysis\compare_stack.py`, the general
+comparison: regions picked by detail, tone-matched luma RMSE, 1:1 sheets in
+`report_newstack`). Whole image: B RMSE 0.036 with 1.04x Helicon's fine
+detail, C RMSE 0.041 with 0.97x. In the flattest tile (a smooth yellow
+gradient at 4950, 3900) our B showed faint concentric rings where Helicon is
+smooth. The depth there sweeps the whole stack (p5 7 .. p95 200, 199
+distinct frames): the §40 field ramps where there is no evidence. The rings
+are not the ramp itself but how the composition renders it: in regions the
+crisp map calls soft, B is the smooth-depth path, a blend of the two frames
+on either side of Ds at each pixel, and along a ramp neighbouring pixels blend
+different pairs, so every integer crossing of Ds draws a contour.
+
+Fix: widen that blend in flat regions. `k_labels` takes a per-pixel width
+map (1 + flat x (W - 1), the flat mask resized to the output grid), the
+weight becomes `clip(1 - |Ds - k| / w, 0, 1)`, and `compose_frames` admits
+every frame within W of Ds. Outside the flat mask w = 1: the reference
+composition, bit-identical. `--flat-blend W` (StackOptions::flat_blend, 0 =
+off). On the new stack, the flat tile's 4-12 px band energy (Helicon 0.0032):
+
+| blend | 0 | 8 | 16 | 32 |
+|---|---|---|---|---|
+| band RMS 4-12 px | 0.0026 | 0.0024 | 0.0023 | 0.0020 |
+| band RMS 12-40 px | 0.0071 | 0.0069 | 0.0067 | 0.0062 |
+
+The numbers move little because Helicon's own bokeh energy is larger than the
+rings; the 1:1 sheet (`flat1_blend_1to1.png`) is decisive: 8 frames already
+removes every ring, 16 and 32 look alike and nearer Helicon's soft blobs.
+Detail tiles are untouched (mean change under 1e-4). Default 16 from 0.6.18;
+compose time 2.5 -> 2.9 s because every frame now carries weight somewhere.
+
 ## Open items
 
 - **B: doubled plate edge / glow** (§25a): the C-style aggregation does not

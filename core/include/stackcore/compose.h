@@ -76,11 +76,14 @@ struct ComposeScratch {        // per slot
     void free();
 };
 
-// frames that contribute: any |D - k| < 0.5 or any |Ds - k| < 1
-std::vector<int> compose_frames(const std::vector<float>& depth_s, const std::vector<float>& depth_smooth, int n);
-// lab = |D - k| < 0.5 blurred (soft labels); wi = clip(1 - |Ds - k|, 0, 1); accumulate both compositions
+// frames that contribute: any |D - k| < 0.5 or any |Ds - k| < wmax (the widest blend in use; 1 = the reference)
+std::vector<int> compose_frames(const std::vector<float>& depth_s, const std::vector<float>& depth_smooth, int n, float wmax = 1.f);
+// lab = |D - k| < 0.5 blurred (soft labels); wi = clip(1 - |Ds - k| / w, 0, 1) with w from d_W (nullptr: 1, the
+// reference); accumulate both compositions
 void compose_frame(ComposeState& st, int k, const float* d_img, const float* d_D, const float* d_Ds, ComposeScratch& sc,
-                   cudaStream_t s);
+                   cudaStream_t s, const float* d_W = nullptr);
+// the blend width per output pixel from the flat mask at depth resolution: 1 + flat * (wflat - 1) (FINDINGS 41)
+void flat_width_map(const float* d_flat, int dw, int dh, float* d_W, int ow, int oh, float wflat, cudaStream_t s);
 
 // the composition so far at 1/down (narrow labels), for a live view
 void compose_preview_kernel(const ComposeState& st, int down, float* d_out, int& pw, int& ph, cudaStream_t s);
