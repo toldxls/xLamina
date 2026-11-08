@@ -139,14 +139,21 @@ void MainWindow::buildMenus() {
         connect(a, &QAction::triggered, this, [this, k = QString(key)] { setTheme(k); });
     }
     theme->setProperty("group", QVariant::fromValue((QObject*)tg));
+    view->addSeparator();
+    devAct_ = view->addAction("&Developer controls");
+    devAct_->setCheckable(true);
+    devAct_->setStatusTip("Show the Advanced depth / composition group, the C and B radii, and the outputs beyond B and C.");
+    connect(devAct_, &QAction::toggled, this, &MainWindow::setDeveloper);
     // the panels (filled in buildUi, after the docks exist)
     view->addSeparator()->setObjectName("panels");
 
     QMenu* cmpMenu = menuBar()->addMenu("&Compare");
     QAction* two = cmpMenu->addAction("&Two-up viewer…", QKeySequence("Ctrl+2"), this, &MainWindow::twoUp);
     two->setStatusTip("Two images side by side with one pan and zoom: this render's outputs, comparison images, sweep variants. Space flips them.");
+    QAction* run = cmpMenu->addAction("&Run sweep…", QKeySequence("Ctrl+Shift+R"), this, &MainWindow::runSweep);
+    run->setStatusTip("Render B with several settings at once: one alignment, one pass 1 per group, a B per combination; then compare them two up.");
     QAction* sweep = cmpMenu->addAction("Open &sweep folder…", QKeySequence("Ctrl+Shift+W"), this, &MainWindow::openSweep);
-    sweep->setStatusTip("A folder written by stackcli sweep: its B variants, with their options, into the two-up viewer.");
+    sweep->setStatusTip("A folder written by a sweep: its B variants, with their options, into the two-up viewer.");
 
     QMenu* tools = menuBar()->addMenu("&Tools");
     QAction* bench = tools->addAction("&Benchmark…", QKeySequence("Ctrl+B"), this, &MainWindow::benchmark);
@@ -252,7 +259,7 @@ void MainWindow::buildUi() {
     for (int i = 0; i < 11; ++i) {
         QCheckBox* cb = new QCheckBox(kOutputs[i]);
         cb->setToolTip(kOutputHelp[i]);
-        cb->setChecked(i < 3);
+        cb->setChecked(i < 2);   // B and C; the rest are developer outputs (View > Developer controls)
         outputs_[kOutputs[i]] = cb;
         ol->addWidget(cb, i / 4, i % 4);
     }
@@ -281,6 +288,7 @@ void MainWindow::buildUi() {
                          "Every image copied off a GPU costs its uploads about 3 ms, so the views are rate-limited; the live view\n"
                          "still adds about a second to a 163-frame render. Off shows only the finished outputs.");
     fl->addRow("Live view", liveRes_);
+    mainForm_ = fl;
     smoothing_ = new QDoubleSpinBox;
     smoothing_->setRange(0, 6);
     smoothing_->setSingleStep(0.5);
@@ -492,6 +500,7 @@ void MainWindow::loadSettings() {
     restoreGeometry(s.value("ui/geometry").toByteArray());
     restoreState(s.value("ui/state").toByteArray());
     theme_ = s.value("ui/theme", "dark").toString();
+    setDeveloper(s.value("ui/developer", false).toBool());
     for (QMenu* m : menuBar()->findChildren<QMenu*>())
         if (m->title() == "&Theme")
             for (QAction* a : m->actions()) a->setChecked(a->data().toString() == theme_);
@@ -533,6 +542,7 @@ void MainWindow::saveSettings() {
     s.setValue("ui/geometry", saveGeometry());
     s.setValue("ui/state", saveState());
     s.setValue("ui/theme", theme_);
+    s.setValue("ui/developer", developer_);
     s.setValue("recent", recent_);
     s.beginGroup("render");
     for (const char* n : kOutputs) s.setValue(QString("out_%1").arg(n), outputs_[n]->isChecked());
@@ -565,7 +575,7 @@ void MainWindow::saveSettings() {
 
 void MainWindow::resetSettings() {
     if (QMessageBox::question(this, "xLamina", "Put every render, advanced and performance setting back to its default?") != QMessageBox::Yes) return;
-    for (int i = 0; i < 11; ++i) outputs_[kOutputs[i]]->setChecked(i < 3);
+    for (int i = 0; i < 11; ++i) outputs_[kOutputs[i]]->setChecked(i < 2);
     scale_->setCurrentIndex(0);
     ref_->setCurrentIndex(0);
     lockScale_->setChecked(false);
@@ -593,6 +603,24 @@ void MainWindow::updateRecent() {
         recentMenu_->addSeparator();
         recentMenu_->addAction("Clear", this, [this] { recent_.clear(); updateRecent(); });
     }
+}
+
+// Developer controls: the Advanced depth / composition group, the C and B radii and the outputs beyond B and C are
+// hidden by default (0.6.8). Hidden outputs are not rendered even when ticked; the values of hidden controls still
+// apply (an Advanced group left ticked keeps its values), so toggling the menu changes nothing about a render.
+void MainWindow::setDeveloper(bool on) {
+    developer_ = on;
+    if (devAct_ && devAct_->isChecked() != on) { devAct_->blockSignals(true); devAct_->setChecked(on); devAct_->blockSignals(false); }
+    if (advanced_) advanced_->setVisible(on);
+    if (mainForm_) { mainForm_->setRowVisible(cradius_, on); mainForm_->setRowVisible(bradius_, on); }
+    for (int i = 2; i < 11; ++i) outputs_[kOutputs[i]]->setVisible(on);
+}
+
+std::vector<std::string> MainWindow::selectedOutputs() const {
+    std::vector<std::string> out;
+    for (int i = 0; i < 11; ++i)
+        if (outputs_[kOutputs[i]]->isChecked() && (developer_ || i < 2)) out.push_back(kOutputs[i]);
+    return out;
 }
 
 void MainWindow::setTheme(const QString& theme) {
@@ -877,6 +905,36 @@ void MainWindow::openSweep() {
     twoUp_->openSweep(d);
 }
 
+// a sweep from the panel's settings: the dialog picks what varies, the worker renders, onFinished opens the viewer
+void MainWindow::runSweep() {
+    if (folder_.isEmpty()) { chooseFolder(); if (folder_.isEmpty()) return; }
+    if (worker_.running()) { statusBar()->showMessage("A render is running; start the sweep when it has finished.", 4000); return; }
+    if (bench_ && bench_->running()) { statusBar()->showMessage("The benchmark is running; stop it first.", 4000); return; }
+    JobOptions jo;
+    if (!buildJob(jo, false)) return;
+    if (jobItems_.size() < 2) { QMessageBox::information(this, "xLamina", "A stack needs at least 2 ticked frames."); return; }
+    jo.stack.outputs = {"B"};
+    QString base = outDir_->text().isEmpty() ? folder_ + "_stacker" : outDir_->text();
+    SweepDialog dlg(jo.stack, base + "_sweep", this);
+    if (dlg.exec() != QDialog::Accepted) return;
+    std::vector<SweepVariant> vars = dlg.variants();
+    if (vars.empty()) return;
+    if (!jo.stack.cache_frames) worker_.releaseCache();
+    thumbs_.stop();   // resumed in onFinished
+    log_->clear();
+    liveView_->hide();
+    saveSettings();
+    setBusy(true);
+    stageText_ = "starting the sweep";
+    elapsed_.start();
+    tick_.start();
+    liveItem_ = markedItem_ = nullptr;
+    lastView_.invalidate();
+    listTick_.start();
+    int live = liveRes_->currentData().toInt();
+    worker_.startSweep(jo, vars, dlg.outDir(), live > 0 ? live : 12);
+}
+
 void MainWindow::onComparison(int index, QImage image) {
     if (index != 0 || pendingCompare_.isEmpty()) return;
     compare_[pendingCompare_] = forDisplay(image);   // read like a frame: the stack's profile is the best guess for its colours
@@ -947,8 +1005,7 @@ bool MainWindow::buildJob(JobOptions& jo, bool interactive) {
         jo.stack.dark_reach_px = darkReach_->value();
         jo.stack.po.flat_blur_px = flatBlur_->value();
     }
-    jo.stack.outputs.clear();
-    for (const char* n : kOutputs) if (outputs_[n]->isChecked()) jo.stack.outputs.push_back(n);
+    jo.stack.outputs = selectedOutputs();
     jo.out = outDir_->text().isEmpty() ? std::string() : outDir_->text().toStdString();
     perfFromUi().apply(jo);
     if (interactive) {
@@ -1151,6 +1208,16 @@ void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
     listTick_.stop();
     if (markedItem_) markedItem_->setBackground(QBrush());
     liveItem_ = markedItem_ = nullptr;
+    if (data->sweep) {   // the last render's outputs stay; the variants go to the two-up viewer
+        setBusy(false);
+        liveView_->hide();
+        resumeThumbnails();
+        if (data->rc == 3) { stage_->setText("Sweep cancelled."); return; }
+        stage_->setText(data->rc ? "Sweep finished with failures; see the log." : QString("Sweep done: %1 variants in %2 s.").arg(data->variants).arg(data->seconds, 0, 'f', 1));
+        progress_->setValue(1000);
+        if (QFileInfo::exists(QDir(data->outDir).filePath("sweep.json"))) { twoUp(); twoUp_->openSweep(data->outDir); }
+        return;
+    }
     result_ = data;
     setBusy(false);
     liveView_->hide();
@@ -1236,8 +1303,8 @@ void MainWindow::benchmark() {
         buildJob(jo, false);
         for (const auto& p : jo.align.paths) frames << QString::fromStdWString(p);
     } else {
-        for (const char* n : kOutputs) if (outputs_[n]->isChecked()) jo.stack.outputs.push_back(n);
-        if (jo.stack.outputs.empty()) jo.stack.outputs = {"B", "C", "Cn"};
+        jo.stack.outputs = selectedOutputs();
+        if (jo.stack.outputs.empty()) jo.stack.outputs = {"B", "C"};
         jo.stack.c_smoothing = smoothing_->value();
         jo.stack.po.c_radius_px = cradius_->value();
         jo.stack.po.g.scale = scale_->currentIndex() == 0 ? 1.0 : 0.5;

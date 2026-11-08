@@ -17,6 +17,15 @@ ImageView::ImageView(QWidget* parent) : QGraphicsView(parent) {
     setRenderHints(QPainter::SmoothPixmapTransform);
     setMouseTracking(true);
     item_ = scene_.addPixmap(QPixmap());
+    overlay_ = scene_.addPixmap(QPixmap());
+    overlay_->setZValue(1);
+    overlay_->setVisible(false);
+}
+
+void ImageView::setOverlay(const QImage& argb) {
+    if (argb.isNull()) { overlay_->setVisible(false); overlay_->setPixmap(QPixmap()); return; }
+    overlay_->setPixmap(QPixmap::fromImage(argb));
+    overlay_->setVisible(true);
 }
 
 // A new image keeps the user's zoom and position (as fractions of the image, so

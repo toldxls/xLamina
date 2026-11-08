@@ -20,6 +20,10 @@
 #include <QToolBar>
 #include <QVBoxLayout>
 
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+
 #include "stackcore/tiff.h"
 
 using stackcore::TiffInfo;
@@ -50,6 +54,19 @@ CompareWindow::CompareWindow(QWidget* parent) : QMainWindow(parent) {
     QAction* one = tb->addAction("1:1", this, [this] { view_[0]->actualSize(); });
     one->setShortcut(QKeySequence("Ctrl+1"));
     tb->addSeparator();
+    diffAct_ = tb->addAction("Difference");
+    diffAct_->setCheckable(true);
+    diffAct_->setShortcut(QKeySequence("D"));
+    diffAct_->setStatusTip("Tint the pixels where the two panes differ (D): orange, the stronger the larger the difference. The status bar gives the share.");
+    connect(diffAct_, &QAction::toggled, this, [this](bool) { overlayFor_[0] = overlayFor_[1] = -1; updateOverlay(); });
+    diffLevel_ = new QComboBox;
+    for (auto [label, pct] : std::initializer_list<std::pair<const char*, double>>{{"above 0.5 %", 0.5}, {"above 1 %", 1.0}, {"above 2 %", 2.0}, {"above 5 %", 5.0}, {"above 10 %", 10.0}})
+        diffLevel_->addItem(label, pct);
+    diffLevel_->setCurrentIndex(1);
+    diffLevel_->setToolTip("A pixel is highlighted when its luma differs by more than this share of full scale; fully orange at four times it.");
+    connect(diffLevel_, QOverload<int>::of(&QComboBox::activated), this, [this](int) { overlayFor_[0] = overlayFor_[1] = -1; updateOverlay(); });
+    tb->addWidget(diffLevel_);
+    tb->addSeparator();
     QAction* vertical = tb->addAction("Stack vertically");
     vertical->setCheckable(true);
     vertical->setStatusTip("Put the right pane under the left one (for wide crops).");
@@ -64,10 +81,12 @@ CompareWindow::CompareWindow(QWidget* parent) : QMainWindow(parent) {
     addAction(prev);
 
     // the list of images: name and the sweep options (or where it came from)
-    list_ = new QTableWidget(0, 2);
-    list_->setHorizontalHeaderLabels({"Image", "Options"});
+    list_ = new QTableWidget(0, 3);
+    list_->setHorizontalHeaderLabels({"Image", "Change", "Options"});
+    list_->horizontalHeaderItem(1)->setToolTip("Share of B's pixels that differ from the base variant by more than 2 % of full scale: how much there is to see.");
     list_->horizontalHeader()->setStretchLastSection(true);
     list_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    list_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     list_->verticalHeader()->setVisible(false);
     list_->setSelectionBehavior(QAbstractItemView::SelectRows);
     list_->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -161,9 +180,9 @@ void CompareWindow::addImage(const QString& name, const QImage& img, const QStri
     addEntry(std::move(e));
 }
 
-void CompareWindow::addFile(const QString& name, const QString& path, const QString& note) {
+void CompareWindow::addFile(const QString& name, const QString& path, const QString& note, double change) {
     Entry e;
-    e.name = name; e.path = path; e.note = note;
+    e.name = name; e.path = path; e.note = note; e.change = change;
     addEntry(std::move(e));
 }
 
@@ -173,7 +192,10 @@ void CompareWindow::rebuildList() {
         auto* n = new QTableWidgetItem(entries_[i].name);
         n->setToolTip(entries_[i].path.isEmpty() ? entries_[i].note : QDir::toNativeSeparators(entries_[i].path));
         list_->setItem(i, 0, n);
-        list_->setItem(i, 1, new QTableWidgetItem(entries_[i].note));
+        auto* c = new QTableWidgetItem(entries_[i].change < 0 ? QString() : entries_[i].change == 0 ? QString("base") : QString("%1 %").arg(entries_[i].change, 0, 'f', 1));
+        c->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        list_->setItem(i, 1, c);
+        list_->setItem(i, 2, new QTableWidgetItem(entries_[i].note));
     }
     for (int p = 0; p < 2; ++p) {
         pick_[p]->blockSignals(true);
@@ -192,6 +214,9 @@ void CompareWindow::openSweep(const QString& dir) {
     QJsonDocument doc = QJsonDocument::fromJson(f.readAll(), &err);
     if (!doc.isObject()) { QMessageBox::warning(this, "xLamina", QString("sweep.json: %1").arg(err.errorString())); return; }
     int added = 0, failed = 0;
+    // the base first, then the variants with the most to see
+    struct V { QString name, b, opts; double change; };
+    QList<V> vs;
     for (const QJsonValue& v : doc.object().value("variants").toArray()) {
         QJsonObject o = v.toObject();
         if (o.value("rc").toInt(1) != 0) { ++failed; continue; }
@@ -199,10 +224,13 @@ void CompareWindow::openSweep(const QString& dir) {
         if (QDir::isRelativePath(vdir)) vdir = QDir(dir).filePath(vdir);
         QString b = QDir(vdir).filePath("B.tif");
         if (!QFileInfo::exists(b)) { ++failed; continue; }
-        QString opts = o.value("options").toString();
-        addFile(o.value("name").toString(), b, opts.isEmpty() ? "base settings" : opts);
-        ++added;
+        vs.push_back({o.value("name").toString(), b, o.value("options").toString(), o.value("change_pct").toDouble(-1)});
     }
+    std::stable_sort(vs.begin(), vs.end(), [](const V& a, const V& b) {
+        if (a.change == 0 || b.change == 0) return a.change == 0 && b.change != 0;   // the base on top
+        return a.change > b.change;
+    });
+    for (const V& v : vs) { addFile(v.name, v.b, v.opts.isEmpty() ? "base settings" : v.opts, v.change); ++added; }
     statusBar()->showMessage(QString("%1: %2 variants%3").arg(QDir::toNativeSeparators(dir)).arg(added).arg(failed ? QString(" (%1 without a B)").arg(failed) : ""), 8000);
     if (added && sel_[1] < 0) {   // first use: the first two variants side by side
         int first = entries_.size() - added;
@@ -262,6 +290,54 @@ void CompareWindow::refresh(int pane) {
     view_[pane]->setLabel(e.name);
     status_->setText(QString("%1  |  %2").arg(sel_[0] >= 0 ? entries_[sel_[0]].name : "—", sel_[1] >= 0 ? entries_[sel_[1]].name : "—"));
     trimCache();
+    updateOverlay();
+}
+
+// |luma(left) - luma(right)| as an orange tint: transparent up to the chosen level, opaque at four times it.
+// Both panes get the same overlay, so the highlight sits on the pixels in question whichever image is under it.
+void CompareWindow::updateOverlay() {
+    if (!diffAct_->isChecked() || sel_[0] < 0 || sel_[1] < 0 || entries_[sel_[0]].image.isNull() || entries_[sel_[1]].image.isNull()) {
+        view_[0]->setOverlay(QImage());
+        view_[1]->setOverlay(QImage());
+        overlayFor_[0] = overlayFor_[1] = -1;
+        return;
+    }
+    if ((overlayFor_[0] == sel_[0] && overlayFor_[1] == sel_[1]) || (overlayFor_[0] == sel_[1] && overlayFor_[1] == sel_[0])) return;   // a flip keeps it
+    const QImage& a = entries_[sel_[0]].image;
+    const QImage& b = entries_[sel_[1]].image;
+    if (a.size() != b.size()) {
+        view_[0]->setOverlay(QImage());
+        view_[1]->setOverlay(QImage());
+        statusBar()->showMessage("Difference: the two images are not the same size.", 5000);
+        return;
+    }
+    const double pct = diffLevel_->currentData().toDouble();
+    const int t0 = std::max(1, (int)std::lround(pct / 100.0 * 255.0));   // 8-bit levels
+    const int t1 = std::max(t0 + 1, 4 * t0);
+    QImage ov(a.size(), QImage::Format_ARGB32);
+    size_t hits = 0;
+    const int w = a.width(), h = a.height();
+    for (int y = 0; y < h; ++y) {
+        const QRgb* pa = reinterpret_cast<const QRgb*>(a.constScanLine(y));
+        const QRgb* pb = reinterpret_cast<const QRgb*>(b.constScanLine(y));
+        QRgb* po = reinterpret_cast<QRgb*>(ov.scanLine(y));
+        for (int x = 0; x < w; ++x) {
+            // luma in 8-bit: 0.2126 R + 0.7152 G + 0.0722 B, in fixed point
+            int la = (54 * qRed(pa[x]) + 183 * qGreen(pa[x]) + 19 * qBlue(pa[x])) >> 8;
+            int lb = (54 * qRed(pb[x]) + 183 * qGreen(pb[x]) + 19 * qBlue(pb[x])) >> 8;
+            int d = std::abs(la - lb);
+            if (d <= t0) { po[x] = 0; continue; }
+            ++hits;
+            int alpha = std::min(230, 40 + (d - t0) * 190 / (t1 - t0));
+            po[x] = qRgba(255, 140, 0, alpha);
+        }
+    }
+    view_[0]->setOverlay(ov);
+    view_[1]->setOverlay(ov);
+    overlayFor_[0] = sel_[0];
+    overlayFor_[1] = sel_[1];
+    statusBar()->showMessage(QString("Difference: %1 % of pixels differ by more than %2 % (%3 vs %4)")
+                                 .arg(100.0 * hits / ((double)w * h), 0, 'f', 2).arg(pct).arg(entries_[sel_[0]].name, entries_[sel_[1]].name));
 }
 
 void CompareWindow::flip() {

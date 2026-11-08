@@ -229,5 +229,7 @@ struct JobOptions {
                                       // across runs); null = one for this job when stack.cache_frames is set
 };
 int run_job(JobOptions& jo, AlignOut& A, Hooks hooks);
+// the GUI's sweep: align the frames as run_job does (report.json + list.txt into out_dir), then run_sweep over them
+int run_sweep_job(JobOptions& jo, const std::vector<SweepVariant>& variants, const std::string& out_dir, AlignOut& A, Hooks hooks);
 
 }  // namespace stackcore

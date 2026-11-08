@@ -1,2 +1,2 @@
 #pragma once
-#define XLAMINA_VERSION "0.6.7"
+#define XLAMINA_VERSION "0.6.8"

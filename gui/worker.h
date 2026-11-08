@@ -6,6 +6,7 @@
 #include <QThread>
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -25,6 +26,8 @@ struct JobResultData {
     QString outDir;
     int rc = 0;
     double seconds = 0;   // wall time of the whole job (alignment + fusion + writing)
+    bool sweep = false;   // a sweep (outDir holds sweep.json and the variants), not a render: `result` is empty
+    int variants = 0;
 };
 
 class Worker : public QObject {
@@ -35,6 +38,8 @@ public:
     bool running() const { return running_; }
     // live views at 1/liveDown of the output; quiet = no previews or frame views at all (the benchmark)
     void start(const stackcore::JobOptions& jo, int liveDown = 6, bool quiet = false);
+    // a sweep: align as a render would, then a B per variant into outDir (run_sweep_job); finished() carries sweep = true
+    void startSweep(const stackcore::JobOptions& jo, const std::vector<stackcore::SweepVariant>& variants, const QString& outDir, int liveDown = 6);
     void cancel() { cancel_.store(true); }
     void releaseCache();                                 // frees the resident frames (when the cache is turned off)
     bool resident(const QStringList& files);             // true when every file is pinned in the cache already
@@ -53,6 +58,9 @@ signals:
 
 private:
     QThread thread_;
+    // the common part of start and startSweep: the hooks, the thread, the finished signal; `run` does the job
+    void launch(std::shared_ptr<stackcore::JobOptions> jo, std::shared_ptr<JobResultData> data, int liveDown, bool quiet,
+                std::function<int(stackcore::JobOptions&, JobResultData&, stackcore::Hooks&)> run);
     FloatImage take(const float* rgb, size_t n);   // a pooled buffer holding a copy of rgb[0..n)
     void recycle(FloatImage img);
     std::atomic<bool> cancel_{false};

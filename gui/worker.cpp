@@ -56,10 +56,37 @@ void Worker::start(const JobOptions& jo_in, int liveDown, bool quiet) {
     auto data = std::make_shared<JobResultData>();
     jo->stack.result = &data->result;
     jo->cache = jo->stack.cache_frames ? &cache_ : nullptr;   // with the cache off the resident frames are left alone, just not used
+    launch(jo, data, liveDown, quiet, [](JobOptions& j, JobResultData& d, Hooks& hooks) {
+        int rc = run_job(j, d.align, hooks);
+        d.reportJson = QString::fromStdString(report_json(j.align, d.align));
+        d.outDir = QString::fromStdString(j.stack.out.empty() ? j.out : j.stack.out);
+        return rc;
+    });
+}
+
+void Worker::startSweep(const JobOptions& jo_in, const std::vector<SweepVariant>& variants, const QString& outDir, int liveDown) {
+    if (running_) return;
+    running_ = true;
+    cancel_.store(false);
+    auto jo = std::make_shared<JobOptions>(jo_in);
+    auto data = std::make_shared<JobResultData>();
+    data->sweep = true;
+    data->variants = (int)variants.size();
+    data->outDir = outDir;
+    jo->stack.result = nullptr;
+    jo->cache = jo->stack.cache_frames ? &cache_ : nullptr;
+    std::string out = outDir.toLocal8Bit().toStdString();
+    launch(jo, data, liveDown, false, [variants, out](JobOptions& j, JobResultData& d, Hooks& hooks) {
+        return run_sweep_job(j, variants, out, d.align, hooks);
+    });
+}
+
+void Worker::launch(std::shared_ptr<JobOptions> jo, std::shared_ptr<JobResultData> data, int liveDown, bool quiet,
+                    std::function<int(JobOptions&, JobResultData&, Hooks&)> run) {
     QObject* worker = new QObject();
     worker->moveToThread(&thread_);
     thread_.start();
-    QMetaObject::invokeMethod(worker, [this, jo, data, worker, liveDown, quiet] {
+    QMetaObject::invokeMethod(worker, [this, jo, data, worker, liveDown, quiet, run] {
         set_log([this](const std::string& s) { emit logLine(QString::fromStdString(s)); });
         Hooks hooks;
         hooks.cancel = &cancel_;
@@ -91,9 +118,7 @@ void Worker::start(const JobOptions& jo_in, int liveDown, bool quiet) {
         }
         auto t0 = std::chrono::steady_clock::now();
         try {
-            data->rc = run_job(*jo, data->align, hooks);
-            data->reportJson = QString::fromStdString(report_json(jo->align, data->align));
-            data->outDir = QString::fromStdString(jo->stack.out.empty() ? jo->out : jo->stack.out);
+            data->rc = run(*jo, *data, hooks);
         } catch (const std::exception& e) {
             emit logLine(QString("failed: %1").arg(e.what()));
             data->rc = 1;

@@ -5,6 +5,7 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QElapsedTimer>
+#include <QFormLayout>
 #include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
@@ -28,6 +29,7 @@
 #include "compare.h"
 #include "imageview.h"
 #include "prefs.h"
+#include "sweepdialog.h"
 #include "worker.h"
 
 class MainWindow : public QMainWindow {
@@ -53,6 +55,7 @@ private slots:
     void addComparison();
     void twoUp();          // the two-up viewer with this render's outputs and the comparison images
     void openSweep();      // a sweep folder into the two-up viewer
+    void runSweep();       // the sweep dialog, then the worker renders the variants and the viewer opens on them
     void openOutputFolder();
     void benchmark();
     void about();
@@ -82,6 +85,9 @@ private:
     void setBusy(bool busy);
     void setStatusGeometry(const JobResultData& d);
     void setTheme(const QString& theme);
+    // developer controls (View menu, off by default): the Advanced group, the two radii and the outputs beyond B and C
+    void setDeveloper(bool on);
+    std::vector<std::string> selectedOutputs() const;   // the ticked outputs that are on show
     bool buildJob(stackcore::JobOptions& jo, bool interactive);   // the job as the panel describes it; false when it cannot run
     PerfSettings perfFromUi() const;
     void perfToUi(const PerfSettings& p);
@@ -104,6 +110,9 @@ private:
     QMenu* recentMenu_ = nullptr;
     QStringList recent_;
     QString theme_ = "dark";
+    bool developer_ = false;
+    QAction* devAct_ = nullptr;
+    QFormLayout* mainForm_ = nullptr;      // the Render panel's form (Smoothing and the radii rows)
     QColorSpace colorSpace_;               // the frames' ICC profile (invalid = assume sRGB)
     bool selecting_ = false;
     ImageView* liveView_ = nullptr;        // right pane while rendering

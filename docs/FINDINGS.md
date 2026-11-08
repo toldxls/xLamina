@@ -1371,6 +1371,59 @@ in effect, guided radius 8. `--b-reference 1` (1/4 volume, dark prior 1, no
 reach, no vote, no flat smoothing, unscaled P1/P2) is the 0.5.x B, still
 byte-identical to 0.5.5 (checked after every change).
 
+## 35. Which B parameters matter: a one-at-a-time sweep (2026-11-07, night)
+
+`stackcli sweep` (0.6.6: one alignment, one pass 1 + volume per group of
+pass-1 settings, then a B per variant at ~7 s) over every depth / composition
+parameter, each on both sides of its default, base = the GUI's defaults
+(`--c-radius 32`), 162 frames at full resolution. Two scores per variant:
+the share of B's pixels whose luma differs from the base by more than 2 % of
+full scale (what the two-up viewer's Difference overlay shows at its default
+level), and `compare_real.py` against Helicon's B R9 S1 (tone-matched luma
+RMSE on edges and depth RMSE in frames, mean of the five regions).
+
+| variant | pixels changed > 2 % | 99.9th pct | depth RMSE vs Helicon (base 19.9) |
+|---|---|---|---|
+| depth volume 1/4 | 7.9 % | 14.5 % | 17.6 |
+| flat blur 0 (background smoothing off) | 6.9 % | 13.5 % | 21.5 |
+| confidence ramp 0.55..0.75 | 4.7 % | 9.9 % | 21.3 |
+| flat blur 256 | 3.5 % | 8.6 % | 19.8 |
+| confidence ramp 0.35..0.55 | 2.5 % | 7.3 % | 18.8 |
+| B radius 32 | 2.1 % | 7.4 % | 21.1 |
+| aggregation 0 / 64 | 2.1 / 1.6 % | 8.2 / 7.7 % | 20.5 / 19.4 |
+| dark reach 48 / 0 | 1.5 / 1.4 % | 6.1 / 6.5 % | 19.7 / 23.4 |
+| depth focus window 12 / 3 | 1.2 / 0.5 % | 6.0 / 3.4 % | 20.2 / 20.0 |
+| halo prior 0 / 4 | 0.9 / 0.5 % | 5.8 / 3.9 % | 19.4 / 20.6 |
+| fine-focus window 5 / 15 | 0.7 / 0.7 % | 4.1 / 4.3 % | 20.0 / 19.9 |
+| C radius 0 / 64 | 0.6 / 0.4 % | 4.8 / 5.1 % | 20.4 / 19.9 |
+| dark prior 0 / 2 | 0.5 / 0.03 % | 4.1 / 1.3 % | 18.9 / 20.2 |
+| fine-focus range 24 / 6 | 0.5 / 0.3 % | 4.3 / 3.3 % | 20.1 / 19.9 |
+| SGM P2 0.8 / 0.2 | 0.08 / 0.05 % | 1.9 / 1.4 % | 19.8 / 20.0 |
+| soft label 1 / 6 px | 0.08 / 0.07 % | 1.9 / 1.8 % | 19.9 / 19.9 |
+| end vote 0 / 96 | 0.03 / 0.00 % | 0.8 / 0.4 % | 19.9 / 19.9 |
+| SGM P1 0.015 / 0.06 | 0.00 / 0.00 % | 0.7 / 0.7 % | 19.9 / 20.0 |
+
+What it says:
+- **Only a handful of parameters change B visibly**: the volume's resolution,
+  the flat-region (background) smoothing, the confidence ramp, the
+  aggregation width, the dark prior's reach and the halo prior. Everything
+  else, SGM P1 / P2 above all, moves well under 1 % of the pixels: the
+  smoothness penalties are not what decides B at these settings; the priors,
+  the guided upsampling and the refinement are. Smoothing is a C control and
+  never touches B (the composite is written as is); the C radius reaches B
+  only through the guide and moves a pixel in a few hundred.
+- **The tone-matched luma RMSE against Helicon is useless for ranking**: every
+  variant lands within ±0.0002 of 0.1386. The depth RMSE moves (1/4 volume
+  −2.3 frames, dark reach 0 +3.5), but at ~20 frames it measures the broad
+  disagreement with Helicon's map (§13), not quality. Ranking stays with the
+  eye at 1:1: the two-up viewer sorts variants by their visible change and
+  tints the differing pixels.
+- Hence the GUI's **Run sweep** presets (0.6.8): quick = background blur off,
+  confidence ramp low / high, 1/4 volume, dark reach 0 (6 B's, ~1.5 min);
+  thorough adds background blur 256, aggregation 0 / 64, dark reach 48, halo
+  prior off, B radius 32 (12 B's, ~2.5 min). The sweep records each
+  variant's change share in `sweep.json` (`change_pct`).
+
 ## Open items
 
 - **B: doubled plate edge / glow** (§25a): the C-style aggregation does not

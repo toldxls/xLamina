@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdarg>
 #include <cstdio>
@@ -1225,8 +1226,21 @@ int run_sweep(const StackOptions& base, const std::vector<SweepVariant>& variant
         cache->prepare(paths);
     }
 
-    struct Done { std::string name, dir, note; int group; int rc; double seconds; };
+    struct Done { std::string name, dir, note; int group; int rc; double seconds; double change; };   // change: % of pixels whose B luma differs > 2 % from the reference variant
     std::vector<Done> done;
+    // the reference B (the variant named "base", else the first one): each variant's visible change is measured against it
+    std::vector<float> ref_b;
+    int ref_w = 0, ref_h = 0;
+    auto luma_change = [&](const std::vector<float>& img, int w, int h) -> double {
+        if (ref_b.empty() || w != ref_w || h != ref_h) return -1.0;
+        size_t n = (size_t)w * h, hits = 0;
+        for (size_t i = 0; i < n; ++i) {
+            float a = 0.2126f * img[i * 3] + 0.7152f * img[i * 3 + 1] + 0.0722f * img[i * 3 + 2];
+            float b = 0.2126f * ref_b[i * 3] + 0.7152f * ref_b[i * 3 + 1] + 0.0722f * ref_b[i * 3 + 2];
+            if (std::fabs(a - b) > 0.02f) ++hits;
+        }
+        return 100.0 * hits / (double)n;
+    };
     auto write_manifest = [&] {
         fs::create_directories(out_dir);
         FILE* f = fopen((fs::path(out_dir) / "sweep.json").string().c_str(), "w");
@@ -1234,8 +1248,9 @@ int run_sweep(const StackOptions& base, const std::vector<SweepVariant>& variant
         fprintf(f, "{\n  \"list\": %s,\n  \"base\": %s,\n  \"variants\": [\n", json_str(base.po.list.generic_string()).c_str(), json_str(base.note).c_str());
         for (size_t i = 0; i < done.size(); ++i) {
             auto& d = done[i];
-            fprintf(f, "    {\"name\": %s, \"dir\": %s, \"options\": %s, \"pass1_group\": %d, \"rc\": %d, \"seconds\": %.2f}%s\n", json_str(d.name).c_str(),
-                    json_str(d.dir).c_str(), json_str(d.note).c_str(), d.group, d.rc, d.seconds, i + 1 < done.size() ? "," : "");
+            fprintf(f, "    {\"name\": %s, \"dir\": %s, \"options\": %s, \"pass1_group\": %d, \"rc\": %d, \"seconds\": %.2f, \"change_pct\": %.2f}%s\n",
+                    json_str(d.name).c_str(), json_str(d.dir).c_str(), json_str(d.note).c_str(), d.group, d.rc, d.seconds, d.change,
+                    i + 1 < done.size() ? "," : "");
         }
         fprintf(f, "  ]\n}\n");
         fclose(f);
@@ -1257,7 +1272,7 @@ int run_sweep(const StackOptions& base, const std::vector<SweepVariant>& variant
         if (int r = run_pass1(po, P)) {
             logf("sweep: pass 1 of group %zu failed (rc %d)%s", gi + 1, r, r == 4 ? "; out of GPU memory: put --depth-fraction 0.25 in those variants" : "");
             for (size_t i = 0; i < prep.size(); ++i)
-                if (prep[i].key == groups[gi]) { done.push_back({variants[i].name, prep[i].so.out, prep[i].note, (int)gi + 1, r, 0.0}); ++failed; }
+                if (prep[i].key == groups[gi]) { done.push_back({variants[i].name, prep[i].so.out, prep[i].note, (int)gi + 1, r, 0.0, -1.0}); ++failed; }
             write_manifest();
             continue;
         }
@@ -1272,9 +1287,23 @@ int run_sweep(const StackOptions& base, const std::vector<SweepVariant>& variant
             so.po.hooks = base.hooks;
             so.po.opt.cache = cache;
             logf("sweep: %s  [%s]", variants[i].name.c_str(), prep[i].note.empty() ? "base" : prep[i].note.c_str());
+            StackOptions::Result res;   // the B stays in memory for the change measure (the TIFFs are written as usual)
+            so.result = &res;
             int rc = fuse_from_pass1(so, P, false, t_v, &noise);
             if (rc) ++failed;
-            done.push_back({variants[i].name, so.out, prep[i].note, (int)gi + 1, rc, since(t_v)});
+            double change = -1.0;
+            if (rc == 0) {
+                auto it = std::find(res.names.begin(), res.names.end(), "B");
+                if (it != res.names.end()) {
+                    auto& b = res.images[it - res.names.begin()];
+                    if (ref_b.empty() && (variants[i].name == "base" || !std::any_of(variants.begin(), variants.end(), [](const SweepVariant& v) { return v.name == "base"; }))) {
+                        ref_b = b; ref_w = res.w; ref_h = res.h;
+                        change = 0.0;
+                    } else change = luma_change(b, res.w, res.h);
+                }
+            }
+            if (change >= 0 && !ref_b.empty() && variants[i].name != "base") logf("sweep: %s changes %.2f %% of B's pixels by more than 2 %%", variants[i].name.c_str(), change);
+            done.push_back({variants[i].name, so.out, prep[i].note, (int)gi + 1, rc, since(t_v), change});
             write_manifest();
         }
     }
@@ -1651,6 +1680,36 @@ int run_job(JobOptions& jo, AlignOut& A, Hooks hooks) {
     logf("run: %zu frames aligned and stacked in %.2f s -> %s", A.paths.size(),
          std::chrono::duration<double>(std::chrono::steady_clock::now() - t_all).count(), out.c_str());
     return 0;
+}
+
+int run_sweep_job(JobOptions& jo, const std::vector<SweepVariant>& variants, const std::string& out_dir, AlignOut& A, Hooks hooks) {
+    AlignOptions& ao = jo.align;
+    StackOptions& so = jo.stack;
+    if (so.po.opt.devices.empty()) so.po.opt.devices = ao.devs; else if (ao.devs.empty()) ao.devs = so.po.opt.devices;
+    so.po.opt.readers = ao.readers;
+    ao.out = out_dir;
+    ao.pairs_sel.clear();
+    ao.hooks = hooks;
+    so.hooks = hooks;
+    std::unique_ptr<FrameCache> own_cache;
+    FrameCache* cache = so.cache_frames ? jo.cache : nullptr;
+    if (so.cache_frames && !cache) { own_cache = std::make_unique<FrameCache>(); cache = own_cache.get(); }
+    ao.cache = cache;
+    so.po.opt.cache = cache;
+    struct Unlink { FrameCache*& a; FrameCache*& b; bool mine; ~Unlink() { if (mine) a = b = nullptr; } } unlink{ao.cache, so.po.opt.cache, own_cache != nullptr};
+    auto t_all = std::chrono::steady_clock::now();
+    if (int r = run_align(ao, A)) return r;
+    write_report(ao, A, out_dir);   // report.json + list.txt beside the variants: `stackcli sweep` can continue from them
+    so.po.paths = A.paths;
+    so.po.T = A.T;
+    so.po.g.x0 = A.rect[0]; so.po.g.y0 = A.rect[1]; so.po.g.x1 = A.rect[2]; so.po.g.y1 = A.rect[3];
+    if (so.outputs.empty()) so.outputs = {"B"};
+    so.out.clear();
+    so.result = nullptr;
+    int rc = run_sweep(so, variants, out_dir);
+    logf("sweep: %zu frames aligned, %zu variants in %.1f s -> %s", A.paths.size(), variants.size(),
+         std::chrono::duration<double>(std::chrono::steady_clock::now() - t_all).count(), out_dir.c_str());
+    return rc;
 }
 
 }  // namespace stackcore
