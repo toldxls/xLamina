@@ -589,6 +589,10 @@ bool CompareWindow::load16(const Entry& e, std::vector<uint16_t>& out, int& w, i
     return true;
 }
 
+void CompareWindow::setRetouch(bool on) {
+    if (retouchAct_ && retouchAct_->isChecked() != on) retouchAct_->setChecked(on);   // toggled -> retouchToggle
+}
+
 void CompareWindow::retouchToggle(bool on) {
     if (on) {
         if (sel_[0] < 0 || sel_[1] < 0 || entries_[sel_[0]].image.isNull() || entries_[sel_[1]].image.isNull()) {

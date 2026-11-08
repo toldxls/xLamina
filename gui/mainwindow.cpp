@@ -23,6 +23,8 @@
 #include <QSplitter>
 #include <QStatusBar>
 #include <QToolBar>
+#include <QToolButton>
+#include <tuple>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -48,6 +50,8 @@ static const char* kOutputHelp[] = {
     "Cg: pyramid with coarse levels from B (against glare from defocused highlights).",
     "Cg2: Cg with one more coarse level from B.",
     "H: luma from CBn, chroma from B."};
+// A and B0 are not in the Outputs list: Tools > Developer outputs (developer mode) ticks them (Travis, 2026-11-08)
+static bool isMenuOutput(int i) { return i == 3 || i == 4; }
 static const int kMaxRecent = 8;
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
@@ -164,6 +168,11 @@ void MainWindow::buildMenus() {
     tools->addAction("Copy report.&json", this, [this] {
         if (result_) { QApplication::clipboard()->setText(result_->reportJson); statusBar()->showMessage("report.json copied.", 3000); }
     });
+    tools->addSeparator();
+    // the outputs that left the Outputs list (A, B0: Travis, 2026-11-08) stay reachable here in developer mode;
+    // the actions mirror hidden check boxes, filled in with the Outputs group below
+    devOutMenu_ = tools->addMenu("Developer &outputs");
+    devOutMenu_->setStatusTip("A (focus-weighted average) and B0 (raw argmax): developer outputs, rendered when ticked.");
 
     QMenu* help = menuBar()->addMenu("&Help");
     help->addAction("&About xLamina", this, &MainWindow::about);
@@ -220,6 +229,27 @@ void MainWindow::buildUi() {
     tabs_->setStyleSheet("QTabBar::tab { padding: 6px 16px; margin-right: 2px; }"
                          "QTabBar::tab:selected { background: #7a2fc9; color: white; font-weight: bold; }");
     tabs_->setToolTip("The outputs of the last render and any comparison images; PgUp / PgDown step through them at the same zoom.");
+    // Compare and Retouch, centred above the view (Travis, 2026-11-08): the same as Compare > Two-up viewer, and the
+    // viewer with retouching switched on
+    QWidget* topRow = new QWidget;
+    QHBoxLayout* tl = new QHBoxLayout(topRow);
+    tl->setContentsMargins(0, 4, 0, 4);
+    tl->setSpacing(2);
+    tl->addStretch(1);
+    for (auto [label, tip, slot] : {std::tuple<const char*, const char*, void (MainWindow::*)()>{
+                                        "Compare", "Two images side by side with one pan and zoom (Ctrl+2)", &MainWindow::twoUp},
+                                    {"Retouch", "Paint one image into another in the two-up viewer (R there)", &MainWindow::retouch}}) {
+        QToolButton* b = new QToolButton;
+        b->setText(label);
+        b->setToolTip(tip);
+        b->setToolButtonStyle(Qt::ToolButtonTextOnly);
+        b->setStyleSheet("QToolButton { padding: 5px 18px; border: 1px solid #7a2fc9; border-radius: 4px; }"
+                         "QToolButton:hover { background: #7a2fc9; color: white; }");
+        connect(b, &QToolButton::clicked, this, slot);
+        tl->addWidget(b);
+    }
+    tl->addStretch(1);
+    cl->addWidget(topRow);
     cl->addWidget(split_, 1);
     cl->addWidget(tabs_);
     setCentralWidget(centre);
@@ -256,12 +286,24 @@ void MainWindow::buildUi() {
 
     QGroupBox* og = new QGroupBox("Outputs");
     QGridLayout* ol = new QGridLayout(og);
+    int pos = 0;
     for (int i = 0; i < 11; ++i) {
-        QCheckBox* cb = new QCheckBox(kOutputs[i]);
+        QCheckBox* cb = new QCheckBox(kOutputs[i], og);
         cb->setToolTip(kOutputHelp[i]);
         cb->setChecked(i < 2);   // B and C; the rest are developer outputs (View > Developer controls)
         outputs_[kOutputs[i]] = cb;
-        ol->addWidget(cb, i / 4, i % 4);
+        if (isMenuOutput(i)) {   // A and B0: off the list, ticked from Tools > Developer outputs instead (the box stays the state)
+            cb->hide();
+            QAction* act = devOutMenu_->addAction(kOutputs[i]);
+            act->setCheckable(true);
+            act->setChecked(cb->isChecked());
+            act->setStatusTip(kOutputHelp[i]);
+            connect(act, &QAction::toggled, cb, &QCheckBox::setChecked);
+            connect(cb, &QCheckBox::toggled, act, &QAction::setChecked);
+            continue;
+        }
+        ol->addWidget(cb, pos / 4, pos % 4);
+        ++pos;
     }
     pl->addWidget(og);
 
@@ -613,7 +655,8 @@ void MainWindow::setDeveloper(bool on) {
     if (devAct_ && devAct_->isChecked() != on) { devAct_->blockSignals(true); devAct_->setChecked(on); devAct_->blockSignals(false); }
     if (advanced_) advanced_->setVisible(on);
     if (mainForm_) { mainForm_->setRowVisible(cradius_, on); mainForm_->setRowVisible(bradius_, on); }
-    for (int i = 2; i < 11; ++i) outputs_[kOutputs[i]]->setVisible(on);
+    for (int i = 2; i < 11; ++i) if (!isMenuOutput(i)) outputs_[kOutputs[i]]->setVisible(on);   // A, B0 stay hidden boxes
+    if (devOutMenu_) devOutMenu_->menuAction()->setVisible(on);
 }
 
 std::vector<std::string> MainWindow::selectedOutputs() const {
@@ -898,6 +941,12 @@ void MainWindow::twoUp() {
     twoUp_->raise();
     twoUp_->activateWindow();
     if (result_ && result_->rc == 0 && !current_.isEmpty() && current_ != "frame") twoUp_->select(0, current_);
+}
+
+// the Retouch button above the view: the two-up viewer with retouching on (it needs an image in each pane)
+void MainWindow::retouch() {
+    twoUp();
+    if (twoUp_) twoUp_->setRetouch(true);
 }
 
 void MainWindow::openSweep() {

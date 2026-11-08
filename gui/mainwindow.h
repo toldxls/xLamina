@@ -54,6 +54,7 @@ private slots:
     void saveCurrent();
     void addComparison();
     void twoUp();          // the two-up viewer with this render's outputs and the comparison images
+    void retouch();        // the two-up viewer with retouching switched on (the centre buttons above the view)
     void openSweep();      // a sweep folder into the two-up viewer
     void runSweep();       // the sweep dialog, then the worker renders the variants and the viewer opens on them
     void openOutputFolder();
@@ -140,6 +141,7 @@ private:
     QElapsedTimer lastView_;
     QPointer<BenchmarkDialog> bench_;
     QPointer<CompareWindow> twoUp_;
+    QMenu* devOutMenu_ = nullptr;      // Tools > Developer outputs: A and B0, mirrored to hidden check boxes
     QList<GpuInfo> gpus_;
 
     ImageView* view_ = nullptr;

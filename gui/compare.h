@@ -31,6 +31,7 @@ public:
     void addFile(const QString& name, const QString& path, const QString& note = {}, double change = -1);   // read when first shown
     void openSweep(const QString& dir);                                                 // dir/sweep.json
     void select(int pane, const QString& name);
+    void setRetouch(bool on);   // retouching on or off, as the R toolbar button (the main window's Retouch button)
 
 protected:
     void keyPressEvent(QKeyEvent* e) override;
