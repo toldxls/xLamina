@@ -1522,6 +1522,55 @@ are not noise-adaptive; the measured `noise_mad` is not used by the depth
 stage. Open item: scale `c_lo`/`c_hi` (and the fill's gate) by the measured
 noise, then re-check both frame sets. Sheets: `report_noise\*_1to1.png`.
 
+## 38. Noise-adaptive confidence, and a race that made the depth map differ run to run (2026-11-08)
+
+**a. The race (fixed, 0.6.11).** Two stacks of the same frames with the same
+settings gave different depth maps: 9-16 % of the pixels by 2-3 frames on
+average, up to 100, and B differed on half the pixels (1 % by more than
+512 LSB16). Pass 1's dumps (`fold --volume`, now also `--cache 1`) were
+bit-identical run to run, with or without the frame cache, but `flat.f32`
+was not: the flat mask's two Gaussian kernels were built, used and freed in
+sequence on one stream, the second built at the address the first had just
+freed while the first blur could still be running, so the first blur read the
+second kernel's taps. It only showed with two streams per GPU and the frame
+cache (the timing that left the blur in flight); one stream, or `--cache 0`,
+always gave the same (correct) answer. The kernels now live until the stage's
+sync. Verified: one GPU, two GPUs, one or two streams, cache on or off all
+give the same hashes for flat, depth and B. The argmin numbers of §37a stand
+(the two runs compared there happened to land in the correct state).
+
+**b. Why B degrades on raw frames (§37d).** The confidence `(vmax - vmed) /
+vmax` of a focus curve is an SNR test: the curve's median in a flat or
+defocused pixel *is* the noise floor of the measure (median N / vmed = 0.92
+to 1.01 in every region tested), so the ramp 0.45 .. 0.65 means a peak 1.5 to
+2.7 times the noise. Raw frames have 2.1x the floor (0.0593 against 0.0279 for
+the denoised set, measured the same way), and the same detail falls under
+the ramp. A per-pixel reformulation does not recover it: floor-subtracted
+contrasts, absolute signal thresholds, SNR gates and their products
+(`noise_conf.py`, 16 candidates) reproduce the denoised set's confidence map
+on raw frames no better than mean |dw| 0.07-0.16, because the per-pixel
+estimate of the signal is itself noisier.
+
+**c. What works: scale the ramp by the stack's floor.** The floor is measured
+once per stack from the two middle frames (their difference / sqrt 2 through
+the slice's own chain, normalised by the first frame's luma, box-aggregated,
+square-rooted; median over the depth grid: `depth_noise_floor`), together
+with the pyramid MADs the finalize already used (now taken before the depth
+stage, `NoiseEstimate`). The ramp is multiplied by
+`(conf_noise_ref / floor)^conf_noise_gamma`, never above 1, at least 0.5,
+and exactly 1 within 5 % of the reference (so the calibration stack is
+bit-identical: verified). Defaults: ref 0.028 (this stack's denoised floor),
+gamma 1. On the raw set: gamma 0.5 (ramp 0.31 .. 0.45) shrinks the fan's
+blotch to its base; gamma 1 (0.22 .. 0.32, the clamp) brings the needles
+back with a small dark blob at the base, and the plates' striations return
+(the denoised set remains better). The raw set's depth percentiles move back
+onto the denoised set's (plates p50/p95 68/109 -> 66/100, denoised 67/105;
+blurbg_a p50 88 -> 33, denoised 46). More noise flips pass in flat areas
+(4+ frame steps 10 -> 12 % in plates), which the fill absorbs. The fill's
+"sharp detail" gate uses the same ramp, so it benefits too. Sheets:
+`report_noise\fan_gamma_1to1.png`, `plates_gamma_1to1.png`. Left open: C's
+smoothing gate already adapts (it reads the MADs); the SGM penalties do not.
+
 ## Open items
 
 - **B: doubled plate edge / glow** (§25a): the C-style aggregation does not

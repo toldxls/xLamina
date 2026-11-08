@@ -540,6 +540,7 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
             // flat regions (no texture in the guide within flat_reach_px): every slice box-blurred over flat_blur_px
             // there, so defocused background gets one consistent focus curve instead of a noisy one per pixel
             float *d_flat = nullptr, *d_Vb = nullptr, *d_T2 = nullptr;
+            DevGaussian gr1, gr2;   // the flat mask's two kernels (freed after the stage's sync)
             int rbox = 0;
             if (po.flat_blur_px > 0) {
                 CK(cudaMalloc(&d_flat, nd * sizeof(float)));
@@ -548,14 +549,14 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
                 // texture of the guide at the scale of the reach: the guide blurred first (so its noise does not
                 // count as texture), |Laplacian|, spread over the reach; ranked over the image, the flattest fifth
                 // is fully flat and anything above the midpoint to the 90th percentile is textured
-                DevGaussian gr;
-                gr.build(std::max(1.0, po.flat_reach_px * po.depth_fraction / 4));
-                gaussian_blur(d_g, d_flat, d_T2, vp.dw, vp.dh, gr, s);
-                gr.free();
+                // two kernels, freed after the stage's sync: freeing (and rebuilding at the same address) right after
+                // the launch let the first blur read the second kernel's taps, which made the flat mask, and so the
+                // depth map, differ run to run with two streams and the frame cache (FINDINGS 38)
+                gr1.build(std::max(1.0, po.flat_reach_px * po.depth_fraction / 4));
+                gaussian_blur(d_g, d_flat, d_T2, vp.dw, vp.dh, gr1, s);
                 laplacian3_abs(d_flat, d_Vb, vp.dw, vp.dh, s);
-                gr.build(std::max(1.0, po.flat_reach_px * po.depth_fraction));
-                gaussian_blur(d_Vb, d_flat, d_T2, vp.dw, vp.dh, gr, s);
-                gr.free();
+                gr2.build(std::max(1.0, po.flat_reach_px * po.depth_fraction));
+                gaussian_blur(d_Vb, d_flat, d_T2, vp.dw, vp.dh, gr2, s);
                 float lo = percentile(d_flat, d_T2, nd, 20.0, s), hi = percentile(d_flat, d_T2, nd, 90.0, s);
                 flatness(d_flat, lo, std::max(0.5f * (hi - lo), 1e-6f), d_flat, nd, s);
                 rbox = std::max(1, (int)std::nearbyint(po.flat_blur_px * po.depth_fraction));
@@ -587,7 +588,7 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
             CK(cudaStreamSynchronize(s));
             if (vp.agg_r > 0) gs.free();
             if (b_blur) { gb.free(); cudaFree(d_T); }
-            if (d_flat) { cudaFree(d_flat); cudaFree(d_Vb); cudaFree(d_T2); }
+            if (d_flat) { cudaFree(d_flat); cudaFree(d_Vb); cudaFree(d_T2); gr1.free(); gr2.free(); }
             cudaFree(d_g);
             cudaFree(d_V);
         }
@@ -752,6 +753,8 @@ bool parse_stack_option(const std::string& a, const std::string& v, StackOptions
     else if (a == "--sgm-scale") so.sgm_scale = atoi(v.c_str()) != 0;
     else if (a == "--conf-lo") so.conf_lo = atof(v.c_str());
     else if (a == "--conf-hi") so.conf_hi = atof(v.c_str());
+    else if (a == "--conf-noise-ref") so.conf_noise_ref = atof(v.c_str());
+    else if (a == "--conf-noise-gamma") so.conf_noise_gamma = atof(v.c_str());
     // the depth volume's parameters (the GUI's Advanced panel; the `fold` command has the same names)
     else if (a == "--radius-px") so.po.radius_px = atof(v.c_str());
     else if (a == "--power") so.po.power = atof(v.c_str());
@@ -783,8 +786,14 @@ static void downsample_preview(const std::vector<float>& img, int w, int h, int 
 }
 
 static int run_stack_once(StackOptions& so);
+// the frames' noise, measured once per stack (and once per sweep): the finalize's pyramid MADs and the depth
+// volume's focus-measure floor (FINDINGS 38)
+struct NoiseEstimate {
+    std::vector<float> mad;
+    float depth_floor = 0.f;
+};
 static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std::chrono::steady_clock::time_point t_all,
-                           std::vector<float>* noise_cache);
+                           NoiseEstimate* noise_cache);
 
 // Returns the GPUs' pooled memory (cudaMallocAsync keeps freed blocks for the process): another xLamina or
 // stackcli on the same cards would otherwise find them short between renders.
@@ -865,8 +874,40 @@ static int run_stack_once(StackOptions& so) {
 // The fusion from a finished pass 1: the depth map, the refinement, the composition, the finalize and the
 // outputs. run_stack_once calls it once; run_sweep calls it once per parameter set over one pass 1, keeping the
 // pinned host volume (release_volume = false) and the two-frame noise estimate (noise_cache) between variants.
+// The noise of the frames from two adjacent middle frames (their difference is noise plus a sliver of focus
+// change): the per-level MAD of the Laplacian pyramid for the finalize (C's smoothing gate), and the floor of
+// the depth volume's focus measure for the confidence ramp (FINDINGS 38). Returns a load error code, 0 if fine.
+static int measure_noise(const StackOptions& so, const Pass1& P, cudaStream_t s, NoiseEstimate& ne) {
+    const int K = (int)P.paths.size();
+    const int ow = P.g.out_w(), oh = P.g.out_h();
+    const size_t no = (size_t)ow * oh;
+    int mid = std::max(0, K / 2 - 1);
+    float* d_pair[2] = {nullptr, nullptr};
+    for (int j = 0; j < 2; ++j) {
+        TiffInfo info;
+        float* d_rgb = nullptr;
+        if (int r = load_frame_to_device(P.paths[std::min(K - 1, mid + j)], info, d_rgb, so.po.opt.cache)) { cudaFree(d_pair[0]); return r; }
+        float* d_scr = nullptr;
+        if (P.g.scale != 1.0) CK(cudaMalloc(&d_scr, (size_t)P.g.work_w() * P.g.work_h() * 3 * sizeof(float)));
+        CK(cudaMalloc(&d_pair[j], no * 3 * sizeof(float)));
+        load_aligned(d_rgb, P.g, P.T[std::min(K - 1, mid + j)], d_scr, d_pair[j], false, s);
+        CK(cudaStreamSynchronize(s));
+        cudaFree(d_rgb); cudaFree(d_scr);
+    }
+    ne.mad = noise_from_pair(d_pair[0], d_pair[1], ow, oh, P.fp.levels, s);
+    if (P.vp.dw > 0 && P.vp.dh > 0) {
+        VolumeScratch sc;
+        sc.alloc(ow, oh, P.vp);
+        ne.depth_floor = depth_noise_floor(d_pair[0], d_pair[1], P.vp, sc, s);
+        CK(cudaStreamSynchronize(s));
+        sc.free();
+    }
+    cudaFree(d_pair[0]); cudaFree(d_pair[1]);
+    return 0;
+}
+
 static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std::chrono::steady_clock::time_point t_all,
-                           std::vector<float>* noise_cache) {
+                           NoiseEstimate* noise_cache) {
     Pass1Options& po = so.po;
     const Hooks& hooks = so.hooks;
     const std::string& out = so.out;
@@ -884,6 +925,13 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
     CK(cudaSetDevice(prim));
     cudaStream_t s;
     CK(cudaStreamCreate(&s));
+    // the noise estimate first: the confidence ramp needs the focus measure's floor, the finalize the pyramid MADs
+    NoiseEstimate ne;
+    if (noise_cache && !noise_cache->mad.empty()) ne = *noise_cache;   // the sweep: the same two frames every variant
+    else {
+        if (int r = measure_noise(so, P, s, ne)) { cudaStreamDestroy(s); return r; }
+        if (noise_cache) *noise_cache = ne;
+    }
     DepthResult R;
     float* d_guide = nullptr;
     {
@@ -938,8 +986,19 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
             dp.p1 *= k;
             dp.p2 *= k;
         }
-        logf("depth: SGM P1 %.3f P2 %.3f, confidence ramp %.2f..%.2f, dark prior %.2f (reach %.0f px), halo prior %.2f, volume %dx%d\n", dp.p1, dp.p2,
-             dp.c_lo, dp.c_hi, dp.dark_prior, dp.dark_reach_px, dp.halo_prior, P.vp.dw, P.vp.dh);
+        // the noise-adaptive ramp (FINDINGS 38): the thresholds were set on frames whose focus-measure noise floor
+        // was conf_noise_ref; a noisier stack gets a lower ramp by (ref / floor)^gamma, at least half. A cleaner
+        // stack keeps the ramp: raising it would hand detail that the calibration stack keeps to the priors
+        float conf_scale = 1.f;
+        if (so.conf_noise_gamma > 0 && so.conf_noise_ref > 0 && ne.depth_floor > 0) {
+            conf_scale = (float)std::pow(so.conf_noise_ref / ne.depth_floor, so.conf_noise_gamma);
+            conf_scale = std::min(1.f, std::max(0.5f, conf_scale));
+            if (std::fabs(conf_scale - 1.f) < 0.05f) conf_scale = 1.f;   // the calibration stack itself: bit-identical
+            dp.c_lo *= conf_scale;
+            dp.c_hi = std::min(0.95f, dp.c_hi * conf_scale);
+        }
+        logf("depth: SGM P1 %.3f P2 %.3f, confidence ramp %.2f..%.2f (noise floor %.4f, ramp x%.2f), dark prior %.2f (reach %.0f px), halo prior %.2f, volume %dx%d\n",
+             dp.p1, dp.p2, dp.c_lo, dp.c_hi, ne.depth_floor, conf_scale, dp.dark_prior, dp.dark_reach_px, dp.halo_prior, P.vp.dw, P.vp.dh);
         float* d_flat = nullptr;
         if (!P.flat.empty() && po.flat_blur_px > 0) {   // the flat-region mask from the volume stage
             CK(cudaMalloc(&d_flat, P.flat.size() * sizeof(float)));
@@ -1075,28 +1134,9 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
     if (hooks.cancelled()) { cudaFree(d_guide); cudaStreamDestroy(s); return 3; }
     stage("finalize", 0.0);
 
-    // ---- noise from two adjacent middle frames, then finalize
+    // ---- finalize (the noise estimate was taken before the depth stage)
     auto t4 = std::chrono::steady_clock::now();
-    std::vector<float> noise_mad;
-    if (noise_cache && !noise_cache->empty()) noise_mad = *noise_cache;   // the sweep: the same two frames every variant
-    else {
-        int mid = std::max(0, K / 2 - 1);
-        float* d_pair[2];
-        for (int j = 0; j < 2; ++j) {
-            TiffInfo info;
-            float* d_rgb = nullptr;
-            if (int r = load_frame_to_device(P.paths[mid + j], info, d_rgb, po.opt.cache)) return r;
-            float* d_scr = nullptr;
-            if (P.g.scale != 1.0) CK(cudaMalloc(&d_scr, (size_t)P.g.work_w() * P.g.work_h() * 3 * sizeof(float)));
-            CK(cudaMalloc(&d_pair[j], no * 3 * sizeof(float)));
-            load_aligned(d_rgb, P.g, P.T[mid + j], d_scr, d_pair[j], false, s);
-            CK(cudaStreamSynchronize(s));
-            cudaFree(d_rgb); cudaFree(d_scr);
-        }
-        noise_mad = noise_from_pair(d_pair[0], d_pair[1], ow, oh, P.fp.levels, s);
-        cudaFree(d_pair[0]); cudaFree(d_pair[1]);
-        if (noise_cache) *noise_cache = noise_mad;
-    }
+    const std::vector<float>& noise_mad = ne.mad;
     FinalParams fpar;
     fpar.c_smoothing = (float)so.c_smoothing;
     fpar.outputs = so.outputs;
@@ -1281,7 +1321,7 @@ int run_sweep(const StackOptions& base, const std::vector<SweepVariant>& variant
             continue;
         }
         logf("sweep: group %zu pass 1 + volume %.2f s", gi + 1, since(t_g));
-        std::vector<float> noise;
+        NoiseEstimate noise;
         for (size_t i = 0; i < prep.size(); ++i) {
             if (prep[i].key != groups[gi]) continue;
             if (base.hooks.cancelled()) return 3;

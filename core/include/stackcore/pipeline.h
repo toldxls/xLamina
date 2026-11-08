@@ -157,6 +157,12 @@ struct StackOptions {
     // when the volume's grid is twice as fine (FINDINGS 33)
     double sgm_p1 = 0, sgm_p2 = 0, conf_lo = 0, conf_hi = 0;
     bool sgm_scale = true;
+    // noise-adaptive confidence (FINDINGS 38): the ramp is in effect an SNR test against the focus measure's noise
+    // floor, calibrated on denoised frames whose floor (the median over the depth grid) was conf_noise_ref. On a
+    // noisier stack with a floor N the ramp is scaled by (conf_noise_ref / N)^conf_noise_gamma (never above 1, at
+    // least 0.5, and exactly 1 within 5 % of the reference), so raw frames keep their weak detail instead of
+    // handing it to the priors and the fill. conf_noise_gamma 0 = off (the ramp as given, whatever the noise)
+    double conf_noise_ref = 0.028, conf_noise_gamma = 1.0;
     // flat regions, depth stage (FINDINGS 36): the band's width decoupled from the blur width (0 = the blur width,
     // as 0.6.4), and the share of its own SGM depth a weak feature keeps, by its focus-curve contrast (0 = none)
     double flat_band_px = 0, flat_keep = 0;

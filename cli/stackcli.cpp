@@ -72,6 +72,8 @@ static int usage() {
             "               depth volume (the GUI's Advanced panel): --radius-px 6 --power 4 --depth-fraction 0.25 --depth-fm-px 6 --vol-agg-px 32\n"
             "               refinement / composition: --refine-r 12 --refine-fm-px 9 --soft-px 3\n"
             "               SGM: --sgm-p1 0.03 --sgm-p2 0.4 (scaled by depth-fraction/0.25 unless --sgm-scale 0), confidence ramp --conf-lo 0.45 --conf-hi 0.65\n"
+            "               --conf-noise-ref 0.028 --conf-noise-gamma 1: on a noisier stack the ramp is scaled by (ref / its focus-measure noise\n"
+            "                             floor)^gamma, at least 0.5, never above 1: raw (not denoised) frames keep their weak detail (gamma 0 = off)\n"
             "               --dark-reach 24: no dark prior within this many sensor px of sharp content (0 = the 0.5.x behaviour)\n"
             "               --end-vote 48: out-of-range pixels take the end their neighbourhood votes for, over this many sensor px (0 = per pixel)\n"
             "               --flat-blur 128 --flat-reach 24: in regions without texture within the reach, focus slices are box-blurred over the\n"
@@ -364,7 +366,7 @@ static int cmd_fold(int argc, char** argv) {
     po.list = argv[2];
     std::string out;
     po.opt.streams_per_gpu = 2;
-    bool have_rect = false;
+    bool have_rect = false, use_cache = false;
     Grid& g = po.g;
     for (int i = 3; i < argc; ++i) {
         std::string a = argv[i];
@@ -385,10 +387,13 @@ static int cmd_fold(int argc, char** argv) {
         else if (a == "--depth-fraction") po.depth_fraction = atof(v.c_str());
         else if (a == "--depth-fm-px") po.depth_fm_px = atof(v.c_str());
         else if (a == "--vol-agg-px") po.vol_agg_px = atof(v.c_str());
+        else if (a == "--cache") use_cache = atoi(v.c_str()) != 0;
         else return usage();
     }
     if (out.empty() || !have_rect) return usage();
     po.host_state = true;   // the validation reads the merged state from disk
+    std::unique_ptr<FrameCache> cache;   // --cache 1: the frames pinned in host memory, as the stack does (reproducibility checks)
+    if (use_cache) { cache = std::make_unique<FrameCache>(); po.opt.cache = cache.get(); }
     Pass1 P;
     if (int r = run_pass1(po, P)) return r;
     P.dst.free();

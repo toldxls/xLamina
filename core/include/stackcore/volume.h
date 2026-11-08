@@ -38,6 +38,12 @@ struct VolumeScratch {
 // fm (normalised focus) and lum of the warped output-grid frame, as float16 planes of dw*dh.
 void volume_slice(const float* d_img_out, const VolumeParams& p, VolumeScratch& sc, void* d_fm16, void* d_lum16, cudaStream_t s);
 
+// The noise floor of the depth volume's focus measure (FINDINGS 38): the same measure taken of the difference of
+// two adjacent warped frames (pure noise, / sqrt 2), normalised by the first frame's luma and box-aggregated over
+// agg_r like a slice, square-rooted; returns its median over the depth grid. The median of a pixel's focus curve
+// in defocused or flat areas equals this floor, so the confidence ramp is in effect an SNR test against it.
+float depth_noise_floor(const float* d_a_out, const float* d_b_out, const VolumeParams& p, VolumeScratch& sc, cudaStream_t s);
+
 // collapse(c_coef + [c_base / count]) on the device: coef levels (levels-1, x3 float), base x3 float
 // already divided; d_tmp and d_up are scratch buffers of the level-0 size (x3). Result in d_out.
 void collapse_pyramid(const std::vector<const float*>& d_coef, const float* d_base_f, const std::vector<LevelShape>& shapes,

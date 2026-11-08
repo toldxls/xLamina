@@ -85,6 +85,30 @@ void volume_slice(const float* d_img_out, const VolumeParams& p, VolumeScratch& 
     f32_to_f16(sc.t1, d_lum16, n, s);
 }
 
+// out = (b - a) / sqrt 2: the noise of one frame from the difference of two
+__global__ void k_diff_half(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ out, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = (b[i] - a[i]) * 0.70710678f;
+}
+
+float depth_noise_floor(const float* d_a_out, const float* d_b_out, const VolumeParams& p, VolumeScratch& sc, cudaStream_t s) {
+    size_t n = (size_t)sc.dw * sc.dh;
+    sc.rz.run(d_a_out, sc.img_d, 3, s);
+    luma(sc.img_d, sc.y, n, s);                                          // y = luma of frame a
+    gaussian_blur(sc.y, sc.t1, sc.t2, sc.dw, sc.dh, sc.g_norm, s);        // t1 = the normaliser, from frame a
+    sc.rz.run(d_b_out, sc.img_d, 3, s);
+    luma(sc.img_d, sc.t2, n, s);                                         // t2 = luma of frame b
+    k_diff_half<<<blocks1(n), 256, 0, s>>>(sc.y, sc.t2, sc.t3, n);       // t3 = the noise image
+    gaussian_blur(sc.t3, sc.t2, sc.y, sc.dw, sc.dh, sc.g08, s);           // the slice's chain on it
+    laplacian3_sq(sc.t2, sc.t3, sc.dw, sc.dh, s);
+    gaussian_blur(sc.t3, sc.t2, sc.y, sc.dw, sc.dh, sc.g_fm, s);
+    k_normalise<<<blocks1(n), 256, 0, s>>>(sc.t2, sc.t1, sc.t3, n, 0.02f * 0.02f);
+    if (p.agg_r > 0) box_filter(sc.t3, sc.t2, sc.y, sc.dw, sc.dh, p.agg_r, s);   // the aggregation's mean
+    else CK(cudaMemcpyAsync(sc.t2, sc.t3, n * sizeof(float), cudaMemcpyDeviceToDevice, s));
+    relu_sqrt(sc.t2, n, s);
+    return percentile(sc.t2, sc.t3, n, 50.0, s);
+}
+
 void collapse_pyramid(const std::vector<const float*>& d_coef, const float* d_base_f, const std::vector<LevelShape>& shapes,
                       float* d_out, float* d_tmp, float* d_up, cudaStream_t s) {
     int levels = (int)shapes.size();
