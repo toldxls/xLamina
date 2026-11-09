@@ -91,7 +91,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(&compareLoader_, &ThumbLoader::thumbnail, this, &MainWindow::onComparison);
     tick_.setInterval(250);
     connect(&tick_, &QTimer::timeout, this, [this] {
-        stage_->setText(QString("%1 — %2 s").arg(stageText_).arg(elapsed_.elapsed() / 1000.0, 0, 'f', 1));
+        setStage(QString("%1 — %2 s").arg(stageText_).arg(elapsed_.elapsed() / 1000.0, 0, 'f', 1));
     });
     listTick_.setInterval(250);
     connect(&listTick_, &QTimer::timeout, this, [this] {
@@ -295,17 +295,17 @@ void MainWindow::buildUi() {
     QHBoxLayout* prl = new QHBoxLayout(progRow);
     prl->setContentsMargins(6, 4, 6, 2);
     prl->setSpacing(10);
-    stage_ = new QLabel("Open a folder of TIFF frames, choose the outputs, press Render.");
-    stage_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    stage_ = new QLabel;
+    stage_->hide();                       // the text lives inside the bar (setStage); the label keeps it for the code that reads it
     progress_ = new QProgressBar;
     progress_->setRange(0, 1000);
     progress_->setValue(0);
-    progress_->setMinimumWidth(260);
-    progress_->setMaximumWidth(520);
-    progress_->setTextVisible(false);
-    prl->addWidget(stage_, 1);
-    prl->addWidget(progress_);
+    progress_->setMinimumHeight(24);
+    progress_->setTextVisible(true);
+    progress_->setAlignment(Qt::AlignCenter);
+    prl->addWidget(progress_, 1);
     cl->addWidget(progRow);
+    setStage("Open a folder of TIFF frames, choose the outputs, press Render.");
     cl->addWidget(tabs_);
     setCentralWidget(centre);
     connect(tabs_, &QTabBar::currentChanged, this, &MainWindow::showOutput);
@@ -833,7 +833,7 @@ void MainWindow::openFolder(const QString& dir) {
     QString note = QString("%1 frames of %2 x %3").arg(frames_.size()).arg(best.first).arg(best.second);
     if (skipped) note += QString(" (%1 other TIFF%2 left out)").arg(skipped).arg(skipped > 1 ? "s" : "");
     if (colorSpace_.isValid()) note += QString(", %1").arg(colorSpace_.description().isEmpty() ? "ICC profile" : colorSpace_.description());
-    stage_->setText(note + ". Press Render.");
+    setStage(note + ". Press Render.");
     statusBar()->showMessage(note + " in " + QDir::toNativeSeparators(dir));
     for (int i = 0; i < frameList_->count(); ++i)
         if (frameList_->item(i)->data(Qt::UserRole).toInt() == frames_.size() / 2) { frameList_->setCurrentRow(i); break; }
@@ -1180,7 +1180,7 @@ void MainWindow::cancel() {
     if (!worker_.running() || (bench_ && bench_->running())) return;
     worker_.cancel();
     stageText_ = "Cancelling after the current frames…";
-    stage_->setText(stageText_);
+    setStage(stageText_);
 }
 
 void MainWindow::setBusy(bool busy) {
@@ -1202,7 +1202,7 @@ void MainWindow::onProgress(QString stage, double fraction) {
         return;
     }
     stageText_ = stage;
-    stage_->setText(QString("%1 — %2 s").arg(stage).arg(elapsed_.elapsed() / 1000.0, 0, 'f', 1));
+    setStage(QString("%1 — %2 s").arg(stage).arg(elapsed_.elapsed() / 1000.0, 0, 'f', 1));
     progress_->setValue((int)std::lround(std::clamp(fraction, 0.0, 1.0) * 1000));
     // the frame count comes from here, not from the live view: the view is throttled and skips frames, so its
     // last frame index stalled short of the total ("157 of 163"). Every progress call is delivered.
@@ -1255,6 +1255,12 @@ void MainWindow::onPreview(QString name, FloatImage rgb, int w, int h) {
     view_->setImage(image, true);
     view_->setLabel(name + "  (preview)");
     statusBar()->showMessage(QString("Preview: %1").arg(name));
+}
+
+// the stage text is drawn inside the progress bar (Travis, 2026-11-08); the hidden label keeps the plain text
+void MainWindow::setStage(const QString& text) {
+    stage_->setText(text);
+    progress_->setFormat(QString(text).replace('%', "%%"));   // a literal % in the text, not a QProgressBar field
 }
 
 void MainWindow::onLog(QString line) {
@@ -1357,23 +1363,29 @@ void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
         setBusy(false);
         liveView_->hide();
         resumeThumbnails();
-        if (data->rc == 3) { stage_->setText("Sweep cancelled."); return; }
-        stage_->setText(data->rc ? "Sweep finished with failures; see the log." : QString("Sweep done: %1 variants in %2 s.").arg(data->variants).arg(data->seconds, 0, 'f', 1));
-        progress_->setValue(1000);
+        if (data->rc == 3) { setStage("Sweep cancelled."); return; }
+        setStage(data->rc ? "Sweep finished with failures; see the log." : QString("Sweep done: %1 variants in %2 s.").arg(data->variants).arg(data->seconds, 0, 'f', 1));
+        progress_->setValue(0);   // the bar empties when the work is done; its text says so (Travis, 2026-11-08)
         if (QFileInfo::exists(QDir(data->outDir).filePath("sweep.json"))) { twoUp(); twoUp_->openSweep(data->outDir); }
         return;
     }
     result_ = data;
     // the render's finish time first, as Helicon names its files (Travis, 2026-11-08): B_2026-11-08_14-15-27_bicubic_s2_c32_b0
     result_->settingsTag = QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss") + "_" + jobTag_;
+    // the output's field of view after the crop, last (Travis, 2026-11-08): the panel's FOV is the sensor width's at
+    // the reference depth, so the output's is its share of the width, as the geometry report states it
+    if (fov_->value() > 0 && result_->align.W > 0) {
+        const auto& A = result_->align;
+        result_->settingsTag += QString("_%1mm").arg(fov_->value() * (A.rect[2] - A.rect[0] + 1) / A.W, 0, 'f', 2);
+    }
     setBusy(false);
     liveView_->hide();
     resumeThumbnails();
     labelWobble(data->align);
-    if (data->rc == 3) { stage_->setText("Cancelled."); return; }
-    if (data->rc != 0) { stage_->setText("Failed; see the log."); QMessageBox::warning(this, "xLamina", "The render failed. The log has the details."); return; }
-    stage_->setText(QString("Done in %1 s (alignment %2 s, fusion %3 s).").arg(data->seconds, 0, 'f', 1).arg(data->align.seconds, 0, 'f', 1).arg(data->result.seconds, 0, 'f', 1));
-    progress_->setValue(1000);
+    if (data->rc == 3) { setStage("Cancelled."); return; }
+    if (data->rc != 0) { setStage("Failed; see the log."); QMessageBox::warning(this, "xLamina", "The render failed. The log has the details."); return; }
+    setStage(QString("Done in %1 s (alignment %2 s, fusion %3 s).").arg(data->seconds, 0, 'f', 1).arg(data->align.seconds, 0, 'f', 1).arg(data->result.seconds, 0, 'f', 1));
+    progress_->setValue(0);   // the bar empties when the work is done; its text says so (Travis, 2026-11-08)
     setStatusGeometry(*data);
     rebuildTabs();
     tabs_->setCurrentIndex(0);
@@ -1414,14 +1426,26 @@ void MainWindow::saveCurrent() {
     if (current_.isEmpty() || current_ == "frame") return;
     bool isCompare = compare_.contains(current_);
     if (!result_ && !isCompare) return;
-    // a render's file carries its finish time and settings: B_2026-11-08_14-15-27_bicubic_s2_c32_b0.tif (interpolation,
-    // smoothing, C and B radii); the engine itself writes B.tif etc. to the output folder
+    // a render's file carries its finish time, settings and output field of view:
+    // B_2026-11-08_14-15-27_bicubic_s2_c32_b0_1.49mm.tif (interpolation, smoothing, C and B radii, FOV after the
+    // crop); the engine itself writes B.tif etc. to the output folder
     QString base = isCompare ? QFileInfo(current_).completeBaseName() + "_copy"
                              : (result_->settingsTag.isEmpty() ? current_ : current_ + "_" + result_->settingsTag);
-    QString def = QDir(outDir_->text().isEmpty() ? folder_ + "_stacker" : outDir_->text()).filePath(base + (isCompare ? ".png" : ".tif"));
-    QString filter = isCompare ? "PNG (*.png);;JPEG (*.jpg)" : "16-bit TIFF (*.tif);;JPEG (*.jpg);;PNG (*.png)";
-    QString fn = QFileDialog::getSaveFileName(this, "Save " + current_, def, filter);
+    // the format: 16-bit TIFF with the frames' profile, or JPEG at 100 % / PNG of the displayed sRGB image; the last
+    // choice is remembered
+    const QString fTif = "16-bit TIFF (*.tif)", fJpg = "JPEG, 100 % quality (*.jpg)", fPng = "PNG (*.png)";
+    QString filter = isCompare ? fPng + ";;" + fJpg : fTif + ";;" + fJpg + ";;" + fPng;
+    QString selected = isCompare ? fPng : appSettings().value("save/format", fTif).toString();
+    if (!filter.contains(selected)) selected = isCompare ? fPng : fTif;
+    QString ext = selected == fJpg ? ".jpg" : selected == fPng ? ".png" : ".tif";
+    QString def = QDir(outDir_->text().isEmpty() ? folder_ + "_stacker" : outDir_->text()).filePath(base + ext);
+    QString fn = QFileDialog::getSaveFileName(this, "Save " + current_, def, filter, &selected);
     if (fn.isEmpty()) return;
+    if (!isCompare) appSettings().setValue("save/format", selected);
+    // the chosen format decides the extension when the name has none of the three
+    if (!fn.endsWith(".tif", Qt::CaseInsensitive) && !fn.endsWith(".tiff", Qt::CaseInsensitive) && !fn.endsWith(".jpg", Qt::CaseInsensitive)
+        && !fn.endsWith(".jpeg", Qt::CaseInsensitive) && !fn.endsWith(".png", Qt::CaseInsensitive))
+        fn += selected == fJpg ? ".jpg" : selected == fPng ? ".png" : ".tif";
     bool ok = false;
     if (!isCompare && (fn.endsWith(".tif", Qt::CaseInsensitive) || fn.endsWith(".tiff", Qt::CaseInsensitive))) {
         const auto& R = result_->result;
@@ -1429,8 +1453,8 @@ void MainWindow::saveCurrent() {
             if (QString::fromStdString(R.names[i]) == current_) ok = write_tiff_rgb16(fn.toStdString(), R.images[i], R.w, R.h, R.icc);   // the frames' profile
         if (current_ == "depth") ok = outputImage("depth").save(fn);
     } else {
-        QImageWriter w(fn);   // JPEG / PNG: the displayed (sRGB) image
-        w.setQuality(95);
+        QImageWriter w(fn);   // JPEG / PNG: the displayed (sRGB) image, 8 bits per channel
+        w.setQuality(100);
         ok = w.write(outputImage(current_));
     }
     statusBar()->showMessage(ok ? QString("Saved %1").arg(QDir::toNativeSeparators(fn)) : QString("Could not save %1").arg(fn), 5000);
@@ -1472,8 +1496,8 @@ void MainWindow::benchmark() {
     connect(bench_, &BenchmarkDialog::runningChanged, this, [this](bool on) {
         renderBtn_->setEnabled(!on);
         renderAct_->setEnabled(!on);
-        if (on) stage_->setText("Benchmark running…");
-        else { progress_->setValue(0); stage_->setText(result_ ? QString("Done in %1 s.").arg(result_->seconds, 0, 'f', 1) : "Benchmark finished."); }
+        if (on) setStage("Benchmark running…");
+        else { progress_->setValue(0); setStage(result_ ? QString("Done in %1 s.").arg(result_->seconds, 0, 'f', 1) : "Benchmark finished."); }
     });
     bench_->show();
 }
