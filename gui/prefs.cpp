@@ -73,11 +73,11 @@ QList<GpuInfo> enumerateGpus() {
 
 QString GpuInfo::label() const {
     QString s = QString("%1: %2, %3 GB").arg(index).arg(name).arg(memory / 1073741824.0, 0, 'f', 0);
-    if (pcieWidth) {   // the width is the slot's; the generation drops to 1 while the card idles, so it is shown as "now"
+    if (pcieWidth) {   // the width is the slot's; the link drops to gen 1 while the card idles and returns to its best under load
         s += QString(", PCIe x%1").arg(pcieWidth);
         if (pcieWidthMax && pcieWidthMax != pcieWidth) s += QString(" (card max x%1)").arg(pcieWidthMax);
-        if (pcieGen) s += QString(", gen %1 now").arg(pcieGen);
-        if (pcieGenMax) s += QString(" of %1").arg(pcieGenMax);
+        if (pcieGenMax) s += QString(", gen %1").arg(pcieGenMax);
+        if (pcieGen && pcieGenMax && pcieGen < pcieGenMax) s += QString(" (idling at gen %1)").arg(pcieGen);
     }
     return s;
 }
