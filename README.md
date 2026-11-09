@@ -53,6 +53,8 @@ marks: "warp" is its displacement from band to band of sensor rows against its n
 (px), "band" the LED flicker's brightness ripple across its rows (% peak-to-peak); the
 Render column's Undo rolling-shutter warping and Undo LED banding put the measured
 corrections into every warp of the frame (off by default; saved files get _rs / _band).
+A frame warped far beyond the rest (shaken during its readout) is shown in violet and
+Render > Drop warped frames unticks it.
 The list is the stack order: Render > Sort frames by name or by time taken (the EXIF
 capture time) reorder it, Tick all frames puts every frame back into the render.
 

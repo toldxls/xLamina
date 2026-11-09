@@ -85,6 +85,7 @@ private slots:
     void onFinished(std::shared_ptr<JobResultData> data);
     void dropShifted();   // untick the frames whose shift from the previous frame is an outlier
     void dropSoft();      // untick the frames whose focus energy fell under their neighbours'
+    void dropWarped();    // untick the frames whose rolling-shutter displacement is an outlier
     void frameMenu(const QPoint& pos);
     void tickAllFrames();
     void syncAllFramesBox();   // the master tick above the list mirrors the rows: all, none or some ticked
@@ -123,12 +124,14 @@ private:
     QList<QListWidgetItem*> jobItems_;     // the rows of the current / last render, in stack order
     QList<QListWidgetItem*> shifted_;      // rows whose wobble (shift from the previous frame) is an outlier
     QList<QListWidgetItem*> soft_;         // rows whose focus energy fell under their neighbours' (blurred frames)
+    QList<QListWidgetItem*> warped_;       // rows whose band-to-band displacement is an outlier (shaken during the readout)
     QString wobble_;                       // the wobble + sharpness summary line
     QAction* tickAll_ = nullptr;
     QAction* sortName_ = nullptr;
     QAction* sortTime_ = nullptr;
     QAction* dropShifted_ = nullptr;
     QAction* dropSoft_ = nullptr;
+    QAction* dropWarped_ = nullptr;   // the rolling-shutter outliers (FINDINGS 51; Travis, 2026-11-09: "frames terribly warped could be dropped")
     QAction* saveAct_ = nullptr;
     QAction* openOutAct_ = nullptr;
     QAction* renderAct_ = nullptr;

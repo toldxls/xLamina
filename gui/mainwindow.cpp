@@ -183,6 +183,10 @@ void MainWindow::buildMenus() {
     dropSoft_ = render->addAction("Drop s&oft frames", this, &MainWindow::dropSoft);
     dropSoft_->setEnabled(false);
     dropSoft_->setToolTip("Untick the frames in amber: the focus energy fell under the neighbours' (blurred during the exposure); then Render again.");
+    dropWarped_ = render->addAction("Drop &warped frames", this, &MainWindow::dropWarped);
+    dropWarped_->setEnabled(false);
+    dropWarped_->setToolTip("Untick the frames in violet: their rolling-shutter displacement from band to band is far above the stack's\n"
+                            "(shaken during the readout, beyond what Undo rolling-shutter warping can put back); then Render again.");
     tickAll_ = render->addAction("&Tick all frames", this, &MainWindow::tickAllFrames);
     tickAll_->setToolTip("Tick every frame in the list again (after dropping frames, or to start over).");
     render->addSeparator();
@@ -281,6 +285,7 @@ void MainWindow::buildUi() {
     tb->addSeparator();
     tb->addAction(dropShifted_);
     tb->addAction(dropSoft_);
+    tb->addAction(dropWarped_);
     tb->addSeparator();
     tb->addAction("Benchmark…", this, &MainWindow::benchmark);
     // the Update button, at the right end, shown only when a newer release exists
@@ -924,8 +929,10 @@ void MainWindow::openFolder(const QString& dir) {
     jobItems_.clear();
     shifted_.clear();
     soft_.clear();
+    warped_.clear();
     dropShifted_->setEnabled(false);
     dropSoft_->setEnabled(false);
+    dropWarped_->setEnabled(false);
     frameList_->clear();
     liveItem_ = markedItem_ = nullptr;   // the rows they pointed at are gone
     liveView_->hide();
@@ -1450,6 +1457,7 @@ void MainWindow::setStatusGeometry(const JobResultData& d) {
 void MainWindow::labelWobble(const stackcore::AlignOut& A, const stackcore::StackOptions::Result* R) {
     shifted_.clear();
     soft_.clear();
+    warped_.clear();
     int n = (int)A.T.size();
     if (n != jobItems_.size() || n < 2) return;
     stackcore::FrameSharpness sharp;
@@ -1473,9 +1481,21 @@ void MainWindow::labelWobble(const stackcore::AlignOut& A, const stackcore::Stac
     std::sort(dev.begin(), dev.end());
     double mad = 1.4826 * dev[dev.size() / 2];
     double thr = med + std::max(4 * mad, 0.5);
+    // the warped outliers (FINDINGS 51): the band-to-band displacement far above the stack's, the same robust rule,
+    // at least 2 px above the median (the 8-band correction is too coarse for a frame shaken that hard)
+    double warpThr = 0;
+    if (haveRs) {
+        QVector<double> wv(A.rs_px.begin(), A.rs_px.end());
+        std::sort(wv.begin(), wv.end());
+        double wmed = wv[wv.size() / 2];
+        QVector<double> wdev;
+        for (double x : wv) wdev << std::abs(x - wmed);
+        std::sort(wdev.begin(), wdev.end());
+        warpThr = wmed + std::max(4 * 1.4826 * wdev[wdev.size() / 2], 2.0);
+    }
     double worst = 0;
     int worstk = -1;
-    int nWobble = 0, softest = -1;
+    int nWobble = 0, softest = -1, nWarped = 0;
     for (int k = 0; k < n; ++k) {
         QListWidgetItem* it = jobItems_[k];
         QString name = QFileInfo(frames_[it->data(Qt::UserRole).toInt()]).fileName();
@@ -1495,8 +1515,9 @@ void MainWindow::labelWobble(const stackcore::AlignOut& A, const stackcore::Stac
             it->setText(QString("%1\nΔ %2 px  %3 %%4%5").arg(name).arg(step[k], 0, 'f', 2).arg(sstep[k], 0, 'f', 3).arg(sharpTxt).arg(rsTxt));
         }
         bool flag = k > 0 && step[k] > thr;
-        // red = the position jumped (wobble), amber = blurred (soft); both when both
-        it->setForeground(flag ? QBrush(QColor(230, 80, 80)) : soft ? QBrush(QColor(235, 160, 40)) : QBrush());
+        const bool warped = haveRs && A.rs_px[k] > warpThr;
+        // red = the position jumped (wobble), amber = blurred (soft), violet = warped (rolling shutter); the first that applies
+        it->setForeground(flag ? QBrush(QColor(230, 80, 80)) : soft ? QBrush(QColor(235, 160, 40)) : warped ? QBrush(QColor(170, 130, 255)) : QBrush());
         QString tip = QString("To the reference: shift (%1, %2) px, scale %3, rotation %4°\n"
                               "From the previous frame: %5 px, %6 %, %7°%8")
                           .arg(A.T[k].tx, 0, 'f', 2).arg(A.T[k].ty, 0, 'f', 2).arg(std::hypot(A.T[k].zr, A.T[k].zi), 0, 'f', 5)
@@ -1512,8 +1533,9 @@ void MainWindow::labelWobble(const stackcore::AlignOut& A, const stackcore::Stac
             QString bands;
             for (int b = 0; b < A.rs_bands; ++b)
                 bands += QString("%1(%2, %3)").arg(b ? " " : "").arg(A.rs_dx[(size_t)k * A.rs_bands + b], 0, 'f', 1).arg(A.rs_dy[(size_t)k * A.rs_bands + b], 0, 'f', 1);
-            tip += QString("\nRolling shutter: displacement per row band, top to bottom, px: %1\n  band-to-band spread %2 px (stack median %3 px)")
-                       .arg(bands).arg(A.rs_px[k], 0, 'f', 2).arg(A.rs_median_px, 0, 'f', 2);
+            tip += QString("\nRolling shutter: displacement per row band, top to bottom, px: %1\n  band-to-band spread %2 px (stack median %3 px, warped above %4 px)")
+                       .arg(bands).arg(A.rs_px[k], 0, 'f', 2).arg(A.rs_median_px, 0, 'f', 2).arg(warpThr, 0, 'f', 2);
+            if (warped) tip += "\nWARPED: shaken during the readout, far beyond the stack's rolling shutter";
         }
         if (haveBand)
             tip += QString("\nBrightness banding: LED flicker %1 % peak-to-peak across the rows (stack median %2 %, strongest period %3 rows)")
@@ -1522,6 +1544,7 @@ void MainWindow::labelWobble(const stackcore::AlignOut& A, const stackcore::Stac
         if (flag) ++nWobble;
         if (flag) shifted_ << it;
         if (soft) soft_ << it;
+        if (warped) { warped_ << it; ++nWarped; }
         if (step[k] > worst) { worst = step[k]; worstk = it->data(Qt::UserRole).toInt(); }
         if (soft && (softest < 0 || sharp.ratio[k] < sharp.ratio[softest])) softest = k;
     }
@@ -1533,10 +1556,12 @@ void MainWindow::labelWobble(const stackcore::AlignOut& A, const stackcore::Stac
         if (softest >= 0)
             wobble_ += QString(", softest %1 at %2").arg(QFileInfo(frames_[jobItems_[softest]->data(Qt::UserRole).toInt()]).fileName()).arg(sharp.ratio[softest], 0, 'f', 2);
     }
-    if (haveRs) wobble_ += QString("; rolling shutter: band-to-band displacement median %1 px").arg(A.rs_median_px, 0, 'f', 2);
+    if (haveRs) wobble_ += QString("; rolling shutter: band-to-band displacement median %1 px, %2 warped frame%3 (above %4 px)")
+                               .arg(A.rs_median_px, 0, 'f', 2).arg(nWarped).arg(nWarped == 1 ? "" : "s").arg(warpThr, 0, 'f', 2);
     if (haveBand) wobble_ += QString("; banding: flicker median %1 %, period %2 rows").arg(A.band_median_pct, 0, 'f', 2).arg(A.band_peak_cycles > 0 ? A.H / A.band_peak_cycles : 0);
     dropShifted_->setEnabled(!shifted_.isEmpty());
     dropSoft_->setEnabled(!soft_.isEmpty());
+    dropWarped_->setEnabled(!warped_.isEmpty());
 }
 
 static void untick(QList<QListWidgetItem*>& rows, QAction* act, QStatusBar* bar, const char* what) {
@@ -1548,6 +1573,7 @@ static void untick(QList<QListWidgetItem*>& rows, QAction* act, QStatusBar* bar,
 
 void MainWindow::dropShifted() { untick(shifted_, dropShifted_, statusBar(), "shifted"); }
 void MainWindow::dropSoft() { untick(soft_, dropSoft_, statusBar(), "soft"); }
+void MainWindow::dropWarped() { untick(warped_, dropWarped_, statusBar(), "warped"); }
 
 void MainWindow::syncAllFramesBox() {
     if (!allFrames_) return;

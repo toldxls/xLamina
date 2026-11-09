@@ -2227,6 +2227,13 @@ measured by every alignment now, and both can be undone in the warp.
   centres) when `fix_rs` / `fix_banding` are set. GUI: Render > Undo
   rolling-shutter warping / Undo LED banding, off by default, `_rs` /
   `_band` in the saved names; CLI `--fix-rs 1 --fix-banding 1`.
+- **Travis's verdict (11/09 night):** "very subtle. Only viewable in the
+  difference map at above 0.5 %. But I guess it is an improvement." The
+  options stay off by default. He asked for a drop for the badly warped
+  frames: violet rows and Render > Drop warped frames flag `rs_px` above
+  median + max(4 robust sigmas, 2 px) (5.6 px on the 210-frame stack: the
+  six test frames at 11..75 px and eight real frames at 5.8..26 px, IMG_5694
+  the worst).
 - **First numbers, B on the 210 frames, both corrections on vs off:** luma
   differs by 1.7 % rms (17 % of pixels by more than 1 %, mostly the soft
   regions where the depth picked another frame); Laplacian energy +4 %
