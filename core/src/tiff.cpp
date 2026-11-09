@@ -85,37 +85,43 @@ bool wic_open(const std::filesystem::path& path, ComPtr<IWICImagingFactory>& fac
     if (FAILED(dec->GetFrame(0, &frame.p))) { err = "JPEG: no image"; return false; }
     return true;
 }
-TiffInfo jpeg_probe(const std::filesystem::path& path, TiffInfo t) {
-    ComScope com;
-    ComPtr<IWICImagingFactory> fac;
-    ComPtr<IWICBitmapFrameDecode> frame;
-    if (!wic_open(path, fac, frame, t.error)) return t;
-    UINT w = 0, h = 0;
-    if (FAILED(frame->GetSize(&w, &h)) || w == 0 || h == 0) { t.error = "JPEG: no size"; return t; }
+// the header only, parsed here (a WIC decoder per probe cost 7.6 ms; the GUI probes every file of a folder as it
+// opens): the frame's size from the SOF segment, the profile from the APP2 "ICC_PROFILE" segments
+TiffInfo jpeg_probe(const std::filesystem::path& path, File& f, TiffInfo t) {
+    uint64_t pos = 2;   // after SOI
+    std::vector<std::pair<int, std::vector<uint8_t>>> icc_parts;   // (sequence number, bytes)
+    uint8_t hdr[4];
+    for (int seg = 0; seg < 256; ++seg) {
+        if (f.read_at(pos, hdr, 4) < 4 || hdr[0] != 0xFF) break;
+        uint8_t marker = hdr[1];
+        if (marker == 0xFF) { ++pos; continue; }                     // fill byte
+        if (marker == 0xD8 || (marker >= 0xD0 && marker <= 0xD7)) { pos += 2; continue; }   // SOI / RSTn: no length
+        if (marker == 0xD9 || marker == 0xDA) break;                  // EOI / SOS: the header is over
+        uint32_t len = ((uint32_t)hdr[2] << 8) | hdr[3];
+        if (len < 2) break;
+        const bool sof = (marker >= 0xC0 && marker <= 0xCF) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC;
+        if (sof) {
+            uint8_t s[6];
+            if (f.read_at(pos + 4, s, 6) < 6) break;
+            t.height = ((uint32_t)s[1] << 8) | s[2];
+            t.width = ((uint32_t)s[3] << 8) | s[4];
+            if (s[0] != 8) { t.error = "JPEG: only 8-bit"; return t; }
+            if (s[5] != 3 && s[5] != 1) { t.error = "JPEG: CMYK is not supported"; return t; }
+        } else if (marker == 0xE2 && len > 2 + 14) {               // APP2: "ICC_PROFILE\0" seq count data
+            std::vector<uint8_t> seg_data(len - 2);
+            if (f.read_at(pos + 4, seg_data.data(), seg_data.size()) < seg_data.size()) break;
+            if (memcmp(seg_data.data(), "ICC_PROFILE", 12) == 0) icc_parts.emplace_back(seg_data[12], std::vector<uint8_t>(seg_data.begin() + 14, seg_data.end()));
+        }
+        pos += 2 + len;
+    }
+    if (t.width == 0 || t.height == 0) { t.error = "JPEG: no frame header"; return t; }
+    std::sort(icc_parts.begin(), icc_parts.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (auto& [seq, bytes] : icc_parts) t.icc.insert(t.icc.end(), bytes.begin(), bytes.end());
     t.jpeg = true;
-    t.width = w; t.height = h;
-    t.bits = 8; t.samples = 3; t.compression = 7; t.photometric = 2; t.planar = 1; t.sample_format = 1;
+    t.bits = 8; t.samples = 3; t.compression = 7; t.photometric = 2; t.planar = 1; t.sample_format = 1;   // (decoded to RGB whatever the file holds)
     t.big_endian = false; t.contiguous = true;
     t.data_offset = 0; t.data_bytes = t.pixel_bytes();
     t.strip_offsets = {0}; t.strip_bytes = {t.data_bytes};
-    // the embedded profile (Camera Raw's JPEGs carry Adobe RGB), as the TIFF path's tag 34675
-    UINT n = 0;
-    if (SUCCEEDED(frame->GetColorContexts(0, nullptr, &n)) && n > 0) {
-        std::vector<IWICColorContext*> ctx(n, nullptr);
-        bool made = true;
-        for (UINT i = 0; i < n; ++i) if (FAILED(fac->CreateColorContext(&ctx[i]))) made = false;
-        if (made && SUCCEEDED(frame->GetColorContexts(n, ctx.data(), &n))) {
-            for (UINT i = 0; i < n && t.icc.empty(); ++i) {
-                WICColorContextType type;
-                UINT bytes = 0;
-                if (SUCCEEDED(ctx[i]->GetType(&type)) && type == WICColorContextProfile && SUCCEEDED(ctx[i]->GetProfileBytes(0, nullptr, &bytes)) && bytes > 0) {
-                    t.icc.resize(bytes);
-                    if (FAILED(ctx[i]->GetProfileBytes(bytes, t.icc.data(), &bytes))) t.icc.clear();
-                }
-            }
-        }
-        for (auto* c : ctx) if (c) c->Release();
-    }
     return t;
 }
 TiffRead jpeg_read(const std::filesystem::path& path, const TiffInfo& info, uint8_t* dst, size_t cap) {
@@ -170,7 +176,7 @@ TiffInfo tiff_probe(const std::filesystem::path& path) {
     t.file_size = f.size();
     uint8_t hdr[16];
     if (f.read_at(0, hdr, 16) < 8) { t.error = "too short"; return t; }
-    if (hdr[0] == 0xFF && hdr[1] == 0xD8) return jpeg_probe(path, t);   // a JPEG (SOI marker)
+    if (hdr[0] == 0xFF && hdr[1] == 0xD8) return jpeg_probe(path, f, t);   // a JPEG (SOI marker)
     Parser P{f};
     if (hdr[0] == 'I' && hdr[1] == 'I') P.be = false;
     else if (hdr[0] == 'M' && hdr[1] == 'M') P.be = true;

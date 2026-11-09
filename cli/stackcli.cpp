@@ -233,7 +233,21 @@ static std::vector<int> parse_list(const std::string& s) {
 
 static int cmd_probe(int argc, char** argv) {
     if (argc < 3) return usage();
-    print_info(argv[2], tiff_probe(argv[2]));
+    auto t0 = std::chrono::steady_clock::now();
+    TiffInfo info = tiff_probe(argv[2]);
+    double ms_probe = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    print_info(argv[2], info);
+    printf("  probe %.1f ms\n", ms_probe);
+    if (info.ok() && info.jpeg) {   // the JPEG paths' cost: the thumbnail decode and the full decode
+        std::vector<uint8_t> small;
+        int w, h;
+        auto t1 = std::chrono::steady_clock::now();
+        bool ok = jpeg_thumbnail(argv[2], 144, small, w, h);
+        double ms_thumb = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
+        std::vector<uint8_t> buf(tiff_buffer_capacity(info.pixel_bytes()) + kReadAlign);
+        TiffRead rd = tiff_read_pixels(argv[2], info, buf.data(), buf.size());
+        printf("  thumbnail %dx%d %s in %.1f ms; full decode %s in %.1f ms\n", w, h, ok ? "ok" : "FAILED", ms_thumb, rd.ok() ? "ok" : rd.error.c_str(), rd.ms);
+    }
     return 0;
 }
 

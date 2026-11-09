@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <thread>
 #include <cstdlib>
 #include <cstring>
 
@@ -177,15 +178,15 @@ void ThumbLoader::start(const QStringList& files, int width, const QList<int>& i
     thread_.start();
     stackcore::FrameCache* cache = cache_;
     QMetaObject::invokeMethod(job, [this, files, width, gen, job, indices, cache] {
-        std::vector<uint8_t> buf;
-        for (int i = 0; i < files.size() && !stop_.load() && generation_.load() == gen; ++i) {
+        // one file; run by a few threads at once (a JPEG thumbnail decodes in ~50 ms, a folder of 200 took 10 s on one)
+        auto one = [&](int i, std::vector<uint8_t>& buf) {
             const std::filesystem::path path(files[i].toStdWString());
             TiffInfo info = tiff_probe(path.native());
-            if (!info.ok() || info.samples < 3) continue;
+            if (!info.ok() || info.samples < 3) return;
             if (info.jpeg && width < (int)info.width / 2) {   // a thumbnail: decoded small by the codec itself; no cache fill (the render's 16 readers decode in parallel). The full-size view below decodes whole
                 std::vector<uint8_t> small;
                 int sw = 0, sh = 0;
-                if (!jpeg_thumbnail(path, width, small, sw, sh)) continue;
+                if (!jpeg_thumbnail(path, width, small, sw, sh)) return;
                 QImage img(sw, sh, QImage::Format_RGB32);
                 for (int y = 0; y < sh; ++y) {
                     QRgb* out = reinterpret_cast<QRgb*>(img.scanLine(y));
@@ -193,7 +194,7 @@ void ThumbLoader::start(const QStringList& files, int width, const QList<int>& i
                     for (int x = 0; x < sw; ++x, p += 3) out[x] = qRgb(p[0], p[1], p[2]);
                 }
                 emit thumbnail(indices.isEmpty() ? i : indices.value(i, i), img);
-                continue;
+                return;
             }
             int down = std::max(1, (int)info.width / width);
             int pw = info.width / down, ph = info.height / down;
@@ -217,13 +218,13 @@ void ThumbLoader::start(const QStringList& files, int width, const QList<int>& i
             // resident already (the folder was opened before, or a render read it): sample it under the cache's lock
             if (cache && cache->with(path, [&](const stackcore::FrameCache::Entry& e) { sample(e.buf + e.offset); })) {
                 emit thumbnail(indices.isEmpty() ? i : indices.value(i, i), img);
-                continue;
+                return;
             }
             const size_t cap = tiff_buffer_capacity(info.pixel_bytes());
             uint8_t* pinned = cache ? cache->reserve(cap) : nullptr;   // nullptr: no cache, or its budget is spent
             if (pinned) {
                 TiffRead rd = tiff_read_pixels(path, info, pinned, cap);
-                if (!rd.ok()) { cache->unreserve(pinned, cap); continue; }
+                if (!rd.ok()) { cache->unreserve(pinned, cap); return; }
                 sample(pinned + rd.data_offset_in_buf);
                 cache->insert(path, pinned, cap, rd.data_offset_in_buf, rd.bytes);   // the stack warms up while the list fills
             } else {
@@ -231,11 +232,23 @@ void ThumbLoader::start(const QStringList& files, int width, const QList<int>& i
                 if (buf.size() < need) buf.resize(need);
                 uint8_t* base = buf.data() + (kReadAlign - ((uintptr_t)buf.data() % kReadAlign)) % kReadAlign;
                 TiffRead rd = tiff_read_pixels(path, info, base, buf.size() - (base - buf.data()));
-                if (!rd.ok()) continue;
+                if (!rd.ok()) return;
                 sample(base + rd.data_offset_in_buf);
             }
             emit thumbnail(indices.isEmpty() ? i : indices.value(i, i), img);
-        }
+        };
+        std::atomic<int> next{0};
+        std::vector<std::thread> pool;
+        for (int t = 0; t < 6; ++t)
+            pool.emplace_back([&] {
+                std::vector<uint8_t> buf;
+                for (;;) {
+                    int i = next++;
+                    if (i >= files.size() || stop_.load() || generation_.load() != gen) break;
+                    one(i, buf);
+                }
+            });
+        for (auto& t : pool) t.join();
         job->deleteLater();
     }, Qt::QueuedConnection);
 }
