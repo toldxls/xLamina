@@ -1644,6 +1644,8 @@ void MainWindow::about() {
     box.setText(QString("<h3>xLamina %1</h3>"
                         "<p>Multi-GPU focus stacker for photomicroscopy.<br>"
                         "<a href=\"https://github.com/toldxls/xLamina\">github.com/toldxls/xLamina</a></p>"
+                        "<p>Travis Olds, Ph.D.<br>"
+                        "<a href=\"https://www.mindat.org/user-8894.html\">mindat.org/user-8894.html</a></p>"
                         "<p><b>GPUs</b><br>%2</p><p>%3<br>Qt %4</p>"
                         "<p>Settings file: %5</p>")
                     .arg(XLAMINA_VERSION, g.isEmpty() ? "none found" : g.join("<br>"), hostSummary(), qVersion(),
