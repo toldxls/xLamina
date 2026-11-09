@@ -182,6 +182,19 @@ void ThumbLoader::start(const QStringList& files, int width, const QList<int>& i
             const std::filesystem::path path(files[i].toStdWString());
             TiffInfo info = tiff_probe(path.native());
             if (!info.ok() || info.samples < 3) continue;
+            if (info.jpeg && width < (int)info.width / 2) {   // a thumbnail: decoded small by the codec itself; no cache fill (the render's 16 readers decode in parallel). The full-size view below decodes whole
+                std::vector<uint8_t> small;
+                int sw = 0, sh = 0;
+                if (!jpeg_thumbnail(path, width, small, sw, sh)) continue;
+                QImage img(sw, sh, QImage::Format_RGB32);
+                for (int y = 0; y < sh; ++y) {
+                    QRgb* out = reinterpret_cast<QRgb*>(img.scanLine(y));
+                    const uint8_t* p = small.data() + (size_t)y * sw * 3;
+                    for (int x = 0; x < sw; ++x, p += 3) out[x] = qRgb(p[0], p[1], p[2]);
+                }
+                emit thumbnail(indices.isEmpty() ? i : indices.value(i, i), img);
+                continue;
+            }
             int down = std::max(1, (int)info.width / width);
             int pw = info.width / down, ph = info.height / down;
             QImage img(pw, ph, QImage::Format_RGB32);

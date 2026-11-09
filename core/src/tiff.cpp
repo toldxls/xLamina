@@ -142,6 +142,27 @@ TiffRead jpeg_read(const std::filesystem::path& path, const TiffInfo& info, uint
 }
 }  // namespace
 
+bool jpeg_thumbnail(const std::filesystem::path& path, int max_w, std::vector<uint8_t>& rgb, int& w, int& h) {
+    ComScope com;
+    ComPtr<IWICImagingFactory> fac;
+    ComPtr<IWICBitmapFrameDecode> frame;
+    std::string err;
+    if (!wic_open(path, fac, frame, err)) return false;
+    UINT fw = 0, fh = 0;
+    if (FAILED(frame->GetSize(&fw, &fh)) || fw == 0 || fh == 0) return false;
+    int down = std::max(1, (int)fw / std::max(1, max_w));
+    w = std::max(1, (int)fw / down);
+    h = std::max(1, (int)fh / down);
+    // the scaler on the decoder's frame: the JPEG codec scales in the DCT domain, so this decodes a fraction of the pixels
+    ComPtr<IWICBitmapScaler> sc;
+    if (FAILED(fac->CreateBitmapScaler(&sc.p)) || FAILED(sc->Initialize(frame.p, (UINT)w, (UINT)h, WICBitmapInterpolationModeFant))) return false;
+    ComPtr<IWICFormatConverter> conv;
+    if (FAILED(fac->CreateFormatConverter(&conv.p)) ||
+        FAILED(conv->Initialize(sc.p, GUID_WICPixelFormat24bppRGB, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom))) return false;
+    rgb.resize((size_t)w * h * 3);
+    return SUCCEEDED(conv->CopyPixels(nullptr, (UINT)w * 3, (UINT)rgb.size(), rgb.data()));
+}
+
 TiffInfo tiff_probe(const std::filesystem::path& path) {
     TiffInfo t;
     File f(path);

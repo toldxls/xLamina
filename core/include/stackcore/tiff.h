@@ -61,4 +61,9 @@ constexpr size_t tiff_buffer_capacity(size_t pixel_bytes) { return pixel_bytes +
 // (cudaHostAlloc memory is).
 TiffRead tiff_read_pixels(const std::filesystem::path& path, const TiffInfo& info, uint8_t* dst, size_t cap);
 
+// A JPEG's thumbnail: the frame decoded at about max_w pixels wide through the decoder's own scaling (a few
+// tens of ms for a 31 Mpx file against ~0.5 s for the full decode), as 8-bit RGB. false when it is not a JPEG
+// or the decode fails.
+bool jpeg_thumbnail(const std::filesystem::path& path, int max_w, std::vector<uint8_t>& rgb, int& w, int& h);
+
 }  // namespace stackcore
