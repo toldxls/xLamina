@@ -1758,6 +1758,123 @@ presumably because the corrupt masks marked more of the image flat and the
 16-frame blend then drew every frame into the composition there; not
 measured separately.
 
+## 44. The B parameter search, round 1: scored against the source frames (2026-11-08, night)
+
+Travis judged 0.6.20's B at 1:1 ("looks great") and opened the parameter search
+he had planned: the 201-frame stack only, his eye at 1:1 as the judge, with an
+objective helper that measures against the source frames rather than against
+Helicon (his 11/06 rule: another stacker agreeing proves nothing). Winners
+become the defaults; the knobs stay in Advanced.
+
+**The helper** (`helicon_B_analysis\score_sweep.py`): per pixel, the most
+fine-detail energy any source frame carries there is the *oracle*: every frame
+is warped onto the output grid with the stacker's own centred similarity
+(`affine_for`, centre (W−1)/2; the middle frame lands within 0.5 px of the
+base B on every tile), its high-pass (σ 1.5) is squared and pooled over σ 4,
+and the maximum over the stack is kept. A B at the oracle kept all the detail
+a frame had; above it, it carries energy no frame has (doubled edges, halos,
+seams); below it, it lost detail. Per 900 × 600 tile: *retention* = median of
+E_B / oracle over the textured pixels (oracle above its 70th percentile), its
+10th percentile (the worst tenth), and *excess* = the share above 1.2 × the
+oracle. Six detail tiles (the most high-pass energy in the base B, non-
+overlapping) and two flat tiles, where the 4..40 px band energy relative to
+the base shows rings and bokeh. The score rewards noise as well as detail
+(one frame's noise is in the oracle, a blend averages it away), so it ranks,
+it does not decide.
+
+**Round 1** (`Q:\_sweep1`, 47 variants, 15 min): one knob at a time, both
+sides of its 0.6.20 default, base = the GUI's defaults (`--c-radius 32`).
+Full-resolution depth volume (`--depth-fraction 1`) runs the 3080 Ti out of
+memory and is off the table. The base B retains 0.868 of the oracle (median),
+0.617 at the worst tenth, excess 0.001.
+
+| variant | B pixels changed | retention | worst tenth | excess | flat band vs base |
+|---|---|---|---|---|---|
+| soft labels 1 px (default 3) | 1.1 % | **0.970** | **0.764** | 0.024 | 1.00 |
+| aggregation 0 px (default 32) | 3.7 % | 0.873 | 0.640 | 0.001 | 1.01 / 0.96 |
+| refine range 24 (default 12) | 2.1 % | 0.873 | 0.634 | 0.001 | 1.00 |
+| depth volume 1/4 (default 1/2) | 5.5 % | 0.870 | 0.618 | 0.001 | 0.92 / **1.24** |
+| base | 0 | 0.868 | 0.617 | 0.001 | 1.00 |
+| every flat-region knob, the priors, SGM, the ramp, end vote, focus radius, interpolation | 0 .. 20 % | 0.868 ± 0.001 | 0.617 ± 0.003 | 0.001 | see below |
+| B radius 32 | 2.3 % | 0.864 | 0.580 | 0.001 | 1.00 |
+| refine range 6 | 2.2 % | 0.858 | 0.569 | 0.000 | 1.00 |
+| aggregation 64 px | 4.0 % | 0.855 | 0.540 | 0.001 | 1.0 |
+| refine window 15 / 5 px (default 9) | 4.4 % | 0.852 / 0.837 | 0.52 / 0.62 | 0.000 | 1.00 |
+| soft labels 6 px | 1.1 % | 0.726 | 0.463 | 0.000 | 1.00 |
+
+Background, the two flat tiles' 4..40 px band energy against the base's (1 =
+the same): `--flat-end quiet` 0.51 / 0.94 (the smoothest, and what Travis
+rejected as wax in §36), flat blur 512: 0.84 / 0.80, flat blur 256: 0.83 /
+0.90, flat blend 32: 0.94 / 0.99, dark reach 48: 0.98 / 1.03; flat blur 0:
+1.15 / 1.32, flat blend 0: 1.03 / 1.02, flat keep 1: 1.04 / 1.08, flat min 1:
+0.99 / 0.65 (and 20 % of B changed), depth volume 1/4: 0.92 / 1.24. The
+confidence ramp, the priors and SGM do not move either kind of tile by more
+than 0.3 %, as §35 found.
+
+What it says:
+- **Detail in B is decided by the composition, not the depth.** Only the
+  soft-label width, the refinement's range and window, the aggregation width
+  and the B radius move the detail tiles; every depth knob, including the
+  ones §35 ranked high (volume resolution, the ramp, the priors), leaves the
+  retention within 0.001. The depth map puts the right frame under the
+  detail; how many frames are blended there is what sharpens or softens it.
+- **Soft labels at 1 px gain 10 % of the fine detail and 15 % at the worst
+  tenth, and are visibly crisper at 1:1**, but the excess share rises to 2.4 %
+  and the sheets show why: hard label edges become seams (a jagged step across
+  the crystal in detail6). 6 px blends a quarter of the detail away. The
+  default 3 is on the soft side; 1.5 .. 2.5 are round 2's first candidates.
+- **Refine range 24 and aggregation 0 gain a little each** (0.005) without
+  seams; aggregation 0 shows a blotch in detail2 that needs Travis's eye.
+- **The background knobs are orthogonal to detail** (the flat mask keeps
+  them off textured pixels, as designed), so background smoothness can be
+  tuned on its own: flat blur 256 and flat blend 32 are the calm candidates
+  that do not go all the way to the waxy quiet end.
+
+**Round 2** (`Q:\_sweep2`, 20 variants, 5 min): soft labels 1.5 / 2 / 2.5,
+refine range 18 / 24 / 36, aggregation 0 / 16, their combinations, flat blur
+192 / 256 / 384, flat blend 24 / 48, and a combined candidate.
+
+| variant | B pixels changed | retention | worst tenth | excess |
+|---|---|---|---|---|
+| soft 1.5 + refine 24 | 2.7 % | 0.946 | 0.735 | 0.009 |
+| soft 1.5 | 0.5 % | 0.944 | 0.721 | 0.009 |
+| soft 2 + refine 24 + aggregation 0 / 16 | 4.3 / 3.5 % | 0.923 / 0.922 | 0.707 / 0.705 | 0.004 |
+| soft 2 + refine 36 | 3.3 % | 0.922 | 0.701 | 0.004 |
+| soft 2 + refine 24 + flat blur 256 + flat blend 32 | 5.1 % | 0.921 | 0.698 | 0.004 |
+| soft 2 | 0.1 % | 0.918 | 0.683 | 0.004 |
+| soft 2.5 | 0.0 % | 0.893 | 0.648 | 0.002 |
+| refine 36 / 24 / 18 | 3.1 / 2.1 / 1.2 % | 0.873 / 0.873 / 0.871 | 0.64 / 0.63 / 0.63 | 0.001 |
+| aggregation 0 / 16 | 3.7 / 2.2 % | 0.873 / 0.872 | 0.64 / 0.64 | 0.001 |
+| base (soft 3, refine 12, aggregation 32) | 0 | 0.868 | 0.617 | 0.001 |
+
+Background band energy against the base: flat blur 256 + flat blend 32:
+0.79 / 0.90; flat blur 256 alone 0.83 / 0.90; 192: 0.88 / 0.93; 384: 0.83 /
+0.88; flat blend 48 alone 0.86 / 0.98, 24: 0.98 / 0.99.
+
+What it says:
+- **The soft-label width is a clean dial** between detail and seams:
+  retention 0.970 / 0.946 / 0.918 / 0.893 / 0.868 at 1 / 1.5 / 2 / 2.5 / 3 px,
+  excess 0.024 / 0.009 / 0.004 / 0.002 / 0.001. At 2 px the sheets show
+  crisper crystal faces and plate striations than the base with no seam I
+  can find; at 1.5 the step across the crystal in detail6 is still faintly
+  there. 2 px is the recommendation, 1.5 the aggressive option.
+- **Refine range 24 adds a little on top** (+0.004 at soft 1.5, +0.005 at
+  soft 2) without a visible cost; 36 adds nothing more. The refine window
+  stays at 9 (both sides lose).
+- **Aggregation 0 and 16 are out**: the gain is within noise and both draw a
+  vertical blotch across the plate in detail2 that the base does not have.
+- **Background**: flat blur 256 with flat blend 32 is the calm candidate
+  (a fifth less ring energy, detail tiles untouched); 384 and 512 buy little
+  more. These are Travis's to judge at 1:1, as blur 512 was in §36.
+
+Candidates for Travis's eye (Compare > Open sweep folder on `Q:\_sweep1` and
+`Q:\_sweep2`, Difference overlay on): `soft-px-2_refine-r-24_vol-agg-px-16` is
+not it (aggregation); the detail candidate is **soft 2 + refine 24**, seen
+in the combined `flat-blur-256_flat-blend-32_soft-px-2_refine-r-24` with the
+background change and in `soft-px-2_refine-r-36` without it; the aggressive
+one is `soft-px-1.5_refine-r-24`. Nothing is changed in the defaults until he
+has looked.
+
 ## Open items
 
 - **B: doubled plate edge / glow** (§25a): the C-style aggregation does not
