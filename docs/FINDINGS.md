@@ -1917,6 +1917,52 @@ of the two on this stack). Headroom note: at full resolution 195 frames leave
 about 3 GB on the 3080 Ti; near 250 frames the volume will not fit and the
 engine retries at a quarter-resolution volume, a real stall and a softer B.
 
+## 46. The ten-second depth stall was GPU memory paging; the luma volume now streams (2026-11-08, night)
+
+Travis's GUI log of a default stack of 201 frames at full resolution:
+
+```
+depth: 9.4 GB volume to the GPU in 0.89 s
+depth: 32.48 s (cost 29151 ms, SGM 533 ms in 6 bands, post 1413 ms)
+```
+
+The command line did the same stack in 4.4 s (cost 2.5 s). The cost kernels
+ran fifteen times slower in the GUI, after a transfer at full speed: that is
+Windows' WDDM paging GPU memory. The driver does not refuse an allocation
+past the card; it moves part of it to system memory and every kernel that
+touches those pages runs at PCIe speed. On the 3080 Ti (12.9 GB) the depth
+volume took 9.4 GB (6.3 GB float32 focus + 3.1 GB float16 luma, k-fastest)
+beside the fold state (1.7 GB), a pass-1 slot (2.3 GB) and the GUI process's
+own context, which is ~0.5 GB larger than the CLI's; the CLI with 195 frames
+sat just inside, the GUI with 201 just outside.
+
+**Fix: the luma volume never sits on the device.** It is read exactly twice,
+for the per-pixel luma statistics (min, max, the end-plane means) and for the
+dark-prior term of the cost. Both now stream it from the pinned host copy
+through a 256 MB staging buffer of plane-major planes: `k_luma_stats_chunk`
+accumulates min / max and the first- and last-`ke` plane sums in k order, and
+`k_cost` takes a chunk of planes at a time, each voxel computed by the same
+expression in the same order as before. Bit-identical: B, C and the depth
+map hash the same as the previous build on 100 frames; on 201 frames B
+matches too (74DD0276) once the second change below is in. The device needs
+3.1 GB less; the two extra 3 GB streams cost 0.5 s against the 29 s stall.
+The log now prints the free GPU memory beside the volume and warns under
+2 GB.
+
+**The band layout is a function of the problem, not of free memory.** The
+SGM's path-sum volume is processed in overlapping horizontal bands when it
+does not fit a 1.5 GB budget (§31), and the band edges change the result.
+The budget shrank with the free memory ("unless even that is short"), so the
+first streaming build, which happened to leave less free at that moment,
+used 9 bands against the old build's 6 and produced a different B. Now the
+layout is always computed for 1.5 GB; only if that buffer truly fails to
+allocate is it cut finer, and the log says so. Reproducibility across
+machines and builds was the point of the fixed budget; it is kept now.
+
+Open: `depth_from_volume` holds about 1.8 GB in per-pixel maps and
+output-resolution buffers before the SGM (3.64 GB free beside the volume,
+1.87 GB before the SGM); some of that could be freed earlier.
+
 ## Open items
 
 - **Per-frame sharpness flag** (§45): pass 1's focus energy per frame, next

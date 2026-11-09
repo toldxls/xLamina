@@ -58,30 +58,20 @@ __global__ void k_planes_to_k_f16_chunk(const __half* __restrict__ in, __half* _
 
 // ---- per-pixel statistics of the focus curve: vmax, median, argmax; and of Lv: min, max
 
-__global__ void k_curve_stats(const float* __restrict__ V, const __half* __restrict__ Lv, int n, int K,
-                              float* __restrict__ vmax, float* __restrict__ vmed, int* __restrict__ kmax,
-                              float* __restrict__ lmin, float* __restrict__ lmax, float* __restrict__ trend) {
+// (the luma statistics, lmin / lmax, come from k_luma_stats_chunk: the luma volume is streamed, never resident)
+__global__ void k_curve_stats(const float* __restrict__ V, int n, int K,
+                              float* __restrict__ vmax, float* __restrict__ vmed, int* __restrict__ kmax) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const float* v = V + (size_t)i * K;
     float buf[512];   // K <= 512
-    float mx = -1e30f, lo = 1e30f, hi = -1e30f;
-    // the luma of the first and last thirds: an out-of-range pixel goes to the darker end (what the dark prior
-    // chose for the whole background on the 1/4 grid; the focus curve's own slope pointed the other way there)
-    float l_first = 0.f, l_last = 0.f;
+    float mx = -1e30f;
     int km = 0;
-    const int third = max(1, K / 3);
     for (int k = 0; k < K; ++k) {
         float x = v[k];
         buf[k] = x;
         if (x > mx) { mx = x; km = k; }   // first maximum, like np.argmax
-        float l = __half2float(Lv[(size_t)i * K + k]);
-        if (k < third) l_first += l;
-        if (k >= K - third) l_last += l;
-        lo = fminf(lo, l);
-        hi = fmaxf(hi, l);
     }
-    if (trend) trend[i] = l_last - l_first;   // > 0: the first frames are darker -> beyond the first end
     // median by insertion sort (K ~ 160)
     for (int a = 1; a < K; ++a) {
         float x = buf[a];
@@ -93,8 +83,36 @@ __global__ void k_curve_stats(const float* __restrict__ V, const __half* __restr
     vmax[i] = mx;
     vmed[i] = med;
     kmax[i] = km;
-    lmin[i] = lo;
-    lmax[i] = hi;
+}
+
+// The luma volume is streamed through a staging buffer of `c` plane-major planes (k0 .. k0 + c - 1) instead of
+// living on the device k-fastest: 3 GB less GPU memory at 1/2 resolution and 200 frames, which kept the 201-frame
+// stack from paging on a 12 GB card (FINDINGS 46). Per pixel: the running min / max over the stack, and the sums
+// of the first and last `ke` planes (the end-frame means for flat_end 0 / 1), accumulated in k order as k_plane_mean
+// did, so every number is the one the resident version produced.
+__global__ void k_luma_stats_init(float* __restrict__ lmin, float* __restrict__ lmax, float* __restrict__ sum0, float* __restrict__ sum1, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    lmin[i] = 1e30f; lmax[i] = -1e30f; sum0[i] = 0.f; sum1[i] = 0.f;
+}
+__global__ void k_luma_stats_chunk(const __half* __restrict__ Lc, int n, int K, int k0, int c, int ke,
+                                   float* __restrict__ lmin, float* __restrict__ lmax, float* __restrict__ sum0, float* __restrict__ sum1) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float lo = lmin[i], hi = lmax[i], s0 = sum0[i], s1 = sum1[i];
+    for (int p = 0; p < c; ++p) {
+        int k = k0 + p;
+        float l = __half2float(Lc[(size_t)p * n + i]);
+        lo = fminf(lo, l);
+        hi = fmaxf(hi, l);
+        if (k < ke) s0 += l;
+        if (k >= K - ke) s1 += l;
+    }
+    lmin[i] = lo; lmax[i] = hi; sum0[i] = s0; sum1[i] = s1;
+}
+__global__ void k_div(const float* __restrict__ s, float d, float* __restrict__ out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = s[i] / d;
 }
 
 // confidence w from contrast, end-frame mask; w *= (1 - h); w = 0 on end-peaked pixels
@@ -133,8 +151,10 @@ __global__ void k_end_vote(uint8_t* __restrict__ endm, const float* __restrict__
     if (e & 1) endm[i] = 1 | (vote[i] > 0.f ? 2 : 0);
 }
 
-// cost volume, in place over V (double intermediates where numpy promoted to float64)
-__global__ void k_cost(float* __restrict__ V, const __half* __restrict__ Lv, const float* __restrict__ w,
+// cost volume, in place over V (double intermediates where numpy promoted to float64), for the planes k0 .. k0 + nc - 1
+// whose luma arrives plane-major in Lc (the streamed luma volume); each voxel's cost is the same expression in the
+// same order as when the whole luma volume was resident, so the result is unchanged
+__global__ void k_cost(float* __restrict__ V, const __half* __restrict__ Lc, int k0, int nc, const float* __restrict__ w,
                        const uint8_t* __restrict__ endm, const float* __restrict__ vmax, const float* __restrict__ lmin,
                        const float* __restrict__ lmax, const float* __restrict__ h, const float* __restrict__ wnb,
                        const float* __restrict__ flat, int n, int K, float ep, float lam, float lam_h, float lam_f) {
@@ -154,7 +174,8 @@ __global__ void k_cost(float* __restrict__ V, const __half* __restrict__ Lv, con
     if (wnb) w_dark *= (double)(1.0f - wnb[i]);   // no dark prior beside sharp content (wnb: the neighbourhood's confidence)
     w_dark *= (double)(1.0f - fl);
     float w_halo = lam_h * hi;
-    for (int k = 0; k < K; ++k) {
+    for (int p = 0; p < nc; ++p) {
+        const int k = k0 + p;
         float base = wi * (1.0f - c[k] / vm);                              // float32
         double acc = base;
         if (fl > 0) acc = (1.0f - fl) * base + fl * lam_f * (c[k] / vm);
@@ -163,7 +184,7 @@ __global__ void k_cost(float* __restrict__ V, const __half* __restrict__ Lv, con
             acc += ((double)ep * 1.0) * (double)dist * (double)(1.0f - fl);
         }
         if (lam > 0 || lam_h > 0) {
-            float dark = (__half2float(Lv[(size_t)i * K + k]) - l0) / lrange;   // float32
+            float dark = (__half2float(Lc[(size_t)p * n + i]) - l0) / lrange;   // float32
             if (lam > 0) acc += w_dark * (double)dark;
             if (lam_h > 0) acc += (double)(w_halo * dark);
         }
@@ -573,7 +594,7 @@ static void pull_push_fill(const float* d, const float* wgt, float* fill, int dw
     for (float* q : den) cudaFree(q);
 }
 
-DepthResult depth_from_volume(const float* d_V_in, void* d_Lv16, const float* d_guide_full, const float* d_ga,
+DepthResult depth_from_volume(const float* d_V_in, const uint16_t* h_lum, const float* d_guide_full, const float* d_ga,
                               int dw, int dh, int K, int ow, int oh, const DepthParams& p, cudaStream_t s) {
     if (K > 512) throw std::runtime_error("depth: K > 512 not supported");
     DepthResult R;
@@ -592,7 +613,25 @@ DepthResult depth_from_volume(const float* d_V_in, void* d_Lv16, const float* d_
     // the end direction stays the peak's side: both the focus curve's slope and the luma trend pointed to the far end
     // in the defocused background where the 1/4 map and the reference chose the near end (FINDINGS 34)
     float* trend = nullptr;
-    k_curve_stats<<<blocks1(n), 256, 0, s>>>(V, (const __half*)d_Lv16, n, K, vmax, vmed, kmax, lmin, lmax, trend);
+    k_curve_stats<<<blocks1(n), 256, 0, s>>>(V, n, K, vmax, vmed, kmax);
+    // the luma volume, plane-major on the host, streamed through a staging buffer of a few planes (FINDINGS 46): once
+    // now for the per-pixel statistics, once more for the cost. It never sits on the device (3 GB at 1/2 resolution
+    // and 200 frames), which is what kept the 201-frame stack inside a 12 GB card.
+    const int kc = std::max(1, std::min(K, (int)(((size_t)256 << 20) / ((size_t)n * 2))));
+    __half* d_lc = nullptr;
+    CK(cudaMalloc(&d_lc, (size_t)kc * n * 2));
+    auto stream_luma = [&](auto&& per_chunk) {
+        for (int k0 = 0; k0 < K; k0 += kc) {
+            int c = std::min(kc, K - k0);
+            CK(cudaMemcpyAsync(d_lc, h_lum + (size_t)k0 * n, (size_t)c * n * 2, cudaMemcpyHostToDevice, s));
+            per_chunk(k0, c);
+            CK(cudaStreamSynchronize(s));   // the staging buffer is reused
+        }
+    };
+    const int ke = std::min(8, std::max(1, K / 4));   // the end-frame means' depth (flat_end 0 / 1)
+    float *lsum0 = dmalloc(n), *lsum1 = dmalloc(n);
+    k_luma_stats_init<<<blocks1(n), 256, 0, s>>>(lmin, lmax, lsum0, lsum1, n);
+    stream_luma([&](int k0, int c) { k_luma_stats_chunk<<<blocks1(n), 256, 0, s>>>(d_lc, n, K, k0, c, ke, lmin, lmax, lsum0, lsum1); });
     // progress for the front end: launches are asynchronous, so each report waits for the stream first (a handful of
     // syncs against seconds of kernels)
     auto report = [&](const std::string& what, double f) {
@@ -689,8 +728,8 @@ DepthResult depth_from_volume(const float* d_V_in, void* d_Lv16, const float* d_
         gw.free(); gs.free();
         for (float* q : {pl, t1, t2, best, arg}) cudaFree(q);
     }
-    k_cost<<<blocks1(n), 256, 0, s>>>(V, (const __half*)d_Lv16, w, endm, vmax, lmin, lmax, h, wnb, p.flat, n, K, p.end_prior,
-                                       p.dark_prior, p.halo_prior, p.flat_min);
+    stream_luma([&](int k0, int c) { k_cost<<<blocks1(n), 256, 0, s>>>(V, d_lc, k0, c, w, endm, vmax, lmin, lmax, h, wnb, p.flat, n, K, p.end_prior,
+                                                                       p.dark_prior, p.halo_prior, p.flat_min); });
     if (wnb) { CK(cudaStreamSynchronize(s)); cudaFree(wnb); }
     float* P2 = dmalloc(n);
     k_p2<<<grid2(dw, dh), BLK, 0, s>>>(d_ga, P2, dw, dh, p.p1, p.p2, p.edge);
@@ -700,18 +739,18 @@ DepthResult depth_from_volume(const float* d_V_in, void* d_Lv16, const float* d_
     float *e0 = nullptr, *e1 = nullptr;
     if (flat_fill && !kbg) {   // flat_end 0 / 1 only: 2 / 3 take the field
         float *pl = dmalloc(n), *t1 = dmalloc(n), *t2 = dmalloc(n);
-        int ke = std::min(8, std::max(1, K / 4));
         e0 = dmalloc(n); e1 = dmalloc(n);
-        k_plane_mean<<<blocks1(n), 256, 0, s>>>((const __half*)d_Lv16, n, K, 0, ke, pl);
+        k_div<<<blocks1(n), 256, 0, s>>>(lsum0, (float)ke, pl, n);   // the mean of the first ke planes, from the streamed sums
         coarse_energy(pl, e0, t1, t2, dw, dh, p.depth_full_fraction, p.flat_blur_px, s);
-        k_plane_mean<<<blocks1(n), 256, 0, s>>>((const __half*)d_Lv16, n, K, K - ke, K, pl);
+        k_div<<<blocks1(n), 256, 0, s>>>(lsum1, (float)ke, pl, n);
         coarse_energy(pl, e1, t1, t2, dw, dh, p.depth_full_fraction, p.flat_blur_px, s);
         cudaFree(pl); cudaFree(t1); cudaFree(t2);
     }
     // (kbg, the field for flat_end 2 / 3, is built above from the focus measure V before k_cost overwrites it. A first
     // version took |G3 - G12| of the luma volume here instead and failed like the loud end, FINDINGS 40: that volume is
     // blurred over 12 px, which removes the structure the argmax needs. e0 / e1 are only read by flat_end 0 and 1.)
-    cudaFree(d_Lv16);   // consumed: the luma volume's memory goes to the SGM
+    CK(cudaStreamSynchronize(s));
+    cudaFree(d_lc); cudaFree(lsum0); cudaFree(lsum1);   // the luma staging and sums: their memory goes to the SGM
     R.ms_cost = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     {
         std::vector<uint8_t> e(n);
@@ -736,25 +775,36 @@ DepthResult depth_from_volume(const float* d_V_in, void* d_Lv16, const float* d_
     }
     size_t fr = 0, tot = 0;
     CK(cudaMemGetInfo(&fr, &tot));
-    // the band layout decides the result (a path's memory is cut at the band's edge), so it must not depend on
-    // what else happens to be on the card: the path-sum volume gets a fixed 1.5 GB unless even that is short
-    size_t budget = std::min<size_t>((size_t)1536 << 20, fr > (768u << 20) ? fr - (768u << 20) : 0);
-    if (budget < S_bytes && fr - (768u << 20) < ((size_t)1536 << 20))
-        logf("depth: only %.2f GB free for the SGM volume; the band layout, and so the result, depends on it this time\n", fr / 1e9);
-    int bands = 1;
-    if (S_bytes > budget) {
-        size_t row_bytes = (size_t)dw * K * sizeof(float);
-        int rows_fit = (int)(budget / row_bytes);
-        if (rows_fit <= 2 * ov + 16) {
-            char msg[200];
-            snprintf(msg, sizeof msg, "depth: not enough GPU memory for the SGM volume (%.2f GB free, %d rows of %d fit)", fr / 1e9, rows_fit, dh);
-            throw std::runtime_error(msg);
+    // the band layout decides the result (a path's memory is cut at the band's edge), so it is a function of the
+    // problem alone: the path-sum volume gets a fixed 1.5 GB whatever else is on the card. Only when that buffer
+    // truly does not fit is the layout cut finer, and the log says so (FINDINGS 46: before, the budget shrank with
+    // the free memory, and a build that left the card fuller or emptier changed B through the band edges)
+    auto layout = [&](size_t budget, int& bands, int& band_rows, int& s_rows) {
+        bands = 1;
+        if (S_bytes > budget) {
+            size_t row_bytes = (size_t)dw * K * sizeof(float);
+            int rows_fit = (int)(budget / row_bytes);
+            if (rows_fit <= 2 * ov + 16) {
+                char msg[200];
+                snprintf(msg, sizeof msg, "depth: not enough GPU memory for the SGM volume (%.2f GB free, %d rows of %d fit)", fr / 1e9, rows_fit, dh);
+                throw std::runtime_error(msg);
+            }
+            bands = (int)((dh + (rows_fit - 2 * ov) - 1) / (rows_fit - 2 * ov));
         }
-        bands = (int)((dh + (rows_fit - 2 * ov) - 1) / (rows_fit - 2 * ov));
+        band_rows = (dh + bands - 1) / bands;
+        s_rows = std::min(dh, band_rows + 2 * ov);
+    };
+    int bands, band_rows, s_rows;
+    layout((size_t)1536 << 20, bands, band_rows, s_rows);
+    float* S = nullptr;
+    if (cudaMalloc(&S, (size_t)s_rows * dw * K * sizeof(float)) != cudaSuccess) {
+        cudaGetLastError();
+        logf("depth: the SGM's %.2f GB path-sum buffer does not fit (%.2f GB free): cut into more bands this time, so the result differs from a run with room\n",
+             (double)s_rows * dw * K * sizeof(float) / 1e9, fr / 1e9);
+        layout(fr > (768u << 20) ? fr - (768u << 20) : 0, bands, band_rows, s_rows);
+        S = dmalloc((size_t)s_rows * dw * K);
     }
-    const int band_rows = (dh + bands - 1) / bands;
-    const int s_rows = std::min(dh, band_rows + 2 * ov);
-    float* S = dmalloc((size_t)s_rows * dw * K);
+    logf("depth: %.2f GB free before the SGM; path sums %.2f GB in %d band%s\n", fr / 1e9, (double)s_rows * dw * K * sizeof(float) / 1e9, bands, bands == 1 ? "" : "s");
     float* d = dmalloc(n);
     int threads = ((K + 31) / 32) * 32;
     for (int b = 0; b < bands; ++b) {

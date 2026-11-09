@@ -11,6 +11,7 @@
 //   3x3 median -> depth_s. conf = w upsampled.
 #pragma once
 
+#include <cstdint>
 #include <functional>
 
 #include <cuda_runtime.h>
@@ -86,12 +87,13 @@ struct DepthResult {
     double ms_cost = 0, ms_sgm = 0, ms_post = 0;
 };
 
-// d_V: dh*dw*K float32, k fastest (post-aggregation, post-sqrt). d_Lv16: same layout, float16.
+// d_V: dh*dw*K float32, k fastest (post-aggregation, post-sqrt), on the device; overwritten by the cost.
+// h_lum: the luma volume, float16 bits, plane-major (K planes of dh*dw) on the HOST (pinned for speed): it is
+// streamed through a 256 MB staging buffer, twice, and never sits on the device (FINDINGS 46: 3 GB less GPU
+// memory at 1/2 resolution and 200 frames; the 201-frame stack paged on a 12 GB card before).
 // d_guide_full: oh*ow float (luma of collapsed C, clipped); d_ga: dh*dw (the same at depth res).
-// Runs on the current device and stream; needs ~2 x the volume in free memory.
-// d_V is overwritten by the cost; d_Lv16 (the luma volume) is consumed: freed once the cost is built, so the
-// SGM's path sums have its 2.5 GB (at 1/2 resolution) and the band layout does not depend on what is left
-DepthResult depth_from_volume(const float* d_V, void* d_Lv16, const float* d_guide_full, const float* d_ga,
+// Runs on the current device and stream; needs the volume plus the SGM's path sums (1.5 GB, or bands) free.
+DepthResult depth_from_volume(const float* d_V, const uint16_t* h_lum, const float* d_guide_full, const float* d_ga,
                               int dw, int dh, int K, int ow, int oh, const DepthParams& p, cudaStream_t s);
 
 // plane-major (K, dh, dw) -> k-fastest (dh, dw, K), float32 and float16 variants; the _chunk forms take

@@ -977,16 +977,22 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
     float* d_guide = nullptr;
     {
         float *d_V, *d_ga;
-        void* d_L16;
         struct DevFree { std::vector<void*> p; ~DevFree() { for (void* q : p) cudaFree(q); } } dfree;   // freed on any exit, a throw included
         cudaError_t ev = cudaMalloc(&d_V, nd * K * sizeof(float));
         if (ev == cudaSuccess) dfree.p.push_back(d_V);
-        cudaError_t el = ev == cudaSuccess ? cudaMalloc(&d_L16, nd * K * 2) : cudaErrorMemoryAllocation;
-        if (el == cudaSuccess) dfree.p.push_back(d_L16);
-        if (ev != cudaSuccess || el != cudaSuccess) {
+        if (ev != cudaSuccess) {
             cudaGetLastError();
-            logf("depth: not enough GPU memory for the %.1f GB volume", nd * K * 6.0 / 1e9);
+            logf("depth: not enough GPU memory for the %.1f GB volume", nd * K * 4.0 / 1e9);
             return 4;   // run_stack retries at 1/4 resolution
+        }
+        // Windows does not refuse an allocation past the card: it pages GPU memory to the host and the kernels
+        // crawl (FINDINGS 46: the cost volume took 29 s instead of 2 s). Say so when the headroom is gone.
+        {
+            size_t fr = 0, tot = 0;
+            if (cudaMemGetInfo(&fr, &tot) == cudaSuccess) {
+                logf("depth: %.2f of %.2f GB free on the GPU beside the %.1f GB volume\n", fr / 1e9, tot / 1e9, nd * K * 4.0 / 1e9);
+                if (fr < ((size_t)2 << 30)) logf("depth: under 2 GB of GPU memory left: the driver may page and the depth stage run slowly\n");
+            }
         }
         CK_MEM(cudaMalloc(&d_guide, no * sizeof(float)));   // outlives this block: the smoothing and the finalize use it
         CK_MEM(cudaMalloc(&d_ga, nd * sizeof(float)));
@@ -999,29 +1005,25 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
         {
             const int kc = std::max(1, std::min(K, (int)(((size_t)256 << 20) / (nd * sizeof(float)))));
             float* d_stage;
-            void* d_stage16;
             CK_MEM(cudaMalloc(&d_stage, (size_t)kc * nd * sizeof(float)));
-            if (cudaError_t e = cudaMalloc(&d_stage16, (size_t)kc * nd * 2); e != cudaSuccess) { cudaFree(d_stage); CK_MEM(e); }
-            const double total_gb = nd * K * 6.0 / 1e9;   // float32 focus + float16 luma per voxel
+            const double total_gb = nd * K * 4.0 / 1e9;   // the float32 focus volume; the luma volume streams from the host inside depth_from_volume
             auto tu = std::chrono::steady_clock::now();
             for (int k0 = 0; k0 < K; k0 += kc) {
                 int c = std::min(kc, K - k0);
                 CK(cudaMemcpyAsync(d_stage, P.V_all.data() + (size_t)k0 * nd, (size_t)c * nd * sizeof(float), cudaMemcpyHostToDevice, s));
                 planes_to_kfastest_f32_chunk(d_stage, d_V, P.vp.dw, P.vp.dh, K, k0, c, s);
-                CK(cudaMemcpyAsync(d_stage16, P.lum_all.data() + (size_t)k0 * nd, (size_t)c * nd * 2, cudaMemcpyHostToDevice, s));
-                planes_to_kfastest_f16_chunk(d_stage16, d_L16, P.vp.dw, P.vp.dh, K, k0, c, s);
-                CK(cudaStreamSynchronize(s));   // the staging buffers are reused
+                CK(cudaStreamSynchronize(s));   // the staging buffer is reused
                 // the bar moves through the upload with the gigabytes done and the rate (Travis, 2026-11-08)
-                double done_gb = nd * (double)(k0 + c) * 6.0 / 1e9, secs = since(tu);
+                double done_gb = nd * (double)(k0 + c) * 4.0 / 1e9, secs = since(tu);
                 char msg[128];
                 snprintf(msg, sizeof msg, "depth map: volume to the GPU, %.1f of %.1f GB at %.1f GB/s", done_gb, total_gb, secs > 0 ? done_gb / secs : 0.0);
                 stage(msg, 0.08 + 0.07 * (k0 + c) / K);
             }
             logf("depth: %.1f GB volume to the GPU in %.2f s\n", total_gb, since(tu));
-            cudaFree(d_stage); cudaFree(d_stage16);
+            cudaFree(d_stage);
         }
-        stage("depth map: cost volume", 0.15);   // (a stall seen here is the host volume's release below or the GPU's allocations)
-        if (release_volume) { P.V_all.release_async(); P.fm_all.release_async(); P.lum_all.release_async(); }
+        stage("depth map: cost volume", 0.15);
+        if (release_volume) { P.V_all.release_async(); P.fm_all.release_async(); }   // lum_all after the depth: it streams from it
         DepthParams dp;
         dp.halo_prior = (float)so.halo_prior;
         dp.dark_prior = (float)so.dark_prior;
@@ -1067,8 +1069,8 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
             dp.flat_end = so.flat_end;
             dp.flat_end_soft = (float)so.flat_end_soft;
         }
-        dfree.p.erase(std::find(dfree.p.begin(), dfree.p.end(), (void*)d_L16));   // consumed inside depth_from_volume
-        R = depth_from_volume(d_V, d_L16, d_guide, d_ga, P.vp.dw, P.vp.dh, K, ow, oh, dp, s);
+        R = depth_from_volume(d_V, P.lum_all.data(), d_guide, d_ga, P.vp.dw, P.vp.dh, K, ow, oh, dp, s);
+        if (release_volume) P.lum_all.release_async();
         // d_V and d_ga are freed here by dfree going out of scope
     }
     logf("depth: %.2f s (cost %.0f ms, SGM %.0f ms%s, post %.0f ms); end-peaked %.1f%%\n", since(t1), R.ms_cost, R.ms_sgm,

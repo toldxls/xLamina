@@ -501,26 +501,20 @@ static int cmd_depth(int argc, char** argv) {
     cudaStream_t s;
     CK(cudaStreamCreate(&s));
     float *d_planes, *d_V, *d_guide, *d_ga;
-    void *d_L16p, *d_L16;
     CK(cudaMalloc(&d_planes, nd * K * sizeof(float)));
     CK(cudaMalloc(&d_V, nd * K * sizeof(float)));
-    CK(cudaMalloc(&d_L16p, nd * K * 2));
-    CK(cudaMalloc(&d_L16, nd * K * 2));
     CK(cudaMalloc(&d_guide, no * sizeof(float)));
     CK(cudaMalloc(&d_ga, nd * sizeof(float)));
     auto t0 = std::chrono::steady_clock::now();
     CK(cudaMemcpy(d_planes, V.data(), nd * K * sizeof(float), cudaMemcpyHostToDevice));
-    CK(cudaMemcpy(d_L16p, Lv.data(), nd * K * 2, cudaMemcpyHostToDevice));
     CK(cudaMemcpy(d_guide, guide.data(), no * sizeof(float), cudaMemcpyHostToDevice));
     CK(cudaMemcpy(d_ga, ga.data(), nd * sizeof(float), cudaMemcpyHostToDevice));
     planes_to_kfastest_f32(d_planes, d_V, dw, dh, K, s);
-    planes_to_kfastest_f16(d_L16p, d_L16, dw, dh, K, s);
     CK(cudaStreamSynchronize(s));
     cudaFree(d_planes);
-    cudaFree(d_L16p);
     double ms_up = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-    printf("depth: volume %dx%dx%d -> output %dx%d on GPU %d (upload + layout %.0f ms)\n", dw, dh, K, ow, oh, gpu, ms_up);
-    DepthResult R = depth_from_volume(d_V, d_L16, d_guide, d_ga, dw, dh, K, ow, oh, dp, s);
+    printf("depth: volume %dx%dx%d -> output %dx%d on GPU %d (upload + layout %.0f ms; the luma volume streams from the host)\n", dw, dh, K, ow, oh, gpu, ms_up);
+    DepthResult R = depth_from_volume(d_V, Lv.data(), d_guide, d_ga, dw, dh, K, ow, oh, dp, s);
     printf("  cost %.0f ms, SGM (%d dirs) %.0f ms, upsample + guided filter + median %.0f ms; end-peaked %.1f%% of pixels\n",
            R.ms_cost, dp.dirs, R.ms_sgm, R.ms_post, 100 * R.end_fraction);
     fs::create_directories(out);
@@ -533,7 +527,7 @@ static int cmd_depth(int argc, char** argv) {
                 dp.dirs, R.end_fraction, R.ms_cost, R.ms_sgm, R.ms_post);
         fclose(mf);
     }
-    cudaFree(d_V); cudaFree(d_guide); cudaFree(d_ga);   // d_L16 was consumed by depth_from_volume
+    cudaFree(d_V); cudaFree(d_guide); cudaFree(d_ga);
     cudaStreamDestroy(s);
     if (!okw) { fprintf(stderr, "cannot write %s\n", out.c_str()); return 1; }
     printf("  -> %s\n", out.c_str());
