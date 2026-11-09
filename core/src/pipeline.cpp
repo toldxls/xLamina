@@ -1002,6 +1002,8 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
             void* d_stage16;
             CK_MEM(cudaMalloc(&d_stage, (size_t)kc * nd * sizeof(float)));
             if (cudaError_t e = cudaMalloc(&d_stage16, (size_t)kc * nd * 2); e != cudaSuccess) { cudaFree(d_stage); CK_MEM(e); }
+            const double total_gb = nd * K * 6.0 / 1e9;   // float32 focus + float16 luma per voxel
+            auto tu = std::chrono::steady_clock::now();
             for (int k0 = 0; k0 < K; k0 += kc) {
                 int c = std::min(kc, K - k0);
                 CK(cudaMemcpyAsync(d_stage, P.V_all.data() + (size_t)k0 * nd, (size_t)c * nd * sizeof(float), cudaMemcpyHostToDevice, s));
@@ -1009,7 +1011,13 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
                 CK(cudaMemcpyAsync(d_stage16, P.lum_all.data() + (size_t)k0 * nd, (size_t)c * nd * 2, cudaMemcpyHostToDevice, s));
                 planes_to_kfastest_f16_chunk(d_stage16, d_L16, P.vp.dw, P.vp.dh, K, k0, c, s);
                 CK(cudaStreamSynchronize(s));   // the staging buffers are reused
+                // the bar moves through the upload with the gigabytes done and the rate (Travis, 2026-11-08)
+                double done_gb = nd * (double)(k0 + c) * 6.0 / 1e9, secs = since(tu);
+                char msg[128];
+                snprintf(msg, sizeof msg, "depth map: volume to the GPU, %.1f of %.1f GB at %.1f GB/s", done_gb, total_gb, secs > 0 ? done_gb / secs : 0.0);
+                stage(msg, 0.08 + 0.07 * (k0 + c) / K);
             }
+            logf("depth: %.1f GB volume to the GPU in %.2f s\n", total_gb, since(tu));
             cudaFree(d_stage); cudaFree(d_stage16);
         }
         if (release_volume) { P.V_all.release_async(); P.fm_all.release_async(); P.lum_all.release_async(); }
