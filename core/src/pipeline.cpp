@@ -1373,6 +1373,17 @@ int run_sweep(const StackOptions& base, const std::vector<SweepVariant>& variant
     };
 
     int failed = 0;
+    // progress for a front end: "variant 3 of 20, soft-px-2: pass 2: fine focus", the bar over the whole sweep
+    // (Travis, 2026-11-08: a sweep gave no indication of how far it was); a group's pass 1 counts as its first variant
+    const size_t nv = prep.size();
+    size_t vi = 0;   // variants finished so far, over all groups
+    auto sweep_progress = [&](size_t idx, const std::string& label) -> ProgressFn {
+        if (!base.hooks.progress) return {};
+        return [&, idx, label](const std::string& name, double f) {
+            base.hooks.progress("variant " + std::to_string(idx + 1) + " of " + std::to_string(nv) + ", " + label + ": " + name,
+                                ((double)idx + std::min(1.0, std::max(0.0, f))) / (double)nv);
+        };
+    };
     for (size_t gi = 0; gi < groups.size(); ++gi) {
         // pass 1 + volume once for the group, from the first variant's pass-1 options
         size_t first = 0;
@@ -1380,6 +1391,7 @@ int run_sweep(const StackOptions& base, const std::vector<SweepVariant>& variant
         Pass1Options po = prep[first].so.po;
         po.volume = true;
         po.hooks = base.hooks;
+        po.hooks.progress = sweep_progress(vi, "group " + std::to_string(gi + 1) + " of " + std::to_string(groups.size()));
         po.opt.cache = cache;
         po.with_a = false;   // A is never a sweep output
         auto t_g = std::chrono::steady_clock::now();
@@ -1388,7 +1400,7 @@ int run_sweep(const StackOptions& base, const std::vector<SweepVariant>& variant
         if (int r = run_pass1(po, P)) {
             logf("sweep: pass 1 of group %zu failed (rc %d)%s", gi + 1, r, r == 4 ? "; out of GPU memory: put --depth-fraction 0.25 in those variants" : "");
             for (size_t i = 0; i < prep.size(); ++i)
-                if (prep[i].key == groups[gi]) { done.push_back({variants[i].name, prep[i].so.out, prep[i].note, (int)gi + 1, r, 0.0, -1.0}); ++failed; }
+                if (prep[i].key == groups[gi]) { done.push_back({variants[i].name, prep[i].so.out, prep[i].note, (int)gi + 1, r, 0.0, -1.0}); ++failed; ++vi; }
             write_manifest();
             continue;
         }
@@ -1402,6 +1414,8 @@ int run_sweep(const StackOptions& base, const std::vector<SweepVariant>& variant
             so.po.volume = true;
             so.po.hooks = base.hooks;
             so.po.opt.cache = cache;
+            so.hooks.progress = sweep_progress(vi, variants[i].name);
+            so.po.hooks.progress = so.hooks.progress;
             logf("sweep: %s  [%s]", variants[i].name.c_str(), prep[i].note.empty() ? "base" : prep[i].note.c_str());
             StackOptions::Result res;   // the B stays in memory for the change measure (the TIFFs are written as usual)
             so.result = &res;
@@ -1421,6 +1435,7 @@ int run_sweep(const StackOptions& base, const std::vector<SweepVariant>& variant
             if (change >= 0 && !ref_b.empty() && variants[i].name != "base") logf("sweep: %s changes %.2f %% of B's pixels by more than 2 %%", variants[i].name.c_str(), change);
             done.push_back({variants[i].name, so.out, prep[i].note, (int)gi + 1, rc, since(t_v), change});
             write_manifest();
+            ++vi;
         }
     }
     logf("sweep: %zu variants, %d failed, %.1f s total -> %s", done.size(), failed, since(t_all), (fs::path(out_dir) / "sweep.json").string().c_str());
