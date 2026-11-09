@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <cstdlib>
 #include <cstring>
 
@@ -28,6 +29,13 @@ bool Worker::resident(const QStringList& files) {
     if (running_ || files.isEmpty()) return false;
     for (const QString& f : files) if (!cache_.find(f.toStdWString())) return false;
     return true;
+}
+
+void Worker::prepareCache(const QStringList& files) {
+    if (running_) return;
+    std::vector<std::filesystem::path> paths;
+    for (const QString& f : files) paths.emplace_back(f.toStdWString());
+    cache_.prepare(paths);   // keeps what is resident and unchanged, frees the rest, sets the budget
 }
 
 FloatImage Worker::take(const float* rgb, size_t n) {
@@ -153,33 +161,51 @@ void ThumbLoader::start(const QStringList& files, int width, const QList<int>& i
     QObject* job = new QObject();
     job->moveToThread(&thread_);
     thread_.start();
-    QMetaObject::invokeMethod(job, [this, files, width, gen, job, indices] {
+    stackcore::FrameCache* cache = cache_;
+    QMetaObject::invokeMethod(job, [this, files, width, gen, job, indices, cache] {
         std::vector<uint8_t> buf;
         for (int i = 0; i < files.size() && !stop_.load() && generation_.load() == gen; ++i) {
-            TiffInfo info = tiff_probe(files[i].toStdWString());
+            const std::filesystem::path path(files[i].toStdWString());
+            TiffInfo info = tiff_probe(path.native());
             if (!info.ok() || info.samples < 3) continue;
-            size_t need = tiff_buffer_capacity(info.pixel_bytes()) + kReadAlign;
-            if (buf.size() < need) buf.resize(need);
-            uint8_t* base = buf.data() + (kReadAlign - ((uintptr_t)buf.data() % kReadAlign)) % kReadAlign;
-            TiffRead rd = tiff_read_pixels(files[i].toStdWString(), info, base, buf.size() - (base - buf.data()));
-            if (!rd.ok()) continue;
-            const uint8_t* px = base + rd.data_offset_in_buf;
             int down = std::max(1, (int)info.width / width);
             int pw = info.width / down, ph = info.height / down;
             QImage img(pw, ph, QImage::Format_RGB32);
             size_t bpp = info.samples * (info.bits / 8);
-            for (int y = 0; y < ph; ++y) {
-                QRgb* out = reinterpret_cast<QRgb*>(img.scanLine(y));
-                const uint8_t* srow = px + (size_t)(y * down) * info.width * bpp;
-                for (int x = 0; x < pw; ++x) {
-                    const uint8_t* p = srow + (size_t)(x * down) * bpp;
-                    int c[3];
-                    for (int k = 0; k < 3; ++k) {
-                        if (info.bits == 16) { unsigned v = info.big_endian ? (p[2 * k] << 8) | p[2 * k + 1] : (p[2 * k + 1] << 8) | p[2 * k]; c[k] = v >> 8; }
-                        else c[k] = p[k];
+            auto sample = [&](const uint8_t* px) {   // every down-th pixel of every down-th row, 8 bits per channel
+                for (int y = 0; y < ph; ++y) {
+                    QRgb* out = reinterpret_cast<QRgb*>(img.scanLine(y));
+                    const uint8_t* srow = px + (size_t)(y * down) * info.width * bpp;
+                    for (int x = 0; x < pw; ++x) {
+                        const uint8_t* p = srow + (size_t)(x * down) * bpp;
+                        int c[3];
+                        for (int k = 0; k < 3; ++k) {
+                            if (info.bits == 16) { unsigned v = info.big_endian ? (p[2 * k] << 8) | p[2 * k + 1] : (p[2 * k + 1] << 8) | p[2 * k]; c[k] = v >> 8; }
+                            else c[k] = p[k];
+                        }
+                        out[x] = qRgb(c[0], c[1], c[2]);
                     }
-                    out[x] = qRgb(c[0], c[1], c[2]);
                 }
+            };
+            // resident already (the folder was opened before, or a render read it): sample it under the cache's lock
+            if (cache && cache->with(path, [&](const stackcore::FrameCache::Entry& e) { sample(e.buf + e.offset); })) {
+                emit thumbnail(indices.isEmpty() ? i : indices.value(i, i), img);
+                continue;
+            }
+            const size_t cap = tiff_buffer_capacity(info.pixel_bytes());
+            uint8_t* pinned = cache ? cache->reserve(cap) : nullptr;   // nullptr: no cache, or its budget is spent
+            if (pinned) {
+                TiffRead rd = tiff_read_pixels(path, info, pinned, cap);
+                if (!rd.ok()) { cache->unreserve(pinned, cap); continue; }
+                sample(pinned + rd.data_offset_in_buf);
+                cache->insert(path, pinned, cap, rd.data_offset_in_buf, rd.bytes);   // the stack warms up while the list fills
+            } else {
+                size_t need = cap + kReadAlign;
+                if (buf.size() < need) buf.resize(need);
+                uint8_t* base = buf.data() + (kReadAlign - ((uintptr_t)buf.data() % kReadAlign)) % kReadAlign;
+                TiffRead rd = tiff_read_pixels(path, info, base, buf.size() - (base - buf.data()));
+                if (!rd.ok()) continue;
+                sample(base + rd.data_offset_in_buf);
             }
             emit thumbnail(indices.isEmpty() ? i : indices.value(i, i), img);
         }

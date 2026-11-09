@@ -544,8 +544,9 @@ void MainWindow::buildUi() {
     pfl->addRow("Pairs in flight", pairThreads_);
     cacheFrames_ = new QCheckBox("Keep the frames resident in host memory");
     cacheFrames_->setChecked(true);
-    cacheFrames_->setToolTip("Frames are read once and kept pinned (up to about half the machine's RAM) for every pass and the next render of the\n"
-                             "same folder; the GPUs then pull them at PCIe speed instead of the disk's. Untick to read from disk every pass.");
+    cacheFrames_->setToolTip("Frames are read once, while the folder's thumbnails load, and kept pinned (up to about half the machine's RAM) for\n"
+                             "every pass and the next render of the same folder; a render starts at the alignment and the GPUs pull the frames at\n"
+                             "PCIe speed instead of the disk's. A frame changed on disk is read again. Untick to read from disk every pass.");
     pfl->addRow("", cacheFrames_);
     QPushButton* benchBtn = new QPushButton("Benchmark…");
     connect(benchBtn, &QPushButton::clicked, this, &MainWindow::benchmark);
@@ -839,6 +840,8 @@ void MainWindow::openFolder(const QString& dir) {
     // scrolled it to the middle, and so did the list's deferred layout once the rows had their height
     frameList_->scrollToTop();
     QTimer::singleShot(0, frameList_, &QListWidget::scrollToTop);
+    // the thumbnails' read fills the frame cache (0.6.24): the stack is resident when Render is pressed
+    warmCache();
     thumbs_.start(frames_, 144);
     recent_.removeAll(dir);
     recent_.prepend(dir);
@@ -853,7 +856,18 @@ void MainWindow::resumeThumbnails() {
     QList<int> idx;
     for (int i = 0; i < frames_.size(); ++i)
         if (!thumbsDone_.contains(i)) { files << frames_[i]; idx << i; }
-    if (!files.isEmpty()) thumbs_.start(files, 144, idx);
+    if (files.isEmpty()) return;
+    warmCache();
+    thumbs_.start(files, 144, idx);
+}
+
+// The frame cache takes the folder's frames as its set and a budget from the machine's free memory, and the
+// thumbnail loader reads into it (Travis, 2026-11-08: the frames were read once for the thumbnails and again for
+// the render). With the cache switched off in Performance the thumbnails read as before.
+void MainWindow::warmCache() {
+    bool on = cacheFrames_ && cacheFrames_->isChecked() && !worker_.running();
+    if (on) worker_.prepareCache(frames_);
+    thumbs_.setCache(on ? worker_.cache() : nullptr);
 }
 
 void MainWindow::onThumbnail(int index, QImage image) {

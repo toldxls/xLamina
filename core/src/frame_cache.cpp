@@ -59,6 +59,14 @@ const FrameCache::Entry* FrameCache::find(const fs::path& p) {
     return it == entries_.end() ? nullptr : &it->second;
 }
 
+bool FrameCache::with(const fs::path& p, const std::function<void(const Entry&)>& f) {
+    std::lock_guard<std::mutex> lk(m_);
+    auto it = entries_.find(p.native());
+    if (it == entries_.end()) return false;
+    f(it->second);
+    return true;
+}
+
 uint8_t* FrameCache::reserve(size_t cap) {
     {
         std::lock_guard<std::mutex> lk(m_);

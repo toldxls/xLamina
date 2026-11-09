@@ -89,6 +89,7 @@ private:
     void saveSettings();
     void updateRecent();
     void resumeThumbnails();
+    void warmCache();      // point the thumbnail loader at the frame cache (or away from it) for the open folder
     void labelWobble(const stackcore::AlignOut& A);
     void setBusy(bool busy);
     void setStatusGeometry(const JobResultData& d);

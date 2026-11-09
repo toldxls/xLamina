@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <string>
@@ -40,6 +41,9 @@ public:
     void clear();
 
     const Entry* find(const std::filesystem::path& p);   // nullptr when the frame is not resident
+    // Calls f with the resident entry under the cache's lock, so no prepare() can free the buffer meanwhile
+    // (a reader on another thread, e.g. the GUI's thumbnails); false when the frame is not resident
+    bool with(const std::filesystem::path& p, const std::function<void(const Entry&)>& f);
     // A pinned buffer of `cap` bytes for a frame about to be read, or nullptr when the budget is
     // spent (or pinning failed): the caller then uses the streaming ring.
     uint8_t* reserve(size_t cap);

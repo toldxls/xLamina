@@ -44,6 +44,10 @@ public:
     void cancel() { cancel_.store(true); }
     void releaseCache();                                 // frees the resident frames (when the cache is turned off)
     bool resident(const QStringList& files);             // true when every file is pinned in the cache already
+    // the folder's frames become the cache's set and the budget is taken from the machine's free memory, so the
+    // thumbnail loader can fill it (0.6.24: the frames are read once, while the thumbnails load)
+    void prepareCache(const QStringList& files);
+    stackcore::FrameCache* cache() { return &cache_; }
     // Live views are dropped while two are still waiting for the GUI thread, so a slow display never
     // queues up frames (at Full, 365 MB each) and the engine never waits for the screen. The GUI returns
     // each buffer once it has converted it.
@@ -72,12 +76,15 @@ private:
     stackcore::FrameCache cache_;   // the stack stays pinned in host memory between runs (FINDINGS 26)
 };
 
-// Reads the frames one by one on a thread and emits a thumbnail of each.
+// Reads the frames one by one on a thread and emits a thumbnail of each. With a frame cache set, each frame is
+// read into a pinned buffer the cache keeps (within its budget), so the stack is resident by the time Render is
+// pressed and the render starts at the alignment; a frame already resident is sampled from the cache, not read.
 class ThumbLoader : public QObject {
     Q_OBJECT
 public:
     explicit ThumbLoader(QObject* parent = nullptr);
     ~ThumbLoader() override;
+    void setCache(stackcore::FrameCache* cache) { cache_ = cache; }   // nullptr: plain reads (the default)
     // emits thumbnail(i, image) per file, or thumbnail(indices[i], image) when indices are given (a partial list)
     void start(const QStringList& files, int width, const QList<int>& indices = {});
     void stop();
@@ -89,4 +96,5 @@ private:
     QThread thread_;
     std::atomic<bool> stop_{false};
     std::atomic<int> generation_{0};
+    stackcore::FrameCache* cache_ = nullptr;
 };
