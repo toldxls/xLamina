@@ -3,6 +3,7 @@
 #include <QCheckBox>
 #include <QColorSpace>
 #include <QComboBox>
+#include <QDialog>
 #include <QDoubleSpinBox>
 #include <QElapsedTimer>
 #include <QFormLayout>
@@ -30,6 +31,7 @@
 #include "imageview.h"
 #include "prefs.h"
 #include "sweepdialog.h"
+#include "updater.h"
 #include "worker.h"
 
 class MainWindow : public QMainWindow {
@@ -39,6 +41,8 @@ public:
     void openFolder(const QString& dir);
     bool rendering() const { return worker_.running(); }
     void autoBenchmark(bool sample, const QString& reportPath);   // developer aid: run the benchmark unattended, quit when done
+    void notifyUpdated(const QString& from);                      // the first start after an update: say so
+    void selfUpdate();                                            // developer aid: update to the latest release without asking
 
 protected:
     void dragEnterEvent(QDragEnterEvent* e) override;
@@ -60,6 +64,9 @@ private slots:
     void openOutputFolder();
     void benchmark();
     void about();
+    void checkForUpdates();                    // Help > Check for updates: the result in a box
+    void showUpdate();                         // the dialog: what changed, Update and restart / Skip / Later
+    void onUpdateAvailable(const ReleaseInfo& r);
     void resetSettings();
     void showFrame(int row);
     void showOutput(int tab);
@@ -145,6 +152,15 @@ private:
     QPointer<CompareWindow> twoUp_;
     QMenu* devOutMenu_ = nullptr;      // Tools > Developer outputs: A and B0, mirrored to hidden check boxes
     QList<GpuInfo> gpus_;
+    // updates: checked against GitHub's latest release after the start (Help > Check for updates at start); a
+    // newer one lights the toolbar button, whose dialog downloads and swaps the files in and restarts
+    Updater updater_;
+    ReleaseInfo update_;               // the newer release, once found
+    QToolButton* updateBtn_ = nullptr;
+    QAction* updateAct_ = nullptr;     // the button's place in the toolbar: a toolbar widget shows and hides through its action
+    QAction* autoUpdateAct_ = nullptr;
+    QPointer<QDialog> updateDlg_;
+    bool updateManual_ = false;        // the running check came from the menu: report its result either way
 
     ImageView* view_ = nullptr;
     QListWidget* frameList_ = nullptr;

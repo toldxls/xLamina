@@ -16,7 +16,13 @@ effective µm/px over the stack depth when FOV and step size are known.
 
 Download `xLamina-<version>-win64.zip` from the Releases page, unzip it anywhere and run
 `xLamina.exe`. Requirements: 64-bit Windows, an NVIDIA GPU (Ampere or newer) with a
-current driver. 
+current driver.
+
+Updates: a few seconds after it starts, xLamina asks GitHub for the latest release (Help >
+Check for updates at start turns this off). A newer one lights an **Update to x.y.z** button
+at the right of the toolbar; it shows what changed and, on *Update and restart*, downloads
+the zip, swaps the files in the folder xLamina runs from and restarts it. Settings are kept.
+Help > Check for updates asks at any time.
 
 ## Use
 

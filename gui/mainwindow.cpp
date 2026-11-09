@@ -5,8 +5,11 @@
 #include <QClipboard>
 #include <QCloseEvent>
 #include <QDesktopServices>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QDockWidget>
+#include <QEventLoop>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFileDialog>
@@ -23,6 +26,7 @@
 #include <QSplitter>
 #include <QStatusBar>
 #include <QDateTime>
+#include <QTextBrowser>
 #include <QToolBar>
 #include <QToolButton>
 #include <tuple>
@@ -68,6 +72,18 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(&worker_, &Worker::frame, this, &MainWindow::onFrame);
     connect(&worker_, &Worker::logLine, this, &MainWindow::onLog);
     connect(&worker_, &Worker::finished, this, &MainWindow::onFinished);
+    connect(&updater_, &Updater::available, this, &MainWindow::onUpdateAvailable);
+    connect(&updater_, &Updater::upToDate, this, [this](const QString& v) {
+        if (updateManual_) QMessageBox::information(this, "Check for updates", QString("xLamina %1 is the latest version.").arg(v));
+        updateManual_ = false;
+    });
+    connect(&updater_, &Updater::failed, this, [this](const QString& why) {
+        if (updateDlg_) return;   // the dialog shows its own download failures
+        if (updateManual_) QMessageBox::warning(this, "Check for updates", why);
+        else onLog("Update check: " + why);
+        updateManual_ = false;
+    });
+    if (appSettings().value("updates/auto", true).toBool()) QTimer::singleShot(2500, this, [this] { if (!updater_.busy()) updater_.check(); });
     connect(&thumbs_, &ThumbLoader::thumbnail, this, &MainWindow::onThumbnail);
     connect(&frameLoader_, &ThumbLoader::thumbnail, this, &MainWindow::onFullFrame);
     connect(&compareLoader_, &ThumbLoader::thumbnail, this, &MainWindow::onComparison);
@@ -176,6 +192,14 @@ void MainWindow::buildMenus() {
     devOutMenu_->setStatusTip("A (focus-weighted average) and B0 (raw argmax): developer outputs, rendered when ticked.");
 
     QMenu* help = menuBar()->addMenu("&Help");
+    QAction* chk = help->addAction("Check for &updates…", this, &MainWindow::checkForUpdates);
+    chk->setStatusTip("Ask GitHub for the latest release; a newer one can be installed from here and xLamina restarts.");
+    autoUpdateAct_ = help->addAction("Check for updates at &start");
+    autoUpdateAct_->setCheckable(true);
+    autoUpdateAct_->setChecked(appSettings().value("updates/auto", true).toBool());
+    autoUpdateAct_->setStatusTip("A few seconds after xLamina starts, ask GitHub once; a newer release lights the Update button.");
+    connect(autoUpdateAct_, &QAction::toggled, this, [](bool on) { appSettings().setValue("updates/auto", on); });
+    help->addSeparator();
     help->addAction("&About xLamina", this, &MainWindow::about);
 }
 
@@ -206,6 +230,17 @@ void MainWindow::buildUi() {
     tb->addAction(dropFlagged_);
     tb->addSeparator();
     tb->addAction("Benchmark…", this, &MainWindow::benchmark);
+    // the Update button, at the right end, shown only when a newer release exists
+    QWidget* spacer = new QWidget;
+    spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    tb->addWidget(spacer);
+    updateBtn_ = new QToolButton;
+    updateBtn_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    updateBtn_->setStyleSheet("QToolButton { background: #7a2fc9; color: white; font-weight: bold; padding: 5px 14px; border-radius: 4px; }"
+                              "QToolButton:hover { background: #9a4fe9; }");
+    connect(updateBtn_, &QToolButton::clicked, this, &MainWindow::showUpdate);
+    updateAct_ = tb->addWidget(updateBtn_);
+    updateAct_->setVisible(false);
     connect(renderBtn_, &QPushButton::clicked, this, &MainWindow::render);
     connect(cancelBtn_, &QPushButton::clicked, this, &MainWindow::cancel);
     connect(saveBtn_, &QPushButton::clicked, this, &MainWindow::saveCurrent);
@@ -1408,6 +1443,131 @@ void MainWindow::autoBenchmark(bool sample, const QString& reportPath) {
     if (!bench_) return;
     connect(bench_, &QObject::destroyed, qApp, &QApplication::quit, Qt::QueuedConnection);
     bench_->autoRun(sample, reportPath);
+}
+
+// ----------------------------------------------------------------------------- updates
+
+void MainWindow::checkForUpdates() {
+    updateManual_ = true;
+    if (update_.valid()) { showUpdate(); return; }   // the start-up check already found one
+    if (updater_.busy()) return;
+    statusBar()->showMessage("Checking GitHub for the latest release…", 4000);
+    updater_.check();
+}
+
+void MainWindow::onUpdateAvailable(const ReleaseInfo& r) {
+    update_ = r;
+    bool skipped = appSettings().value("updates/skip").toString() == r.tag;
+    updateBtn_->setText(QString("Update to %1").arg(r.version));
+    updateBtn_->setToolTip(QString("xLamina %1 is available (this is %2). Click to read what changed and update.").arg(r.version, XLAMINA_VERSION));
+    updateAct_->setVisible(!skipped || updateManual_);
+    if (updateManual_) { updateManual_ = false; showUpdate(); }
+    else if (!skipped) statusBar()->showMessage(QString("xLamina %1 is available: the Update button at the right of the toolbar.").arg(r.version), 12000);
+}
+
+void MainWindow::showUpdate() {
+    if (!update_.valid()) return;
+    if (updateDlg_) { updateDlg_->raise(); updateDlg_->activateWindow(); return; }
+    QDialog* d = new QDialog(this);
+    updateDlg_ = d;
+    d->setAttribute(Qt::WA_DeleteOnClose);
+    d->setWindowTitle(QString("xLamina %1 is available").arg(update_.version));
+    d->resize(680, 520);
+    QVBoxLayout* l = new QVBoxLayout(d);
+    l->addWidget(new QLabel(QString("<b>xLamina %1</b> is available; this is %2.").arg(update_.version, XLAMINA_VERSION)));
+    QTextBrowser* notes = new QTextBrowser;
+    notes->setOpenExternalLinks(true);
+    notes->setMarkdown(update_.notes.isEmpty() ? QString("No release notes.") : update_.notes);
+    l->addWidget(notes, 1);
+    QLabel* page = new QLabel(QString("<a href=\"%1\">Release page</a> · %2 MB").arg(update_.page).arg(update_.size / 1048576.0, 0, 'f', 1));
+    page->setOpenExternalLinks(true);
+    l->addWidget(page);
+    QProgressBar* bar = new QProgressBar;
+    bar->setRange(0, 1000);
+    bar->hide();
+    l->addWidget(bar);
+    QLabel* state = new QLabel;
+    state->setWordWrap(true);
+    l->addWidget(state);
+    QDialogButtonBox* bb = new QDialogButtonBox;
+    QPushButton* go = bb->addButton("Update and restart", QDialogButtonBox::AcceptRole);
+    QPushButton* skip = bb->addButton("Skip this version", QDialogButtonBox::DestructiveRole);
+    QPushButton* later = bb->addButton("Later", QDialogButtonBox::RejectRole);
+    l->addWidget(bb);
+    go->setDefault(true);
+    QString here = QDir::toNativeSeparators(QCoreApplication::applicationDirPath());
+    bool writable = Updater::canWriteAppDir();
+    bool busy = rendering() || (bench_ && bench_->running());
+    if (!writable) {
+        go->setText("Open download page");
+        state->setText(QString("This xLamina cannot write to its own folder (%1): download the zip and unpack it there yourself.").arg(here));
+    } else if (busy) {
+        go->setEnabled(false);
+        state->setText("A render is running: update when it has finished.");
+    } else {
+        state->setText(QString("The new version replaces this one in %1 and xLamina restarts. Your settings are kept.").arg(here));
+    }
+    auto enable = [go, skip](bool on) { go->setEnabled(on); skip->setEnabled(on); };   // Later stays: it cancels a download
+    connect(later, &QPushButton::clicked, d, &QDialog::reject);
+    connect(skip, &QPushButton::clicked, d, [this, d] {
+        appSettings().setValue("updates/skip", update_.tag);
+        updateAct_->setVisible(false);
+        d->reject();
+    });
+    connect(d, &QObject::destroyed, this, [this] { updater_.abort(); });   // Later / the close box cancel a download
+    connect(go, &QPushButton::clicked, d, [this, bar, state, enable, writable] {
+        if (!writable) { QDesktopServices::openUrl(QUrl(update_.page)); return; }
+        if (rendering() || updater_.busy()) return;
+        enable(false);
+        bar->show();
+        state->setText("Downloading…");
+        updater_.download(update_);
+    });
+    connect(&updater_, &Updater::downloadProgress, d, [bar](qint64 got, qint64 total) {
+        if (total > 0) { bar->setRange(0, 1000); bar->setValue((int)(got * 1000 / total)); }
+        else bar->setRange(0, 0);
+    });
+    connect(&updater_, &Updater::failed, d, [bar, state, enable](const QString& why) {
+        bar->hide();
+        state->setText("<span style=\"color:#e05050\">" + why.toHtmlEscaped() + "</span>");
+        enable(true);
+    });
+    connect(&updater_, &Updater::downloaded, d, [this, d, bar, state, enable](const QString& zip) {
+        state->setText("Installing…");
+        bar->setRange(0, 0);
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);   // show it: the swap takes a second or two
+        QString err = Updater::install(zip);
+        if (!err.isEmpty()) {
+            bar->hide();
+            state->setText("<span style=\"color:#e05050\">" + err.toHtmlEscaped() + "</span> Nothing was changed.");
+            enable(true);
+            return;
+        }
+        state->setText("Restarting…");
+        saveSettings();
+        d->disconnect(this);   // the destroyed handler would abort nothing, but keep it quiet
+        Updater::restart({"--updated-from", XLAMINA_VERSION});
+        QTimer::singleShot(0, qApp, &QCoreApplication::quit);
+    });
+    d->show();
+}
+
+void MainWindow::notifyUpdated(const QString& from) {
+    QString line = QString("Updated to xLamina %1 (from %2).").arg(XLAMINA_VERSION, from);
+    statusBar()->showMessage(line, 15000);
+    onLog(line);
+}
+
+void MainWindow::selfUpdate() {
+    connect(&updater_, &Updater::available, this, [this](const ReleaseInfo& r) { updater_.download(r); });
+    connect(&updater_, &Updater::downloaded, this, [this](const QString& zip) {
+        QString err = Updater::install(zip);
+        if (!err.isEmpty()) { onLog("Self-update: " + err); return; }
+        saveSettings();
+        Updater::restart({"--updated-from", XLAMINA_VERSION});
+        QTimer::singleShot(0, qApp, &QCoreApplication::quit);
+    });
+    updater_.check();
 }
 
 void MainWindow::about() {

@@ -30,8 +30,8 @@ add_subdirectory(core)
 add_subdirectory(cli)
 add_subdirectory(tools/m0)
 
-# the GUI needs Qt 6 (Widgets); set CMAKE_PREFIX_PATH to its install, e.g. C:/Qt/6.8.3/msvc2022_64
-find_package(Qt6 COMPONENTS Widgets QUIET)
+# the GUI needs Qt 6 (Widgets, Network for the update check); set CMAKE_PREFIX_PATH to its install, e.g. C:/Qt/6.8.3/msvc2022_64
+find_package(Qt6 COMPONENTS Widgets Network QUIET)
 if(Qt6_FOUND)
   add_subdirectory(gui)
 else()
