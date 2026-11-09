@@ -20,6 +20,10 @@ class ImageView : public QGraphicsView {
 public:
     explicit ImageView(QWidget* parent = nullptr);
     void setImage(const QImage& img, bool keepView = true);
+    // the live view's window (0.6.33): `img` shows the crop `win` of a `full`-sized frame; the scene stays the full
+    // frame, so zoom and position mean the same as for the whole image, and the crop is drawn at its place and scale
+    void setLiveWindow(const QImage& img, const QRect& win, const QSize& full);
+    QRectF visibleSceneRect() const;      // what the viewport shows, in scene (image) coordinates
     void fit();
     void actualSize();
     double zoom() const { return transform().m11(); }
@@ -39,6 +43,7 @@ public:
 
 signals:
     void zoomChanged(double z);
+    void viewChanged();                   // zoom, scroll or size: what the viewport shows has changed
     void hovered(int x, int y);
     void strokeBegin(QPointF imagePos);
     void strokeTo(QPointF imagePos);
@@ -64,6 +69,7 @@ private:
     QImage image_;
     QString label_;
     bool fitted_ = true;
+    bool winActive_ = false;              // the pixmap item shows a live-view crop, placed and scaled (setLiveWindow)
     bool brush_ = false, painting_ = false, panning_ = false;
     double brushRadius_ = 60, brushHardness_ = 0.5;
     QPoint lastPan_;

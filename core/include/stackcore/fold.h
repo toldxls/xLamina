@@ -106,7 +106,8 @@ void fold_preview(const FoldState& st, int down, std::vector<float>& rgb, int& p
 void preview_size(int w, int h, int down, int& pw, int& ph);
 void fold_focus_preview_kernel(const FoldState& st, int down, float* d_out, int& pw, int& ph, cudaStream_t s);
 // A float RGB device image at 1/down (point samples), to the host (syncs the stream).
-void image_preview_kernel(const float* d_rgb, int w, int h, int down, float* d_out, int& pw, int& ph, cudaStream_t s);
+// every down-th pixel of the crop (x0, y0, cw, ch) of the w x h image -> pw x ph float RGB
+void image_preview_kernel(const float* d_rgb, int w, int h, int x0, int y0, int cw, int ch, int down, float* d_out, int& pw, int& ph, cudaStream_t s);
 
 // Host copy of a state, for merging and for writing out.
 struct HostFoldState {

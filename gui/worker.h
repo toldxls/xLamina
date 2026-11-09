@@ -54,6 +54,8 @@ public:
     // Frame views go to the LivePlayer, which paces and orders them on its own thread (0.6.32).
     void previewShown(FloatImage img) { --previewsInFlight_; recycle(std::move(img)); }
     LivePlayer* player() { return player_; }
+    // the live view's window (0.6.33): asked by the engine's threads for each view, when the live view is "Full"
+    void setViewWindowProvider(std::function<stackcore::ViewWindow(int, int)> f) { viewWindow_ = std::move(f); }
 
 signals:
     void progress(QString stage, double fraction);
@@ -71,6 +73,7 @@ private:
     std::atomic<bool> cancel_{false};
     std::atomic<int> previewsInFlight_{0};
     LivePlayer* player_ = nullptr;
+    std::function<stackcore::ViewWindow(int, int)> viewWindow_;
     std::mutex poolMutex_;
     std::vector<FloatImage> pool_;
     bool running_ = false;

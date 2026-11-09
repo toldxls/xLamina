@@ -127,11 +127,15 @@ void Worker::launch(std::shared_ptr<JobOptions> jo, std::shared_ptr<JobResultDat
                 ++previewsInFlight_;   // final previews are never skipped, but they are counted the same way
                 emit preview(QString::fromStdString(name), take(rgb, (size_t)w * h * 3), w, h);
             };
-            hooks.frame = [this](int k, const float* rgb, int w, int h) { player_->push(k, take(rgb, (size_t)w * h * 3), w, h); };
+            hooks.frame = [this](int k, const float* rgb, int w, int h, const stackcore::ViewWindow& win) {
+                player_->push(k, take(rgb, (size_t)w * h * 3), w, h, QRect(win.x0, win.y0, win.w, win.h), QSize(win.fw, win.fh));
+            };
+            // "Full" renders what the view shows (the visible window at the screen's resolution) rather than 31 Mpx
+            if (liveDown == 1 && viewWindow_) hooks.view_window = viewWindow_;
             if (noView) hooks.frame = nullptr;
             if (noPreview) hooks.preview = nullptr;
             if (getenv("XLAMINA_NOOPHOOKS")) {   // the GPU-side preview work without the host side
-                hooks.frame = [](int, const float*, int, int) {};
+                hooks.frame = [](int, const float*, int, int, const stackcore::ViewWindow&) {};
                 hooks.preview = [](const std::string&, const float*, int, int) {};
             }
         }

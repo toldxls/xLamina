@@ -28,7 +28,8 @@ public:
     ~LivePlayer() override;
     void setRecycler(std::function<void(FloatImage)> f) { recycle_ = std::move(f); }   // buffers go back to the worker's pool
     void setColorSpace(const QColorSpace& cs);          // the frames' profile; views are converted to sRGB for the screen
-    void push(int k, FloatImage rgb, int w, int h);     // from the engine's threads: a view of frame k
+    // from the engine's threads: a view of frame k, w x h pixels showing the crop `win` of a `full`-sized frame
+    void push(int k, FloatImage rgb, int w, int h, const QRect& win, const QSize& full);
     // the pass the engine is in (any id; a change restarts the sweep, since every pass runs through the whole stack
     // again) and its direction, +1 forward or -1 backward
     void setPass(int pass, int dir);
@@ -36,11 +37,11 @@ public:
     void end();                                         // a job ended: drop what is left
 
 signals:
-    void view(int k, QImage image);                     // the next frame of the sweep, display-ready (queued to the GUI thread)
+    void view(int k, QImage image, QRect win, QSize full);   // the next frame of the sweep, display-ready (queued to the GUI thread)
 
 private:
     void tick();
-    struct Item { FloatImage rgb; int w = 0, h = 0; long long seq = 0; };
+    struct Item { FloatImage rgb; int w = 0, h = 0; long long seq = 0; QRect win; QSize full; };
     QThread thread_;
     std::mutex m_;
     std::map<int, Item> ring_;

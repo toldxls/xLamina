@@ -28,13 +28,13 @@ void LivePlayer::setColorSpace(const QColorSpace& cs) {
     cs_ = cs;
 }
 
-void LivePlayer::push(int k, FloatImage rgb, int w, int h) {
+void LivePlayer::push(int k, FloatImage rgb, int w, int h, const QRect& win, const QSize& full) {
     std::vector<FloatImage> drop;
     {
         std::lock_guard<std::mutex> lk(m_);
         auto it = ring_.find(k);
         if (it != ring_.end()) drop.push_back(std::move(it->second.rgb));   // a repeated frame: the newer copy stays
-        ring_[k] = Item{std::move(rgb), w, h, ++seq_};
+        ring_[k] = Item{std::move(rgb), w, h, ++seq_, win, full};
         newest_ = k;
         while (ring_.size() > kRing) {   // the ring holds the recent views: the oldest arrival goes
             auto oldest = ring_.begin();
@@ -114,5 +114,5 @@ void LivePlayer::tick() {
         img.setColorSpace(cs);
         img.convertToColorSpace(QColorSpace::SRgb);
     }
-    emit view(k, img);
+    emit view(k, img, item.win, item.full);
 }

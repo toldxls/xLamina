@@ -1998,9 +1998,27 @@ the read, 0→99 for pass 1, 98→0 for pass 2, 0→95 for pass 3; the engine at
 Before the per-pass restart the pass-1 sweep was missing: the cursor stood
 at 99 from the read and every pass-1 frame was "behind" it.
 
-At Full the engine still rations views to one per 365 ms per slot (every
-copy off a GPU costs the uploads link time, §30), so the Full sweep is ~3
-views a second at best; High (1/3) or Medium (1/6) give the 30 fps sweep.
+At Full the engine still rationed views to one per 365 ms per slot (every
+copy off a GPU costs the uploads link time, §30), so the Full sweep was ~3
+views a second: Travis, "it looks bad on full, pretty good on high".
+
+**Full now renders what the view shows** (0.6.33). A Full frame is 31 Mpx,
+388 MB, and no hardware makes 30 of those a second sensible: that is
+11.6 GB/s off the GPU, the whole PCIe link the render needs, for pixels a
+screen cannot show (a 4K monitor is 8 Mpx; at Fit the frame occupies 2).
+So the GUI tells the engine, per view, the window it shows: the visible
+part of the frame as fractions (plus a fifth of margin for panning) and
+the viewport's width, and the preview kernel samples that crop every
+`down`-th pixel with `down = crop width / viewport width`. At Fit that is a
+quarter-resolution frame; zoomed to 1:1 it is a full-resolution crop of the
+window; about 2 Mpx either way, so Full sweeps like High and shows real
+full-resolution pixels where the user looks. The view carries its window
+and the viewer draws the crop placed and scaled inside a scene that stays
+the full frame, so zoom and position keep their meaning. Measured: at Fit
+in a 1500 px window the views were 994 × 662 of 6960 × 4640; when the
+right pane opened and halved the viewport they became 461 × 306, following
+the screen. Frame views are now limited to one per 33 ms across every slot
+and card (it was per slot), so views the player would drop are not copied.
 
 ## Open items
 

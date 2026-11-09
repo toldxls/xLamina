@@ -53,6 +53,29 @@ ImageView::ImageView(QWidget* parent) : QGraphicsView(parent) {
     live_->setZValue(0.5);
     live_->setVisible(false);
     scene_.addItem(live_);
+    connect(this, &ImageView::zoomChanged, this, [this](double) { emit viewChanged(); });
+    connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, [this](int) { emit viewChanged(); });
+    connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int) { emit viewChanged(); });
+}
+
+QRectF ImageView::visibleSceneRect() const {
+    return mapToScene(viewport()->rect()).boundingRect().intersected(scene_.sceneRect());
+}
+
+void ImageView::setLiveWindow(const QImage& img, const QRect& win, const QSize& full) {
+    if (img.isNull() || !full.isValid()) return;
+    const bool newScene = scene_.sceneRect().size() != QSizeF(full) || (!winActive_ && image_.isNull());
+    winActive_ = true;
+    image_ = img;
+    item_->setPixmap(QPixmap::fromImage(img));
+    item_->setPos(win.topLeft());
+    item_->setScale((double)win.width() / img.width());
+    item_->setVisible(true);
+    live_->setVisible(false);
+    if (newScene) {
+        scene_.setSceneRect(QRectF(QPointF(0, 0), QSizeF(full)));
+        if (fitted_) fit();
+    }
 }
 
 void ImageView::setOverlay(const QImage& argb) {
@@ -65,6 +88,18 @@ void ImageView::setOverlay(const QImage& argb) {
 // images of different sizes - a raw frame, a warped one, a full-resolution one -
 // show the same area at the same on-screen size) until the view is fitted again.
 void ImageView::setImage(const QImage& img, bool keepView) {
+    if (winActive_) {   // a live-view crop was on show: the item goes back to covering the whole scene
+        winActive_ = false;
+        item_->setPos(0, 0);
+        item_->setScale(1.0);
+        image_ = QImage();   // (a crop is not comparable with a whole image for the keep logic)
+        if (!img.isNull() && !fitted_) {   // keep the user's zoom and place: both referred to the full frame already
+            image_ = img;
+            item_->setPixmap(QPixmap::fromImage(img));
+            scene_.setSceneRect(item_->boundingRect());
+            return;
+        }
+    }
     bool keep = keepView && !fitted_ && !image_.isNull() && !img.isNull();
     if (keep && img.size() == image_.size()) {
         // same pixel grid (frame vs frame, output vs output): swap the pixels and leave the
@@ -165,7 +200,7 @@ void ImageView::drawForeground(QPainter* p, const QRectF&) {
 
 void ImageView::fit() {
     if (image_.isNull() && !live_->img) return;
-    fitInView(live_->img ? static_cast<QGraphicsItem*>(live_) : item_, Qt::KeepAspectRatio);
+    fitInView(scene_.sceneRect(), Qt::KeepAspectRatio);   // the scene is the image (or the live view's full frame)
     fitted_ = true;
     emit zoomChanged(zoom());
 }
@@ -265,6 +300,7 @@ void ImageView::leaveEvent(QEvent* e) {
 void ImageView::resizeEvent(QResizeEvent* e) {
     QGraphicsView::resizeEvent(e);
     if (fitted_) fit();
+    emit viewChanged();
 }
 
 QImage toQImage(const float* rgb, int w, int h, float gain) {

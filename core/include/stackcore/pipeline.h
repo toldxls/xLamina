@@ -34,12 +34,20 @@ using ProgressFn = std::function<void(const std::string& stage, double fraction)
 // rgb points at w x h x 3 floats that are valid only during the call: copy what is needed. (The hooks
 // run on the GPU worker threads; a fresh 10 MB vector per call cost ~3 ms of page faults each, FINDINGS 30.)
 using PreviewFn = std::function<void(const std::string& name, const float* rgb, int w, int h)>;
-using FrameViewFn = std::function<void(int k, const float* rgb, int w, int h)>;
+// The window of the frame a view shows (0.6.33, FINDINGS 47): a crop x0, y0, w, h in the frame's pixels, sampled every
+// `down`-th pixel; fw, fh = the frame's size. A frame view carries the window it was taken with, so the front end can
+// place it. w = 0 asks for the whole frame at frame_down.
+struct ViewWindow { int x0 = 0, y0 = 0, w = 0, h = 0, down = 1, fw = 0, fh = 0; };
+using FrameViewFn = std::function<void(int k, const float* rgb, int w, int h, const ViewWindow& win)>;
 
 struct Hooks {
     ProgressFn progress;
     PreviewFn preview;
     FrameViewFn frame;
+    // when set, each frame view renders what the screen shows: the GUI's visible window at the screen's resolution,
+    // about 2 Mpx whatever the zoom, instead of the whole frame at frame_down (a Full frame is 31 Mpx, 388 MB)
+    std::function<ViewWindow(int fullW, int fullH)> view_window;
+    size_t view_max_px = 4000000;   // a frame view's buffer; a window asking for more is sampled coarser
     std::atomic<bool>* cancel = nullptr;
     int preview_down = 8;        // preview images are 1/preview_down of the output grid
     int preview_every = 8;       // frames between pass-1 previews

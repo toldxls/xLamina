@@ -73,6 +73,29 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(&worker_, &Worker::progress, this, &MainWindow::onProgress);
     connect(&worker_, &Worker::preview, this, &MainWindow::onPreview);
     connect(worker_.player(), &LivePlayer::view, this, &MainWindow::onLiveView);   // paced, in stack order (0.6.32)
+    connect(view_, &ImageView::viewChanged, this, &MainWindow::updateViewWindow);
+    // the engine asks, from its threads, what part of the frame to render for each live view (0.6.33)
+    worker_.setViewWindowProvider([this](int W, int H) {
+        QRectF f;
+        int vw;
+        {
+            std::lock_guard<std::mutex> lk(viewWinM_);
+            f = viewFrac_;
+            vw = viewportW_;
+        }
+        stackcore::ViewWindow w;
+        // a margin of a fifth around the visible part, so a small pan does not show the edge of the crop
+        double mx = f.width() * 0.2, my = f.height() * 0.2;
+        double x0 = std::max(0.0, f.x() - mx), y0 = std::max(0.0, f.y() - my);
+        double x1 = std::min(1.0, f.x() + f.width() + mx), y1 = std::min(1.0, f.y() + f.height() + my);
+        w.x0 = (int)std::floor(x0 * W);
+        w.y0 = (int)std::floor(y0 * H);
+        w.w = std::max(1, (int)std::ceil((x1 - x0) * W));
+        w.h = std::max(1, (int)std::ceil((y1 - y0) * H));
+        // the screen shows the visible part over the viewport's width: sample every down-th pixel to match it
+        w.down = std::max(1, (int)std::floor(f.width() * W / std::max(1, vw)));
+        return w;
+    });
     connect(&worker_, &Worker::logLine, this, &MainWindow::onLog);
     connect(&worker_, &Worker::finished, this, &MainWindow::onFinished);
     connect(&updater_, &Updater::available, this, &MainWindow::onUpdateAvailable);
@@ -383,11 +406,12 @@ void MainWindow::buildUi() {
     liveRes_->addItem("Low (1/12)", 12);
     liveRes_->addItem("Medium (1/6)", 6);
     liveRes_->addItem("High (1/3)", 3);
-    liveRes_->addItem("Full", 1);
+    liveRes_->addItem("Full (what the view shows)", 1);
     liveRes_->setCurrentIndex(2);
-    liveRes_->setToolTip("Resolution of the live view while rendering, as a fraction of the output.\n"
-                         "Every image copied off a GPU costs its uploads about 3 ms, so the views are rate-limited; the live view\n"
-                         "still adds about a second to a 163-frame render. Off shows only the finished outputs.");
+    liveRes_->setToolTip("Resolution of the live view while rendering, as a fraction of the output. Full renders only the part of the\n"
+                         "frame the view shows, at the screen's resolution: a quarter-resolution frame at Fit, a full-resolution crop at\n"
+                         "1:1, about 2 Mpx either way, so it sweeps as smoothly as High. Every image copied off a GPU costs its uploads\n"
+                         "about 3 ms, so views are limited to 30 a second. Off shows only the finished outputs.");
     fl->addRow("Live view", liveRes_);
     // the warp's resampling filter (Travis, 2026-11-08: Helicon's Preferences offer the same choice)
     interp_ = new QComboBox;
@@ -954,15 +978,26 @@ void MainWindow::frameMenu(const QPoint& pos) {
 // pass 3 forward) the left pane shows each frame as it is processed (raw while
 // reading, so the stack's wobble is visible, then warped onto the output grid)
 // and the right pane what is being built from them.
-// the live view: the player's next frame of the sweep, already 8-bit and in sRGB (LivePlayer, its own thread)
-void MainWindow::onLiveView(int k, QImage image) {
+void MainWindow::updateViewWindow() {
+    QRectF scene = view_->sceneRect();
+    if (scene.isEmpty()) return;
+    QRectF vis = view_->fitted() ? scene : view_->visibleSceneRect();
+    std::lock_guard<std::mutex> lk(viewWinM_);
+    viewFrac_ = QRectF(vis.x() / scene.width(), vis.y() / scene.height(), vis.width() / scene.width(), vis.height() / scene.height());
+    viewportW_ = std::max(1, view_->viewport()->width());
+}
+
+// the live view: the player's next frame of the sweep, already 8-bit and in sRGB (LivePlayer, its own thread);
+// win / full say which part of the frame the image shows
+void MainWindow::onLiveView(int k, QImage image, QRect win, QSize full) {
     if (image.isNull() || (bench_ && bench_->running()) || k < 0 || k >= jobItems_.size()) return;
     liveItem_ = jobItems_[k];   // the job's frame -> its row (rows may be reordered or duplicated)
     static const bool logViews = qEnvironmentVariableIsSet("XLAMINA_LOG_VIEWS");   // developer aid: the sweep's order and pace in the log
-    if (logViews) onLog(QString("view: frame %1 at %2 ms").arg(k).arg(elapsed_.elapsed()));
+    if (logViews) onLog(QString("view: frame %1 at %2 ms, %3x%4 of %5x%6 at (%7,%8)").arg(k).arg(elapsed_.elapsed()).arg(image.width()).arg(image.height()).arg(full.width()).arg(full.height()).arg(win.x()).arg(win.y()));
     k = liveItem_->data(Qt::UserRole).toInt();   // the folder's frame
     current_ = "frame";
-    view_->setImage(image, true);
+    if (full.isValid() && win.isValid() && (win.size() != full || image.size() != full)) view_->setLiveWindow(image, win, full);
+    else view_->setImage(image, true);
     // the count is the progress signal's (progressStatus_); the view only says which frame is on screen
     QString name = k >= 0 && k < frames_.size() ? QFileInfo(frames_[k]).fileName() : QString();
     statusBar()->showMessage(name.isEmpty() ? progressStatus_ : QString("%1 — on screen: %2").arg(progressStatus_, name));

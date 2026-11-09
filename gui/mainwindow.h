@@ -25,6 +25,7 @@
 #include <QTimer>
 
 #include <memory>
+#include <mutex>
 
 #include "benchmark.h"
 #include "compare.h"
@@ -75,7 +76,8 @@ private slots:
     void stepOutput(int delta);
     void onProgress(QString stage, double fraction);
     void onPreview(QString name, FloatImage rgb, int w, int h);
-    void onLiveView(int k, QImage image);
+    void onLiveView(int k, QImage image, QRect win, QSize full);
+    void updateViewWindow();                   // the viewer's visible part, as fractions, for the engine's frame views
     void onThumbnail(int index, QImage image);
     void onFullFrame(int index, QImage image);
     void onComparison(int index, QImage image);
@@ -166,6 +168,11 @@ private:
     QPointer<QDialog> updateDlg_;
     QPointer<QDialog> prefsDlg_;       // File > Preferences, built once
     HwMonitor* hw_ = nullptr;          // the live hardware panel (bottom dock), raised when a render starts
+    // the live view's window: what the viewer shows as fractions of the image, and the viewport's width in pixels,
+    // read by the engine's threads (under the mutex) to render each frame view at the screen's resolution
+    std::mutex viewWinM_;
+    QRectF viewFrac_{0, 0, 1, 1};
+    int viewportW_ = 1600;
     QDockWidget* hwDock_ = nullptr;
     QGroupBox* perfGroup_ = nullptr;   // the hardware settings, built with the Render column, shown in Preferences
     bool updateManual_ = false;        // the running check came from the menu: report its result either way

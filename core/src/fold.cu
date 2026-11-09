@@ -93,10 +93,10 @@ __global__ void k_preview(const double* __restrict__ num, const double* __restri
     for (int c = 0; c < 3; ++c) out[((size_t)y * pw + x) * 3 + c] = d > 0 ? (float)(num[i * 3 + c] / d) : 0.f;
 }
 
-__global__ void k_preview_img(const float* __restrict__ img, int w, int h, int down, float* __restrict__ out, int pw, int ph) {
+__global__ void k_preview_img(const float* __restrict__ img, int w, int h, int x0, int y0, int down, float* __restrict__ out, int pw, int ph) {
     int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= pw || y >= ph) return;
-    size_t i = (size_t)min(y * down + down / 2, h - 1) * w + min(x * down + down / 2, w - 1);
+    size_t i = (size_t)min(y0 + y * down + down / 2, h - 1) * w + min(x0 + x * down + down / 2, w - 1);
     for (int c = 0; c < 3; ++c) out[((size_t)y * pw + x) * 3 + c] = img[i * 3 + c];
 }
 
@@ -306,10 +306,10 @@ void fold_focus_preview_kernel(const FoldState& st, int down, float* d_out, int&
     k_preview_focus<<<dim3((pw + 31) / 32, (ph + 7) / 8), dim3(32, 8), 0, s>>>(st.b_best, st.w, st.h, down, d_out, pw, ph);
 }
 
-void image_preview_kernel(const float* d_rgb, int w, int h, int down, float* d_out, int& pw, int& ph, cudaStream_t s) {
+void image_preview_kernel(const float* d_rgb, int w, int h, int x0, int y0, int cw, int ch, int down, float* d_out, int& pw, int& ph, cudaStream_t s) {
     down = std::max(1, down);
-    preview_size(w, h, down, pw, ph);
-    k_preview_img<<<dim3((pw + 31) / 32, (ph + 7) / 8), dim3(32, 8), 0, s>>>(d_rgb, w, h, down, d_out, pw, ph);
+    preview_size(cw, ch, down, pw, ph);
+    k_preview_img<<<dim3((pw + 31) / 32, (ph + 7) / 8), dim3(32, 8), 0, s>>>(d_rgb, w, h, x0, y0, down, d_out, pw, ph);
 }
 
 // ----------------------------------------------------------------------------- host side
