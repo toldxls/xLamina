@@ -264,8 +264,9 @@ void MainWindow::buildUi() {
     tabs_->setExpanding(false);
     tabs_->setDrawBase(false);
     // the active output must be unmistakable: the selected tab in the accent colour, and the viewer names its image
+    // colour only, no bold: a bold selected tab was wider, so stepping B -> C re-laid the whole row (Travis, 2026-11-08)
     tabs_->setStyleSheet("QTabBar::tab { padding: 6px 16px; margin-right: 2px; }"
-                         "QTabBar::tab:selected { background: #7a2fc9; color: white; font-weight: bold; }");
+                         "QTabBar::tab:selected { background: #7a2fc9; color: white; }");
     tabs_->setToolTip("The outputs of the last render and any comparison images; PgUp / PgDown step through them at the same zoom.");
     // Compare and Retouch, centred above the view (Travis, 2026-11-08): the same as Compare > Two-up viewer, and the
     // viewer with retouching switched on
