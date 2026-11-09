@@ -1508,6 +1508,9 @@ int run_align(AlignOptions& ao, AlignOut& A) {
             ao.cache->prepare(paths);
             logf("frames resident in host memory: %d of %d, budget %.1f GB\n", ao.cache->count(), N, ao.cache->budget() / 1e9);
         }
+        // the stage's name tells the front end whether this pass reads the disk or only converts resident frames
+        // (0.6.25: with the frames read while the folder's thumbnails loaded, "reading" looked like a second read)
+        const char* stage_name = ao.cache && ao.cache->count() >= N ? "frames from memory" : "reading frames";
         std::atomic<int> done{0};
         for (int d : devs) {
             CK(cudaSetDevice(d));
@@ -1530,7 +1533,7 @@ int run_align(AlignOptions& ao, AlignOut& A) {
             luma(S.d_rgb, S.d_y, (size_t)W * H, f.stream);
             S.rz.run(S.d_y, S.d_small, 1, f.stream);
             cudaMemcpyAsync(luma_stack.data() + (size_t)f.k * w * h, S.d_small, (size_t)w * h * sizeof(float), cudaMemcpyDeviceToHost, f.stream);
-            if (hooks.progress) hooks.progress("reading frames", (double)(++done) / N);
+            if (hooks.progress) hooks.progress(stage_name, (double)(++done) / N);
         };
         StreamerStats st = stream_frames(paths, opt, on_frame);
         for (auto& e : st.errors) logf("  error: %s\n", e.c_str());

@@ -1205,11 +1205,12 @@ void MainWindow::onProgress(QString stage, double fraction) {
     progress_->setValue((int)std::lround(std::clamp(fraction, 0.0, 1.0) * 1000));
     // the frame count comes from here, not from the live view: the view is throttled and skips frames, so its
     // last frame index stalled short of the total ("157 of 163"). Every progress call is delivered.
-    if (stage.startsWith("reading") || stage.startsWith("pass")) {
+    if (stage.startsWith("reading") || stage.startsWith("frames from") || stage.startsWith("pass")) {
         const int total = jobItems_.size();
         const int n = (int)std::lround(std::clamp(fraction, 0.0, 1.0) * total);
-        const QString what = stage.startsWith("reading") ? "Read" : stage.startsWith("pass 1") ? "Aligned"
-                           : stage.startsWith("pass 2") ? "Fine-focused" : "Composed";
+        // "frames from memory": the stack was read while the thumbnails loaded; this pass only converts it for the alignment
+        const QString what = stage.startsWith("reading") ? "Read" : stage.startsWith("frames from") ? "From memory"
+                           : stage.startsWith("pass 1") ? "Aligned" : stage.startsWith("pass 2") ? "Fine-focused" : "Composed";
         progressStatus_ = QString("%1 %2 of %3 frames").arg(what).arg(n).arg(total);
     } else if (!stage.isEmpty()) {   // "aligning pairs" (a share of the pairs), "depth map", "finalize", "done"
         progressStatus_ = stage;
@@ -1255,7 +1256,15 @@ void MainWindow::onPreview(QString name, FloatImage rgb, int w, int h) {
     statusBar()->showMessage(QString("Preview: %1").arg(name));
 }
 
-void MainWindow::onLog(QString line) { log_->appendPlainText(line); }
+void MainWindow::onLog(QString line) {
+    log_->appendPlainText(line);
+    // developer aid: XLAMINA_LOG=C:\x\gui.log mirrors the Log tab to a file (unattended runs)
+    static const QString path = qEnvironmentVariable("XLAMINA_LOG");
+    if (!path.isEmpty()) {
+        QFile f(path);
+        if (f.open(QIODevice::Append | QIODevice::Text)) { f.write(line.toUtf8()); f.write("\n"); }
+    }
+}
 
 void MainWindow::setStatusGeometry(const JobResultData& d) {
     const auto& A = d.align;

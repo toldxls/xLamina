@@ -9,6 +9,7 @@
 
 // xLamina [FOLDER] [--render] [--shots DIR [--every S]] [--bench REPORT.txt [--sample]] [--self-update]
 //   --render  start a render of FOLDER at once
+//   --render-in S       developer aid: start the render S seconds after opening (the thumbnails' cache fill first)
 //   --shots   developer aid: save a grab of the window to DIR every S seconds (default 3) while a render runs
 //   --bench   developer aid: run the benchmark unattended (on FOLDER, or the built-in sample with --sample),
 //             write REPORT.txt and REPORT.txt.png, then quit
@@ -28,10 +29,11 @@ int main(int argc, char** argv) {
     w.show();
     bool autoRender = false, sample = false, selfUpdate = false;
     QString folder, shots, bench, updatedFrom;
-    double every = 3;
+    double every = 3, renderIn = -1;
     for (int i = 1; i < argc; ++i) {
         QString a = QString::fromLocal8Bit(argv[i]);
         if (a == "--render") autoRender = true;
+        else if (a == "--render-in" && i + 1 < argc) renderIn = atof(argv[++i]);
         else if (a == "--sample") sample = true;
         else if (a == "--self-update") selfUpdate = true;
         else if (a == "--shots" && i + 1 < argc) shots = QString::fromLocal8Bit(argv[++i]);
@@ -44,6 +46,7 @@ int main(int argc, char** argv) {
     if (selfUpdate) QMetaObject::invokeMethod(&w, &MainWindow::selfUpdate, Qt::QueuedConnection);
     if (!folder.isEmpty()) w.openFolder(folder);
     if (autoRender) QMetaObject::invokeMethod(&w, "render", Qt::QueuedConnection);
+    if (renderIn >= 0) QTimer::singleShot((int)(renderIn * 1000), &w, &MainWindow::render);
     if (!bench.isEmpty()) QMetaObject::invokeMethod(&w, [&w, sample, bench] { w.autoBenchmark(sample, bench); }, Qt::QueuedConnection);
     if (!shots.isEmpty()) {
         QDir().mkpath(shots);

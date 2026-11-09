@@ -136,7 +136,13 @@ void PerfSettings::save(QSettings& s) const {
     s.endGroup();
 }
 
-QSettings appSettings() { return QSettings(QSettings::IniFormat, QSettings::UserScope, "xLamina", "xLamina"); }
+QSettings appSettings() {
+    // developer aid: XLAMINA_SETTINGS=C:\x\test.ini runs a second instance on its own settings (its own output folder),
+    // beside the user's
+    static const QString file = qEnvironmentVariable("XLAMINA_SETTINGS");
+    if (!file.isEmpty()) return QSettings(file, QSettings::IniFormat);
+    return QSettings(QSettings::IniFormat, QSettings::UserScope, "xLamina", "xLamina");
+}
 
 // ----------------------------------------------------------------------------- theme
 
