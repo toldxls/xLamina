@@ -33,6 +33,9 @@ if not "%REDIST%"=="" (
 ) else ( echo VC++ redist not found: the zip will need the runtime installed & exit /b 3 )
 copy /y README.md dist\%NAME%\ >nul
 copy /y LICENSE dist\%NAME%\ >nul
+rem the icon as a file: a shortcut that points at it keeps a sharp icon across updates (Explorer's cache serves a
+rem stale small image for a while after the exe it reads the icon from is replaced)
+copy /y gui\icon\xlamina.ico dist\%NAME%\ >nul
 if exist dist\%NAME%.zip del dist\%NAME%.zip
 powershell -NoProfile -Command "Compress-Archive -Path 'dist\%NAME%\*' -DestinationPath 'dist\%NAME%.zip'"
 echo dist\%NAME%.zip

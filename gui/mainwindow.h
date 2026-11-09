@@ -87,6 +87,7 @@ private slots:
     void dropSoft();      // untick the frames whose focus energy fell under their neighbours'
     void frameMenu(const QPoint& pos);
     void tickAllFrames();
+    void syncAllFramesBox();   // the master tick above the list mirrors the rows: all, none or some ticked
     void sortFrames(bool byTime);   // the list (= the stack order) by file name, or by the capture time (EXIF; file time when absent)
 
 private:
@@ -191,6 +192,7 @@ private:
     ImageView* view_ = nullptr;
     QListWidget* frameList_ = nullptr;
     QDockWidget* framesDock_ = nullptr;
+    QCheckBox* allFrames_ = nullptr;   // the master tick in line with the rows' ticks (Travis, 2026-11-09)
     QTabBar* tabs_ = nullptr;
     QPlainTextEdit* log_ = nullptr;
     QProgressBar* progress_ = nullptr;

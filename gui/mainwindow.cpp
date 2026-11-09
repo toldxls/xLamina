@@ -5,6 +5,7 @@
 #include <QClipboard>
 #include <QCloseEvent>
 #include <QCollator>
+#include <QSignalBlocker>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -280,7 +281,6 @@ void MainWindow::buildUi() {
     tb->addSeparator();
     tb->addAction(dropShifted_);
     tb->addAction(dropSoft_);
-    tb->addAction(tickAll_);
     tb->addSeparator();
     tb->addAction("Benchmark…", this, &MainWindow::benchmark);
     // the Update button, at the right end, shown only when a newer release exists
@@ -378,7 +378,42 @@ void MainWindow::buildUi() {
     frameList_->setContextMenuPolicy(Qt::CustomContextMenu);
     frameList_->setToolTip("The stack's frames, in stack order: drag to reorder, right-click to add a frame again or move it.\n"
                            "Click one to see it at full resolution; greyed files are not part of the stack.");
-    framesDock_->setWidget(frameList_);
+    // the master tick under the dock's title, in line with the rows' ticks (Travis, 2026-11-09): ticked = every frame
+    // in the render, clear = none, partly filled = some; a click ticks every frame unless all were ticked, then it clears them
+    QWidget* framesBox = new QWidget;
+    QVBoxLayout* fbl = new QVBoxLayout(framesBox);
+    fbl->setContentsMargins(0, 0, 0, 0);
+    fbl->setSpacing(0);
+    QWidget* head = new QWidget;
+    QHBoxLayout* hl = new QHBoxLayout(head);
+    hl->setContentsMargins(4, 3, 4, 3);
+    allFrames_ = new QCheckBox("All frames");
+    allFrames_->setTristate(true);
+    allFrames_->setToolTip("Tick or untick every frame of the stack at once. Partly filled: some frames are unticked.");
+    hl->addWidget(allFrames_);
+    hl->addStretch(1);
+    fbl->addWidget(head);
+    fbl->addWidget(frameList_, 1);
+    connect(allFrames_, &QCheckBox::clicked, this, [this] {
+        if (worker_.running()) { statusBar()->showMessage("A render is running; the list changes when it has finished.", 4000); syncAllFramesBox(); return; }
+        // the box has already moved on from the state it showed; decide from the rows themselves
+        int ticked = 0, total = 0;
+        for (int r = 0; r < frameList_->count(); ++r) {
+            QListWidgetItem* o = frameList_->item(r);
+            if (o->data(Qt::UserRole).toInt() < 0) continue;
+            ++total;
+            if (o->checkState() == Qt::Checked) ++ticked;
+        }
+        const Qt::CheckState to = ticked == total && total > 0 ? Qt::Unchecked : Qt::Checked;
+        for (int r = 0; r < frameList_->count(); ++r) {
+            QListWidgetItem* o = frameList_->item(r);
+            if (o->data(Qt::UserRole).toInt() >= 0) o->setCheckState(to);
+        }
+        syncAllFramesBox();
+        statusBar()->showMessage(to == Qt::Checked ? "Every frame is in the next render." : "Every frame unticked; tick the ones to stack.", 4000);
+    });
+    connect(frameList_, &QListWidget::itemChanged, this, [this](QListWidgetItem*) { syncAllFramesBox(); });
+    framesDock_->setWidget(framesBox);
     addDockWidget(Qt::LeftDockWidgetArea, framesDock_);
     connect(frameList_, &QListWidget::currentRowChanged, this, &MainWindow::showFrame);
     connect(frameList_, &QListWidget::customContextMenuRequested, this, &MainWindow::frameMenu);
@@ -937,6 +972,7 @@ void MainWindow::openFolder(const QString& dir) {
     outDir_->setText(QDir::toNativeSeparators(dir + "_stacker"));
     setWindowTitle(QString("xLamina %1 — %2").arg(XLAMINA_VERSION, QDir::toNativeSeparators(dir)));
     framesDock_->setWindowTitle(QString("Frames (%1)").arg(frames_.size()));
+    syncAllFramesBox();
     QString note = QString("%1 frames of %2 x %3").arg(frames_.size()).arg(best.first).arg(best.second);
     if (skipped) note += QString(" (%1 other TIFF%2 left out)").arg(skipped).arg(skipped > 1 ? "s" : "");
     if (colorSpace_.isValid()) note += QString(", %1").arg(colorSpace_.description().isEmpty() ? "ICC profile" : colorSpace_.description());
@@ -1512,6 +1548,21 @@ static void untick(QList<QListWidgetItem*>& rows, QAction* act, QStatusBar* bar,
 
 void MainWindow::dropShifted() { untick(shifted_, dropShifted_, statusBar(), "shifted"); }
 void MainWindow::dropSoft() { untick(soft_, dropSoft_, statusBar(), "soft"); }
+
+void MainWindow::syncAllFramesBox() {
+    if (!allFrames_) return;
+    int ticked = 0, total = 0;
+    for (int r = 0; r < frameList_->count(); ++r) {
+        QListWidgetItem* o = frameList_->item(r);
+        if (o->data(Qt::UserRole).toInt() < 0) continue;
+        ++total;
+        if (o->checkState() == Qt::Checked) ++ticked;
+    }
+    QSignalBlocker block(allFrames_);
+    allFrames_->setEnabled(total > 0);
+    allFrames_->setCheckState(total == 0 || ticked == 0 ? Qt::Unchecked : ticked == total ? Qt::Checked : Qt::PartiallyChecked);
+    allFrames_->setText(total == 0 ? "All frames" : ticked == total ? "All frames" : QString("%1 of %2 frames").arg(ticked).arg(total));
+}
 
 void MainWindow::tickAllFrames() {
     if (worker_.running()) { statusBar()->showMessage("A render is running; the list changes when it has finished.", 4000); return; }
