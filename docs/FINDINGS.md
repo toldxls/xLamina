@@ -1875,6 +1875,21 @@ background change and in `soft-px-2_refine-r-36` without it; the aggressive
 one is `soft-px-1.5_refine-r-24`. Nothing is changed in the defaults until he
 has looked.
 
+**Travis's verdict** (the same night, at 1:1): the combined candidate "is
+quite good, it has some merits over regular base B. I prefer how it handles
+the background. But base B is still better for details." So **0.6.22 makes
+flat blur 256 and flat blend 32 the defaults and leaves soft labels at 3 and
+the refine range at 12**. The lesson for the helper: fine-detail energy
+against the sharpest frame ranks the variants, but a higher score is not a
+better picture. Soft labels 2 measured +6 % and looked worse to him; the
+blend's smoothing of frame-to-frame noise and rims is part of what reads as
+quality. The score stays a way to find candidates and to catch losses (soft 6,
+the refine window, aggregation 64), not a judge. The Run sweep presets are
+rebuilt from this table (soft labels 2 / 1.5 / 4, refine range 24, the 0.6.21
+background, blur 512, blend 64 / 0, the quiet end, refine window 5 / 15, B
+radius 32, 1/4 volume); the 11/07 set (ramp, dark reach, halo prior,
+aggregation) is gone, being within noise.
+
 ## Open items
 
 - **B: doubled plate edge / glow** (§25a): the C-style aggregation does not

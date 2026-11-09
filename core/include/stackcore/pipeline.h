@@ -71,8 +71,9 @@ struct Pass1Options {
     // defocused background (FINDINGS 34): in flat regions of the guide (no texture within flat_reach_px) every
     // focus slice is box-blurred over flat_blur_px, and in the depth stage pixels without sharp detail within reach
     // take the nearest sharp detail's frame in a band about flat_blur_px wide, the quieter end of the stack beyond
-    // it (DepthParams::flat, flat_blur_px). 0 = off (the 0.5.x behaviour: the priors decide)
-    double flat_blur_px = 128.0, flat_reach_px = 24.0;
+    // it (DepthParams::flat, flat_blur_px). 0 = off (the 0.5.x behaviour: the priors decide). 128 from 0.6.4; 256 since
+    // 0.6.22 (FINDINGS 44: a fifth less ring energy in the background, detail untouched; Travis preferred it at 1:1)
+    double flat_blur_px = 256.0, flat_reach_px = 24.0;
     double flat_min = 0.0;                        // DepthParams::flat_min (least-structure data term in flat regions); 0 = off
     Hooks hooks;
 };
@@ -177,8 +178,9 @@ struct StackOptions {
     double flat_end_soft = 0.3;
     // the composition's smooth-depth blend widened to this many frames in flat regions (FINDINGS 41): the background's
     // depth ramps through the stack there and a two-frame blend draws iso-frame rings; 0 = off (two frames everywhere,
-    // the 0.6.17 composition). 16 since 0.6.18: 8 already removes the rings, 16 and 32 look alike and nearer Helicon
-    double flat_blend = 16;
+    // the 0.6.17 composition). 16 from 0.6.18 (8 already removes the rings, 16 and 32 look alike and nearer Helicon);
+    // 32 since 0.6.22, with flat_blur_px 256 (FINDINGS 44)
+    double flat_blend = 32;
     std::vector<std::string> outputs;  // which images to write / keep; empty = all
     bool cache_frames = true;          // keep the frames pinned in host memory between the passes (--cache 0: read every pass from disk)
     bool write_outputs = true;         // false: compute everything (and fill `result`) but write no TIFFs (the GUI's benchmark)

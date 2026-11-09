@@ -15,29 +15,32 @@ using stackcore::StackOptions;
 using stackcore::SweepVariant;
 
 namespace {
-// The sets, from the 2026-11-07 sensitivity sweep on the real stack (share of B's pixels changed by > 2 %):
-// depth volume 1/4: 7.9 %, background blur off: 6.9 %, confidence ramp high: 4.7 %, background blur 256: 3.5 %,
-// confidence ramp low: 2.5 %, B radius 32: 2.1 %, aggregation off / 64: 2.1 / 1.6 %, dark reach 48 / 0: 1.5 / 1.4 %,
-// halo prior off: 0.9 %. SGM P1 / P2, soft label width, end vote, fine-focus range and window, dark prior strength
-// and C radius all moved less than 0.5 % of the pixels and are not worth a look.
+// The sets, from the 2026-11-08 parameter search scored against the source frames (FINDINGS 44). Detail in B is
+// decided by the composition: the soft-label width is the dial (1 px = +10 % fine detail but seams, 6 = a quarter
+// lost; Travis kept 3 over the sharper 2 at 1:1), the refinement's range and window and the B radius move it a
+// little, aggregation 0 / 16 draw a blotch. Every depth knob (volume resolution, the ramp, the priors, SGM) leaves
+// detail unchanged and only shifts the background, which the flat-region knobs tune on their own: blur width,
+// blend width, the quiet end. The 2026-11-07 set (ramp, dark reach, halo prior, aggregation) is gone: within noise.
 struct Preset { const char* name; std::vector<std::pair<std::string, std::string>> options; };
 const Preset kQuick[] = {
-    {"bg-blur-off", {{"--flat-blur", "0"}}},
-    {"trust-focus-less", {{"--conf-lo", "0.55"}, {"--conf-hi", "0.75"}}},
-    {"trust-focus-more", {{"--conf-lo", "0.35"}, {"--conf-hi", "0.55"}}},
-    {"volume-quarter", {{"--depth-fraction", "0.25"}}},
-    {"dark-prior-everywhere", {{"--dark-reach", "0"}}},
+    {"soft-labels-2", {{"--soft-px", "2"}}},
+    {"soft-labels-1.5", {{"--soft-px", "1.5"}}},
+    {"refine-range-24", {{"--refine-r", "24"}}},
+    {"bg-0.6.21", {{"--flat-blur", "128"}, {"--flat-blend", "16"}}},
+    {"bg-blur-512", {{"--flat-blur", "512"}}},
+    {"bg-blend-64", {{"--flat-blend", "64"}}},
 };
 const Preset kThoroughExtra[] = {
-    {"bg-blur-256", {{"--flat-blur", "256"}}},
-    {"aggregation-off", {{"--vol-agg-px", "0"}}},
-    {"aggregation-64", {{"--vol-agg-px", "64"}}},
-    {"dark-reach-48", {{"--dark-reach", "48"}}},
-    {"halo-prior-off", {{"--halo-prior", "0"}}},
+    {"soft-labels-4", {{"--soft-px", "4"}}},
+    {"refine-window-5", {{"--refine-fm-px", "5"}}},
+    {"refine-window-15", {{"--refine-fm-px", "15"}}},
     {"b-radius-32", {{"--b-radius", "32"}}},
+    {"bg-blend-off", {{"--flat-blend", "0"}}},
+    {"bg-quiet-end", {{"--flat-end", "quiet"}}},
+    {"volume-quarter", {{"--depth-fraction", "0.25"}}},
 };
-// variants that need their own pass 1 (fold + volume): flat-blur, depth-fraction, vol-agg-px, b-radius
-int pass1_groups(bool thorough) { return thorough ? 1 + 1 + 1 + 1 + 2 + 1 : 1 + 1 + 1; }
+// variants that need their own pass 1 (fold + volume): flat-blur (two in the quick set), b-radius, depth-fraction
+int pass1_groups(bool thorough) { return thorough ? 1 + 2 + 2 : 1 + 2; }
 }  // namespace
 
 SweepDialog::SweepDialog(const StackOptions&, const QString& defaultOut, QWidget* parent) : QDialog(parent) {
@@ -52,9 +55,9 @@ SweepDialog::SweepDialog(const StackOptions&, const QString& defaultOut, QWidget
 
     auto* g = new QGroupBox("Set");
     auto* gl = new QVBoxLayout(g);
-    quick_ = new QRadioButton("Quick: background blur off, focus trusted less / more, 1/4 volume, dark prior everywhere");
+    quick_ = new QRadioButton("Quick: soft labels 2 / 1.5, refine range 24, the 0.6.21 background, background blur 512, background blend 64");
     quick_->setChecked(true);
-    thorough_ = new QRadioButton("Thorough: the quick set plus background blur 256, aggregation off / 64, dark reach 48, halo prior off, B radius 32");
+    thorough_ = new QRadioButton("Thorough: the quick set plus soft labels 4, refine window 5 / 15, B radius 32, blend off, quiet end, 1/4 volume");
     gl->addWidget(quick_);
     gl->addWidget(thorough_);
     lay->addWidget(g);

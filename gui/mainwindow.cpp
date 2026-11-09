@@ -474,10 +474,10 @@ void MainWindow::buildUi() {
     darkReach_ = dspin(0, 200, 4, 24, 0, " px", "How far from sharp content the dark prior stays off, in sensor pixels. Default 24; 0 applies the prior to\n"
                                                  "every featureless pixel (the 0.5.x behaviour, which put far frames into the gaps of needle fans at 1/2 resolution).");
     al->addRow("Dark reach", darkReach_);
-    flatBlur_ = dspin(0, 512, 16, 128, 0, " px", "Defocused background (no sharp detail within the dark reach): a band of about this width beside sharp detail\n"
+    flatBlur_ = dspin(0, 512, 16, 256, 0, " px", "Defocused background (no sharp detail within the dark reach): a band of about this width beside sharp detail\n"
                                                   "takes that detail's frame, beyond it each pixel takes the frame where its own focus measure peaks, smoothed\n"
-                                                  "blob by blob (FINDINGS 40), and the composition blends up to 16 frames there (FINDINGS 41); its focus curves\n"
-                                                  "are also smoothed over this width (FINDINGS 34). Default 128; 0 = off\n"
+                                                  "blob by blob (FINDINGS 40), and the composition blends up to 32 frames there (FINDINGS 41); its focus curves\n"
+                                                  "are also smoothed over this width (FINDINGS 34). Default 256 (128 before 0.6.22; FINDINGS 44); 0 = off\n"
                                                   "(the depth stage's own choice, which breaks the background into patches with visible seams).");
     al->addRow("Flat smoothing", flatBlur_);
     QPushButton* resetAdv = new QPushButton("Defaults");
@@ -486,7 +486,7 @@ void MainWindow::buildUi() {
         depthRes_->setCurrentIndex(1);
         focusRadius_->setValue(6); focusPower_->setValue(4); depthFmPx_->setValue(6); volAggPx_->setValue(32);
         refineR_->setValue(12); refineFmPx_->setValue(9); softPx_->setValue(3); haloPrior_->setValue(2); darkPrior_->setValue(1);
-        darkReach_->setValue(24); flatBlur_->setValue(128);
+        darkReach_->setValue(24); flatBlur_->setValue(256);
     });
     al->addRow("", resetAdv);
     pl->addWidget(advanced_);
@@ -621,7 +621,9 @@ void MainWindow::loadSettings() {
     // before the reach existed takes the new default rather than the old one
     darkPrior_->setValue(s.contains("darkReach") ? s.value("darkPrior", 1.0).toDouble() : 1.0);
     darkReach_->setValue(s.value("darkReach", 24.0).toDouble());
-    flatBlur_->setValue(s.value("flatBlur", 128.0).toDouble());
+    // 0.6.4 .. 0.6.21 saved 128, their default; a stored 128 is that default, not a choice, and takes the new 256
+    double fb = s.value("flatBlur", 256.0).toDouble();
+    flatBlur_->setValue(fb == 128.0 ? 256.0 : fb);
     s.endGroup();
     perfToUi(PerfSettings::load(s));
 }
@@ -678,7 +680,7 @@ void MainWindow::resetSettings() {
     depthRes_->setCurrentIndex(1);
     focusRadius_->setValue(6); focusPower_->setValue(4); depthFmPx_->setValue(6); volAggPx_->setValue(32);
     refineR_->setValue(12); refineFmPx_->setValue(9); softPx_->setValue(3); haloPrior_->setValue(2); darkPrior_->setValue(1);
-    darkReach_->setValue(24); flatBlur_->setValue(128);
+    darkReach_->setValue(24); flatBlur_->setValue(256);
     perfToUi(PerfSettings());
     statusBar()->showMessage("Settings reset to the defaults.", 4000);
 }

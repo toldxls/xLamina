@@ -62,10 +62,12 @@ a 1:1 comparison. The depth volume is estimated at 1/2 of the sensor resolution 
 full-size frames. Since 0.6.3 the dark prior stays off within 24 px of sharp content (on the
 finer grid it had filled the gaps of needle fans with far frames). Since 0.6.4 defocused
 background is handled like the reference stacker's: beside sharp detail it keeps that detail's
-frame for about 128 px (flat smoothing), beyond that (since 0.6.16) each pixel takes the frame
-where its own focus measure peaks, smoothed blob by blob as the reference stacker does, with
-soft transitions instead of patches of different frames with visible seams; since 0.6.18 the
-composition blends up to 16 frames there, so a depth ramp draws no rings. The warp's
+frame for about 256 px (flat smoothing; 128 before 0.6.22), beyond that (since 0.6.16) each
+pixel takes the frame where its own focus measure peaks, smoothed blob by blob as the reference
+stacker does, with soft transitions instead of patches of different frames with visible seams;
+since 0.6.18 the composition blends many frames there (32 since 0.6.22), so a depth ramp draws
+no rings. A parameter search scored against the source frames (FINDINGS 44) left the detail
+settings as they were: sharper soft labels measured better and looked worse. The warp's
 resampling filter is a choice since 0.6.14 (bicubic, the reference; Lanczos 3 or 8 for a little
 more fine detail; bilinear). The 0.5.x B is `--b-reference 1` on the command line (depth
 resolution 1/4, dark prior everywhere, none of the 0.6.x additions).
