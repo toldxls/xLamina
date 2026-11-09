@@ -427,7 +427,7 @@ void MainWindow::buildUi() {
                         "Bicubic (the default, OpenCV's a = -0.75) is the reference the engine was validated with. Lanczos 3 keeps about\n"
                         "1 % more fine detail for 0.3 s more per render; Lanczos 8 about 3 % more for 3.3 s more (163 frames, FINDINGS 39).\n"
                         "Bilinear is softest and fastest (8 % less). Changing it changes every output.");
-    fl->addRow("Interpolation", interp_);
+    // (not in the Render column: File > Preferences > General holds it, Travis, 2026-11-09; the setting is kept as before)
     mainForm_ = fl;
     smoothing_ = new QDoubleSpinBox;
     smoothing_->setRange(0, 6);
@@ -462,7 +462,8 @@ void MainWindow::buildUi() {
     fl->addRow("Radius (B)", bradius_);
     fov_ = new QDoubleSpinBox;
     fov_->setRange(0, 1000);
-    fov_->setDecimals(4);
+    fov_->setDecimals(2);   // two decimals (Travis, 2026-11-09); the report keeps four
+    fov_->setSingleStep(0.01);
     fov_->setSuffix(" mm");
     fov_->setSpecialValueText("unknown");
     fov_->setToolTip("Horizontal field of view of one frame; gives the report its µm/px.");
@@ -1699,6 +1700,7 @@ void MainWindow::preferences() {
     theme->setCurrentIndex(std::max(0, theme->findData(theme_)));
     connect(theme, &QComboBox::currentIndexChanged, this, [this, theme](int i) { setTheme(theme->itemData(i).toString()); });
     gf->addRow("Theme", theme);
+    gf->addRow("Interpolation", interp_);   // the warp's resampling filter, built with the Render column (its setting and file-name tag)
     QCheckBox* upd = new QCheckBox("Check for updates when xLamina starts");
     upd->setChecked(autoUpdateAct_->isChecked());
     connect(upd, &QCheckBox::toggled, autoUpdateAct_, &QAction::setChecked);
