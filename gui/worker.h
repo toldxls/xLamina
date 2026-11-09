@@ -11,13 +11,13 @@
 #include <mutex>
 #include <vector>
 
+#include "liveplayer.h"
 #include "stackcore/frame_cache.h"
 #include "stackcore/pipeline.h"
 
-// A live-view image as the engine hands it over: float RGB, interleaved, [0, 1]. The 8-bit conversion
-// happens on the GUI thread, and the buffers come from a small pool the GUI hands back after converting
-// (a fresh 10 MB vector per frame cost ~3 ms of page faults on the GPU's worker thread, FINDINGS 30).
-using FloatImage = std::shared_ptr<std::vector<float>>;
+// A live-view image as the engine hands it over: float RGB, interleaved, [0, 1] (FloatImage, liveplayer.h). The
+// 8-bit conversion happens off the engine's threads, and the buffers come from a small pool handed back after
+// converting (a fresh 10 MB vector per frame cost ~3 ms of page faults on the GPU's worker thread, FINDINGS 30).
 
 struct JobResultData {
     stackcore::StackOptions::Result result;
@@ -49,16 +49,15 @@ public:
     // thumbnail loader can fill it (0.6.24: the frames are read once, while the thumbnails load)
     void prepareCache(const QStringList& files);
     stackcore::FrameCache* cache() { return &cache_; }
-    // Live views are dropped while two are still waiting for the GUI thread, so a slow display never
-    // queues up frames (at Full, 365 MB each) and the engine never waits for the screen. The GUI returns
-    // each buffer once it has converted it.
-    void viewShown(FloatImage img) { --viewsInFlight_; recycle(std::move(img)); }
+    // Building previews are dropped while two are still waiting for the GUI thread, so a slow display never
+    // queues up images and the engine never waits for the screen. The GUI returns each buffer once converted.
+    // Frame views go to the LivePlayer, which paces and orders them on its own thread (0.6.32).
     void previewShown(FloatImage img) { --previewsInFlight_; recycle(std::move(img)); }
+    LivePlayer* player() { return player_; }
 
 signals:
     void progress(QString stage, double fraction);
     void preview(QString name, FloatImage rgb, int w, int h);
-    void frame(int k, FloatImage rgb, int w, int h);
     void logLine(QString line);
     void finished(std::shared_ptr<JobResultData> data);
 
@@ -70,7 +69,8 @@ private:
     FloatImage take(const float* rgb, size_t n);   // a pooled buffer holding a copy of rgb[0..n)
     void recycle(FloatImage img);
     std::atomic<bool> cancel_{false};
-    std::atomic<int> viewsInFlight_{0}, previewsInFlight_{0};
+    std::atomic<int> previewsInFlight_{0};
+    LivePlayer* player_ = nullptr;
     std::mutex poolMutex_;
     std::vector<FloatImage> pool_;
     bool running_ = false;

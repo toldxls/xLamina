@@ -72,7 +72,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     loadSettings();
     connect(&worker_, &Worker::progress, this, &MainWindow::onProgress);
     connect(&worker_, &Worker::preview, this, &MainWindow::onPreview);
-    connect(&worker_, &Worker::frame, this, &MainWindow::onFrame);
+    connect(worker_.player(), &LivePlayer::view, this, &MainWindow::onLiveView);   // paced, in stack order (0.6.32)
     connect(&worker_, &Worker::logLine, this, &MainWindow::onLog);
     connect(&worker_, &Worker::finished, this, &MainWindow::onFinished);
     connect(&updater_, &Updater::available, this, &MainWindow::onUpdateAvailable);
@@ -806,6 +806,7 @@ void MainWindow::openFolder(const QString& dir) {
     liveItem_ = markedItem_ = nullptr;   // the rows they pointed at are gone
     liveView_->hide();
     colorSpace_ = QColorSpace();
+    worker_.player()->setColorSpace(colorSpace_);
     // the stack is the TIFFs of the most common size; other files in the folder are listed greyed out
     QMap<QPair<unsigned, unsigned>, int> sizes;
     QList<TiffInfo> infos;
@@ -832,6 +833,7 @@ void MainWindow::openFolder(const QString& dir) {
             it->setToolTip("Untick to leave this frame out of the render. Wobble numbers appear here after a render.");
             if (!colorSpace_.isValid() && !infos[i].icc.empty())
                 colorSpace_ = QColorSpace::fromIccProfile(QByteArray((const char*)infos[i].icc.data(), (int)infos[i].icc.size()));
+                worker_.player()->setColorSpace(colorSpace_);   // the live view converts to sRGB off the GUI thread
         } else {
             it->setForeground(Qt::gray);
             it->setFlags(it->flags() & ~Qt::ItemIsSelectable);
@@ -952,19 +954,15 @@ void MainWindow::frameMenu(const QPoint& pos) {
 // pass 3 forward) the left pane shows each frame as it is processed (raw while
 // reading, so the stack's wobble is visible, then warped onto the output grid)
 // and the right pane what is being built from them.
-void MainWindow::onFrame(int k, FloatImage rgb, int w, int h) {
-    if (!rgb) return;
-    // at most ~30 views a second, fewer when they are large (Full: 30 Mpx to convert, ~300 ms each)
-    const qint64 minMs = std::max<qint64>(33, (qint64)w * h / 100000);
-    bool show = !(bench_ && bench_->running()) && k >= 0 && k < jobItems_.size() && (!lastView_.isValid() || lastView_.elapsed() >= minMs);
-    QImage image = show ? toQImage(rgb->data(), w, h) : QImage();
-    worker_.viewShown(std::move(rgb));   // the buffer goes back to the pool
-    if (k >= 0 && k < jobItems_.size()) liveItem_ = jobItems_[k];   // the job's frame -> its row (rows may be reordered or duplicated)
-    if (image.isNull()) return;
-    lastView_.start();
+// the live view: the player's next frame of the sweep, already 8-bit and in sRGB (LivePlayer, its own thread)
+void MainWindow::onLiveView(int k, QImage image) {
+    if (image.isNull() || (bench_ && bench_->running()) || k < 0 || k >= jobItems_.size()) return;
+    liveItem_ = jobItems_[k];   // the job's frame -> its row (rows may be reordered or duplicated)
+    static const bool logViews = qEnvironmentVariableIsSet("XLAMINA_LOG_VIEWS");   // developer aid: the sweep's order and pace in the log
+    if (logViews) onLog(QString("view: frame %1 at %2 ms").arg(k).arg(elapsed_.elapsed()));
     k = liveItem_->data(Qt::UserRole).toInt();   // the folder's frame
     current_ = "frame";
-    view_->setImage(forDisplay(image), true);
+    view_->setImage(image, true);
     // the count is the progress signal's (progressStatus_); the view only says which frame is on screen
     QString name = k >= 0 && k < frames_.size() ? QFileInfo(frames_[k]).fileName() : QString();
     statusBar()->showMessage(name.isEmpty() ? progressStatus_ : QString("%1 — on screen: %2").arg(progressStatus_, name));

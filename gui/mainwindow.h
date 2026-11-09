@@ -75,7 +75,7 @@ private slots:
     void stepOutput(int delta);
     void onProgress(QString stage, double fraction);
     void onPreview(QString name, FloatImage rgb, int w, int h);
-    void onFrame(int k, FloatImage rgb, int w, int h);
+    void onLiveView(int k, QImage image);
     void onThumbnail(int index, QImage image);
     void onFullFrame(int index, QImage image);
     void onComparison(int index, QImage image);

@@ -13,12 +13,16 @@
 
 using namespace stackcore;
 
-Worker::Worker(QObject* parent) : QObject(parent) {}
+Worker::Worker(QObject* parent) : QObject(parent) {
+    player_ = new LivePlayer;   // its own thread; owned here
+    player_->setRecycler([this](FloatImage img) { recycle(std::move(img)); });
+}
 
 Worker::~Worker() {
     cancel();
     thread_.quit();
     thread_.wait();
+    delete player_;
 }
 
 void Worker::releaseCache() {
@@ -100,23 +104,30 @@ void Worker::launch(std::shared_ptr<JobOptions> jo, std::shared_ptr<JobResultDat
         hooks.cancel = &cancel_;
         hooks.preview_down = std::max(1, liveDown);
         hooks.frame_down = std::max(1, liveDown);
-        hooks.preview_every = liveDown >= 6 ? 3 : liveDown >= 3 ? 6 : 12;   // dearer previews, fewer of them
-        hooks.progress = [this](const std::string& stage, double f) { emit progress(QString::fromStdString(stage), f); };
-        viewsInFlight_ = previewsInFlight_ = 0;
+        // the building maps grow on a time basis (every 50 ms at most), not every n-th frame: no steps (0.6.32)
+        hooks.preview_every = 1;
+        hooks.preview_min_ms = 50;
+        hooks.frame_min_ms = 33;
+        hooks.progress = [this](const std::string& stage, double f) {
+            // the live view's sweep: each pass through the stack restarts it; pass 2 (the fine focus) runs backwards
+            int pass = stage.find("reading") != std::string::npos || stage.find("frames from") != std::string::npos ? 0
+                     : stage.find("pass 1") != std::string::npos ? 1 : stage.find("pass 2") != std::string::npos ? 2
+                     : stage.find("pass 3") != std::string::npos ? 3 : -1;
+            if (pass >= 0) player_->setPass(pass, pass == 2 ? -1 : 1);
+            emit progress(QString::fromStdString(stage), f);
+        };
+        previewsInFlight_ = 0;
+        player_->begin();
         // timing experiments: XLAMINA_NOVIEW=1 drops the per-frame view, XLAMINA_NOPREVIEW=1 the building maps
         const bool noView = getenv("XLAMINA_NOVIEW"), noPreview = getenv("XLAMINA_NOPREVIEW");
-        if (!quiet) {   // the floats go to the GUI thread in pooled buffers; it converts them (see FloatImage)
+        if (!quiet) {   // the floats go off the engine's threads in pooled buffers (see FloatImage)
             hooks.preview = [this](const std::string& name, const float* rgb, int w, int h) {
                 bool building = name.find("(building)") != std::string::npos;
                 if (building && previewsInFlight_.load() >= 2) return;   // the screen has not caught up: skip this one
                 ++previewsInFlight_;   // final previews are never skipped, but they are counted the same way
                 emit preview(QString::fromStdString(name), take(rgb, (size_t)w * h * 3), w, h);
             };
-            hooks.frame = [this](int k, const float* rgb, int w, int h) {
-                if (viewsInFlight_.load() >= 2) return;
-                ++viewsInFlight_;
-                emit frame(k, take(rgb, (size_t)w * h * 3), w, h);
-            };
+            hooks.frame = [this](int k, const float* rgb, int w, int h) { player_->push(k, take(rgb, (size_t)w * h * 3), w, h); };
             if (noView) hooks.frame = nullptr;
             if (noPreview) hooks.preview = nullptr;
             if (getenv("XLAMINA_NOOPHOOKS")) {   // the GPU-side preview work without the host side
@@ -133,6 +144,7 @@ void Worker::launch(std::shared_ptr<JobOptions> jo, std::shared_ptr<JobResultDat
         }
         data->seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         set_log(nullptr);
+        player_->end();
         running_ = false;
         emit finished(data);
         worker->deleteLater();

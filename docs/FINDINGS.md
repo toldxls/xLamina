@@ -1963,6 +1963,45 @@ Open: `depth_from_volume` holds about 1.8 GB in per-pixel maps and
 output-resolution buffers before the SGM (3.64 GB free beside the volume,
 1.87 GB before the SGM); some of that could be freed earlier.
 
+## 47. The live view as a sweep: a paced player in stack order (2026-11-08, night)
+
+Travis: no stage of the live view "is a smooth pass through visually ...
+happening in jitters and chunks and choppy"; Helicon sweeps the stack
+forward once and back once, smoothly. Three causes in the plumbing:
+
+- Each GPU stream slot sent a view of the frame it had just processed, at
+  most one per 60 ms per slot. Two cards and several slots interleave: 57,
+  143, 58, 144. Nothing ordered the views before the screen.
+- Every view was float RGB converted to 8-bit on the GUI thread and then
+  converted again from Adobe RGB to sRGB. At Full (31 Mpx) that is two
+  passes of ~300 and ~100 ms during which nothing repaints; the code
+  rationed Full to one view per 310 ms.
+- Three independent throttles (per slot in the engine, two in flight in the
+  worker, a minimum interval in the GUI) dropped views unpredictably, and
+  the building maps refreshed every 8th frame at ≥ 150 ms: steps.
+
+**Now** (`gui/liveplayer.*`): the engine hands every view to a `LivePlayer`
+ring (24 most recent, keyed by frame index) and the player, on its own
+thread with a precise 33 ms timer, shows the next frame in stack order,
+forward for the read, pass 1 and pass 3, backward for pass 2, never stepping
+back; when the engine is more than 10 frames ahead the cursor jumps to 6
+behind it, so the sweep keeps the engine's pace by skipping evenly. Each
+pass restarts the sweep (the progress stage names the pass). The float to
+8-bit and the colour conversion run on the player's thread; the GUI thread
+only wraps the image. The building maps refresh on a time basis (≥ 50 ms,
+every frame). One throttle, in the player.
+
+Measured on 100 frames (`XLAMINA_LOG_VIEWS=1` logs each view): four
+monotone sweeps at exactly 33 ms per view, 162 views in 13.7 s: 0→99 for
+the read, 0→99 for pass 1, 98→0 for pass 2, 0→95 for pass 3; the engine at
+70–97 frames/s outruns 30 fps, so about every other frame is shown, evenly.
+Before the per-pass restart the pass-1 sweep was missing: the cursor stood
+at 99 from the read and every pass-1 frame was "behind" it.
+
+At Full the engine still rations views to one per 365 ms per slot (every
+copy off a GPU costs the uploads link time, §30), so the Full sweep is ~3
+views a second at best; High (1/3) or Medium (1/6) give the 30 fps sweep.
+
 ## Open items
 
 - **Per-frame sharpness flag** (§45): pass 1's focus energy per frame, next
