@@ -969,6 +969,7 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
     NoiseEstimate ne;
     if (noise_cache && !noise_cache->mad.empty()) ne = *noise_cache;   // the sweep: the same two frames every variant
     else {
+        stage("depth map: noise floor", 0.03);
         if (int r = measure_noise(so, P, s, ne)) { cudaStreamDestroy(s); return r; }
         if (noise_cache) *noise_cache = ne;
     }
@@ -994,6 +995,7 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
         CK(cudaMemcpy(d_ga, P.ga.data(), nd * sizeof(float), cudaMemcpyHostToDevice));
         // plane-major host volumes -> k-fastest device volumes, a few planes at a time through a staging buffer
         // (a full plane-major copy on the device doubled the volume's footprint: 4.9 GB more at 1/2 resolution)
+        stage("depth map: volume to the GPU", 0.08);
         {
             const int kc = std::max(1, std::min(K, (int)(((size_t)256 << 20) / (nd * sizeof(float)))));
             float* d_stage;
@@ -1040,6 +1042,7 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
             }
         }
         dp.end_frames = so.sgm_end_frames;
+        dp.progress = [&](const char* what, double f) { stage(what, f); };   // the bar moves through the depth stage
         logf("depth: SGM P1 %.3f P2 %.3f, confidence ramp %.2f..%.2f (noise floor %.4f, ramp x%.2f), dark prior %.2f (reach %.0f px), halo prior %.2f, volume %dx%d\n",
              dp.p1, dp.p2, dp.c_lo, dp.c_hi, ne.depth_floor, conf_scale, dp.dark_prior, dp.dark_reach_px, dp.halo_prior, P.vp.dw, P.vp.dh);
         float* d_flat = nullptr;
@@ -1243,10 +1246,12 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
         });
     }
     struct Join { std::vector<std::thread>& t; ~Join() { for (auto& x : t) if (x.joinable()) x.join(); } } join{writers};
-    write_raw(od / "depth.f32", R.depth_s.data(), R.depth_s.size());
-    if (!P.flat.empty()) write_raw(od / "flat.f32", P.flat.data(), P.flat.size());   // depth-resolution grid (stack.txt: w, h x depth fraction)
-    write_raw(od / "depth_smooth.f32", Ds.data(), Ds.size());
-    write_raw(od / "conf.f32", R.conf.data(), R.conf.size());
+    if (so.diagnostics) {   // the CLI's raw maps for analysis scripts and hash checks; the GUI writes none (Travis, 2026-11-08)
+        write_raw(od / "depth.f32", R.depth_s.data(), R.depth_s.size());
+        if (!P.flat.empty()) write_raw(od / "flat.f32", P.flat.data(), P.flat.size());   // depth-resolution grid (stack.txt: w, h x depth fraction)
+        write_raw(od / "depth_smooth.f32", Ds.data(), Ds.size());
+        write_raw(od / "conf.f32", R.conf.data(), R.conf.size());
+    }
     FILE* mf = fopen((od / "stack.txt").string().c_str(), "w");
     if (mf) {
         fprintf(mf, "w %d\nh %d\nframes %d\nlevels %d\nscale %g\nrect %d %d %d %d\nnoise_mad", ow, oh, K, P.fp.levels, P.g.scale, P.g.x0, P.g.y0, P.g.x1, P.g.y1);

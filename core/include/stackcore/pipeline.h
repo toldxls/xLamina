@@ -184,6 +184,7 @@ struct StackOptions {
     std::vector<std::string> outputs;  // which images to write / keep; empty = all
     bool cache_frames = true;          // keep the frames pinned in host memory between the passes (--cache 0: read every pass from disk)
     bool write_outputs = true;         // false: compute everything (and fill `result`) but write no TIFFs (the GUI's benchmark)
+    bool diagnostics = true;           // the raw maps beside the TIFFs (depth.f32, depth_smooth.f32, conf.f32, flat.f32); the GUI turns them off
     Hooks hooks;
     // results, filled when `result` is set
     struct Result {

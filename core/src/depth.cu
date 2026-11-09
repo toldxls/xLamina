@@ -593,6 +593,14 @@ DepthResult depth_from_volume(const float* d_V_in, void* d_Lv16, const float* d_
     // in the defocused background where the 1/4 map and the reference chose the near end (FINDINGS 34)
     float* trend = nullptr;
     k_curve_stats<<<blocks1(n), 256, 0, s>>>(V, (const __half*)d_Lv16, n, K, vmax, vmed, kmax, lmin, lmax, trend);
+    // progress for the front end: launches are asynchronous, so each report waits for the stream first (a handful of
+    // syncs against seconds of kernels)
+    auto report = [&](const std::string& what, double f) {
+        if (!p.progress) return;
+        CK(cudaStreamSynchronize(s));
+        p.progress(what.c_str(), f);
+    };
+    report("depth map: focus curves", 0.15);
 
     // spill zone h from the depth-res guide
     {
@@ -712,6 +720,7 @@ DepthResult depth_from_volume(const float* d_V_in, void* d_Lv16, const float* d_
         for (auto v : e) c += v & 1;
         R.end_fraction = (double)c / n;
     }
+    report("depth map: SGM", 0.45);
 
     // --- SGM, in horizontal bands when the path-sum volume does not fit beside the cost volume (at 1/2
     // resolution 163 frames are 4.9 GB each; FINDINGS 31). The bands overlap by `ov` rows: a path's cost is
@@ -762,12 +771,14 @@ DepthResult depth_from_volume(const float* d_V_in, void* d_Lv16, const float* d_
         pass(1, 0); pass(-1, 0); pass(0, 1); pass(0, -1);   // the prototype's order: x+, x-, y+, y-
         if (p.dirs == 8) { pass(1, 1); pass(-1, 1); pass(1, -1); pass(-1, -1); }   // (dy, dx) = (1,1), (1,-1), (-1,1), (-1,-1)
         k_argmin<<<blocks1((y1 - y0) * dw), 256, 0, s>>>(S + (size_t)(y0 - ya) * dw * K, (y1 - y0) * dw, K, d + (size_t)y0 * dw, p.end_frames);
+        if (bands > 1) report("depth map: SGM band " + std::to_string(b + 1) + " of " + std::to_string(bands), 0.45 + 0.4 * (b + 1) / bands);
     }
     CK(cudaStreamSynchronize(s));
     CK(cudaGetLastError());
     R.ms_sgm = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
     R.sgm_bands = bands;
     cudaFree(S);
+    report("depth map: upsampling", 0.88);
 
     // --- pixels without sharp detail within reach: the band beside sharp detail takes its depth (spread from the
     // confident pixels), beyond the band the quieter end of the stack; soft transitions. Sharp detail keeps the SGM.

@@ -1890,8 +1890,37 @@ background, blur 512, blend 64 / 0, the quiet end, refine window 5 / 15, B
 radius 32, 1/4 volume); the 11/07 set (ramp, dark reach, halo prior,
 aggregation) is gone, being within noise.
 
+## 45. Culling the wobble outliers fixed a doubled edge; the depth stage's silence (2026-11-08, evening)
+
+Travis dropped the flagged frames (Render > Drop flagged frames: the shift from
+the previous frame an outlier) from the 201-frame stack, 195 left, shooting
+with enough overlap that coverage is not in question. At 1:1 in the two-up
+viewer, H with and without them: **a prominent doubling of one crystal edge
+is gone with the deviants removed**, the rest within the Difference overlay's
+noise. The deviant frames carried a shifted copy of that edge into the
+fusion. §44's lesson applies: the wobble flags the frames whose *position*
+jumped; on this stack that is not the same as the frames that are *soft*
+(the in-exposure blur did not predict the step, |r| < 0.14). A per-frame
+sharpness flag from pass 1's focus energy would cull the soft frames directly;
+not built yet (Open items).
+
+The "hang on the depth stage" he saw at full resolution is the stage's
+silence, not a stall: timed with his settings (195 frames, Lanczos 8, nine
+outputs) the depth stage runs 4.1 s (noise floor, the 9 GB volume to the
+GPU, cost 2.0 s, SGM 0.4 s in five bands, post) while the progress bar sat
+at zero with one report at the start. 0.6.23 reports every step (noise
+floor, upload, focus curves, SGM per band, upsampling), moves the bar and
+the stage label under the view instead of the bottom of the Render column,
+drops the depth tab and the raw `.f32` dumps from GUI renders, and moves CB
+to the developer outputs (CBn, the same with the noise rule, is the better
+of the two on this stack). Headroom note: at full resolution 195 frames leave
+about 3 GB on the 3080 Ti; near 250 frames the volume will not fit and the
+engine retries at a quarter-resolution volume, a real stall and a softer B.
+
 ## Open items
 
+- **Per-frame sharpness flag** (§45): pass 1's focus energy per frame, next
+  to the wobble in the frame list, so soft frames can be culled directly.
 - **B: doubled plate edge / glow** (§25a): the C-style aggregation does not
   work on the normalised focus measure; needs rim rejection or ownership.
 - **C: stacked rim outlines inside bright plates** (§25): present at any C

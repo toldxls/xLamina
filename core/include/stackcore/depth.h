@@ -11,6 +11,8 @@
 //   3x3 median -> depth_s. conf = w upsampled.
 #pragma once
 
+#include <functional>
+
 #include <cuda_runtime.h>
 
 #include <cstdint>
@@ -68,6 +70,9 @@ struct DepthParams {
     // (the composition's flat blend, 0.6.18, is separate: --flat-blend 0 for the 0.6.15 B)
     int flat_end = 2;
     float flat_end_soft = 0.3f;
+    // progress for a front end (name, fraction of the depth stage), called after a sync at each step: the focus curves,
+    // the cost volume, each SGM band, the upsampling. Four seconds of silence at full resolution read as a hang
+    std::function<void(const char*, double)> progress;
 };
 
 struct DepthResult {

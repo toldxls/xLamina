@@ -49,14 +49,16 @@ static const char* kOutputHelp[] = {
     "Cn: noise-aware pyramid. C where the detail is above the noise, B elsewhere.",
     "A: focus-weighted average of all frames. Smooth, soft.",
     "B0: raw per-pixel argmax of the focus measure (unregularised B).",
-    "CB: pyramid, falling back to B where C's choice disagrees with the depth map.",
-    "CBn: CB with the noise-aware rule.",
+    "CB: pyramid, falling back to B where C's choice disagrees with the depth map (no noise rule: flat areas keep C's grain).",
+    "CBn: CB plus the noise rule: pyramid detail only where it is above the noise, B elsewhere. The better of the two on the\n"
+    "201-frame stack (Travis, 2026-11-08); CB moved to Tools > Developer outputs.",
     "Cd: pyramid locked to B's depth at the fine levels (against glints from other depths).",
     "Cg: pyramid with coarse levels from B (against glare from defocused highlights).",
     "Cg2: Cg with one more coarse level from B.",
     "H: luma from CBn, chroma from B."};
-// A and B0 are not in the Outputs list: Tools > Developer outputs (developer mode) ticks them (Travis, 2026-11-08)
-static bool isMenuOutput(int i) { return i == 3 || i == 4; }
+// A, B0 and CB are not in the Outputs list: Tools > Developer outputs (developer mode) ticks them (Travis, 2026-11-08;
+// CB since 0.6.23: CBn is the better of the two)
+static bool isMenuOutput(int i) { return i == 3 || i == 4 || i == 5; }
 static const int kMaxRecent = 8;
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
@@ -287,6 +289,22 @@ void MainWindow::buildUi() {
     tl->addStretch(1);
     cl->addWidget(topRow);
     cl->addWidget(split_, 1);
+    // the stage and its progress bar under the view (they hid at the bottom of the Render column: Travis, 2026-11-08)
+    QWidget* progRow = new QWidget;
+    QHBoxLayout* prl = new QHBoxLayout(progRow);
+    prl->setContentsMargins(6, 4, 6, 2);
+    prl->setSpacing(10);
+    stage_ = new QLabel("Open a folder of TIFF frames, choose the outputs, press Render.");
+    stage_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    progress_ = new QProgressBar;
+    progress_->setRange(0, 1000);
+    progress_->setValue(0);
+    progress_->setMinimumWidth(260);
+    progress_->setMaximumWidth(520);
+    progress_->setTextVisible(false);
+    prl->addWidget(stage_, 1);
+    prl->addWidget(progress_);
+    cl->addWidget(progRow);
     cl->addWidget(tabs_);
     setCentralWidget(centre);
     connect(tabs_, &QTabBar::currentChanged, this, &MainWindow::showOutput);
@@ -534,20 +552,14 @@ void MainWindow::buildUi() {
     pfl->addRow("", benchBtn);
     pl->addWidget(perf);
 
-    progress_ = new QProgressBar;
-    progress_->setRange(0, 1000);
-    progress_->setValue(0);
-    stage_ = new QLabel("Open a folder of TIFF frames, choose the outputs, press Render.");
-    stage_->setWordWrap(true);
-    pl->addWidget(stage_);
-    pl->addWidget(progress_);
     pl->addStretch(1);
     QScrollArea* scroll = new QScrollArea;
     scroll->setWidget(pw);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
-    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);   // a narrow dock scrolls instead of clipping the spin boxes
     params->setWidget(scroll);
+    params->setMinimumWidth(380);   // the form's fields collapsed to nothing when the window was made small (Travis, 2026-11-08)
     addDockWidget(Qt::RightDockWidgetArea, params);
 
     // ---- bottom: geometry + log
@@ -596,6 +608,7 @@ void MainWindow::loadSettings() {
     updateRecent();
     s.beginGroup("render");
     for (const char* n : kOutputs) outputs_[n]->setChecked(s.value(QString("out_%1").arg(n), outputs_[n]->isChecked()).toBool());
+    if (!s.contains("cbToMenu")) { outputs_["CB"]->setChecked(false); s.setValue("cbToMenu", true); }   // 0.6.23: CB left the list, once
     scale_->setCurrentIndex(s.value("scale", 0).toInt());
     ref_->setCurrentIndex(s.value("ref", 0).toInt());
     lockScale_->setChecked(s.value("lockScale", false).toBool());
@@ -985,7 +998,6 @@ void MainWindow::twoUp() {
             QString name = QString::fromStdString(n), tif = QDir(result_->outDir).filePath(name + ".tif");
             twoUp_->addImage(name, outputImage(name), "this render", QFileInfo::exists(tif) ? tif : QString());
         }
-        twoUp_->addImage("depth", outputImage("depth"), "this render");
     }
     for (auto it = compare_.begin(); it != compare_.end(); ++it) twoUp_->addImage(it.key(), it.value(), "comparison image");
     twoUp_->show();
@@ -1017,6 +1029,7 @@ void MainWindow::runSweep() {
     if (!buildJob(jo, false)) return;
     if (jobItems_.size() < 2) { QMessageBox::information(this, "xLamina", "A stack needs at least 2 ticked frames."); return; }
     jo.stack.outputs = {"B"};
+    jo.stack.diagnostics = false;
     QString base = outDir_->text().isEmpty() ? folder_ + "_stacker" : outDir_->text();
     SweepDialog dlg(jo.stack, base + "_sweep", this);
     if (dlg.exec() != QDialog::Accepted) return;
@@ -1054,7 +1067,7 @@ void MainWindow::rebuildTabs() {
     while (tabs_->count()) tabs_->removeTab(0);
     if (result_ && result_->rc == 0) {
         for (const auto& n : result_->result.names) tabs_->addTab(QString::fromStdString(n));
-        tabs_->addTab("depth");
+        // (the depth map is no longer a tab or a viewer entry: Travis, 2026-11-08; outputImage("depth") still renders it)
     }
     for (auto it = compare_.begin(); it != compare_.end(); ++it) {
         int t = tabs_->addTab(it.key());
@@ -1113,6 +1126,7 @@ bool MainWindow::buildJob(JobOptions& jo, bool interactive) {
         jo.stack.po.flat_blur_px = flatBlur_->value();
     }
     jo.stack.outputs = selectedOutputs();
+    jo.stack.diagnostics = false;   // no depth.f32 and friends in the output folder (Travis, 2026-11-08)
     jo.out = outDir_->text().isEmpty() ? std::string() : outDir_->text().toStdString();
     perfFromUi().apply(jo);
     if (interactive) {
