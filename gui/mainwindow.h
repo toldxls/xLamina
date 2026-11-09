@@ -31,6 +31,7 @@
 #include "imageview.h"
 #include "prefs.h"
 #include "sweepdialog.h"
+#include "hwmon.h"
 #include "updater.h"
 #include "worker.h"
 
@@ -164,6 +165,8 @@ private:
     QAction* autoUpdateAct_ = nullptr;
     QPointer<QDialog> updateDlg_;
     QPointer<QDialog> prefsDlg_;       // File > Preferences, built once
+    HwMonitor* hw_ = nullptr;          // the live hardware panel (bottom dock), raised when a render starts
+    QDockWidget* hwDock_ = nullptr;
     QGroupBox* perfGroup_ = nullptr;   // the hardware settings, built with the Render column, shown in Preferences
     bool updateManual_ = false;        // the running check came from the menu: report its result either way
 

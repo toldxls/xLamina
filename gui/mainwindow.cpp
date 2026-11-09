@@ -588,6 +588,15 @@ void MainWindow::buildUi() {
     lg->setWidget(log_);
     addDockWidget(Qt::BottomDockWidgetArea, lg);
     tabifyDockWidget(geo, lg);
+    // the live hardware panel (Travis, 2026-11-08: the Preferences line is a start-up snapshot and cannot show a run)
+    hwDock_ = new QDockWidget("Hardware", this);
+    hwDock_->setObjectName("hardware");
+    hwDock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetClosable);
+    hw_ = new HwMonitor(gpus_);
+    hw_->setPinnedProvider([this] { return worker_.cache()->bytes(); });
+    hwDock_->setWidget(hw_);
+    addDockWidget(Qt::BottomDockWidgetArea, hwDock_);
+    tabifyDockWidget(lg, hwDock_);
     geo->raise();
     resizeDocks({geo, lg}, {110, 110}, Qt::Vertical);
     resizeDocks({framesDock_, params}, {200, 330}, Qt::Horizontal);
@@ -595,7 +604,7 @@ void MainWindow::buildUi() {
     // the panel toggles in the View menu
     for (QMenu* m : menuBar()->findChildren<QMenu*>())
         if (m->title() == "&View")
-            for (QDockWidget* d : {framesDock_, params, geo, lg}) m->addAction(d->toggleViewAction());
+            for (QDockWidget* d : {framesDock_, params, geo, lg, hwDock_}) m->addAction(d->toggleViewAction());
 
     status_ = new QLabel("");
     statusBar()->addPermanentWidget(status_);
@@ -1065,6 +1074,7 @@ void MainWindow::runSweep() {
     stageText_ = "starting the sweep";
     elapsed_.start();
     tick_.start();
+    if (hwDock_) hwDock_->raise();   // the hardware panel to the front for the run
     liveItem_ = markedItem_ = nullptr;
     lastView_.invalidate();
     listTick_.start();
@@ -1175,6 +1185,7 @@ void MainWindow::render() {
     stageText_ = "starting";
     elapsed_.start();
     tick_.start();
+    if (hwDock_) hwDock_->raise();   // the hardware panel to the front for the run
     liveItem_ = markedItem_ = nullptr;
     lastView_.invalidate();
     listTick_.start();

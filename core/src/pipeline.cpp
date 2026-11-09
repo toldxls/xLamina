@@ -1020,6 +1020,7 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
             logf("depth: %.1f GB volume to the GPU in %.2f s\n", total_gb, since(tu));
             cudaFree(d_stage); cudaFree(d_stage16);
         }
+        stage("depth map: cost volume", 0.15);   // (a stall seen here is the host volume's release below or the GPU's allocations)
         if (release_volume) { P.V_all.release_async(); P.fm_all.release_async(); P.lum_all.release_async(); }
         DepthParams dp;
         dp.halo_prior = (float)so.halo_prior;

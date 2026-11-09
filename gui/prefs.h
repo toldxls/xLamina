@@ -3,6 +3,7 @@
 // QSettings store they all persist in (%APPDATA%\xLamina\xLamina.ini).
 #pragma once
 
+#include <QByteArray>
 #include <QList>
 #include <QSettings>
 #include <QString>
@@ -15,6 +16,7 @@ struct GpuInfo {
     quint64 memory = 0;                                      // bytes
     int sms = 0;
     int pcieGen = 0, pcieWidth = 0, pcieGenMax = 0, pcieWidthMax = 0;   // as negotiated / the card's maximum; 0 = unknown
+    QByteArray busId;                                        // PCI bus id ("0000:01:00.0"), for NVML's live readings
     QString label() const;                                   // "0: NVIDIA GeForce RTX 3080 Ti, 12 GB, PCIe 4 x8"
 };
 QList<GpuInfo> enumerateGpus();
