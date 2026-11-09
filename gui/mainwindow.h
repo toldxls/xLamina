@@ -63,6 +63,7 @@ private slots:
     void runSweep();       // the sweep dialog, then the worker renders the variants and the viewer opens on them
     void openOutputFolder();
     void benchmark();
+    void preferences();                        // File > Preferences: General, Performance, System
     void about();
     void checkForUpdates();                    // Help > Check for updates: the result in a box
     void showUpdate();                         // the dialog: what changed, Update and restart / Skip / Later
@@ -162,6 +163,8 @@ private:
     QAction* updateAct_ = nullptr;     // the button's place in the toolbar: a toolbar widget shows and hides through its action
     QAction* autoUpdateAct_ = nullptr;
     QPointer<QDialog> updateDlg_;
+    QPointer<QDialog> prefsDlg_;       // File > Preferences, built once
+    QGroupBox* perfGroup_ = nullptr;   // the hardware settings, built with the Render column, shown in Preferences
     bool updateManual_ = false;        // the running check came from the menu: report its result either way
 
     ImageView* view_ = nullptr;

@@ -25,6 +25,7 @@
 #include <QScrollArea>
 #include <QSplitter>
 #include <QStatusBar>
+#include <QTabWidget>
 #include <QDateTime>
 #include <QTextBrowser>
 #include <QToolBar>
@@ -123,6 +124,9 @@ void MainWindow::buildMenus() {
     QAction* open = file->addAction("&Open folder…", QKeySequence::Open, this, &MainWindow::chooseFolder);
     open->setStatusTip("Open a folder of TIFF frames (or drop one onto the window).");
     recentMenu_ = file->addMenu("Open &recent");
+    file->addSeparator();
+    QAction* prefs = file->addAction("&Preferences…", QKeySequence("Ctrl+,"), this, &MainWindow::preferences);
+    prefs->setStatusTip("Theme, updates, developer controls, the hardware settings, and this machine's details.");
     file->addSeparator();
     QAction* cmp = file->addAction("Add &comparison image…", QKeySequence("Ctrl+I"), this, &MainWindow::addComparison);
     cmp->setStatusTip("Load another stacker's output (TIFF, JPEG, PNG) as a tab, to flip against xLamina's at the same zoom.");
@@ -510,8 +514,10 @@ void MainWindow::buildUi() {
     al->addRow("", resetAdv);
     pl->addWidget(advanced_);
 
-    // ---- performance: what the benchmark tunes
-    QGroupBox* perf = new QGroupBox("Performance");
+    // ---- performance: what the benchmark tunes. Machine settings, not render settings: the group lives in
+    // File > Preferences (Travis, 2026-11-08), built here because perfToUi / perfFromUi read its widgets
+    perfGroup_ = new QGroupBox("Performance");
+    QGroupBox* perf = perfGroup_;
     perf->setToolTip("Hardware settings. They change the speed, never the result: B and C are bit-identical across all of them.\n"
                      "Tools > Benchmark tries them and applies the fastest.");
     QFormLayout* pfl = new QFormLayout(perf);
@@ -552,7 +558,7 @@ void MainWindow::buildUi() {
     QPushButton* benchBtn = new QPushButton("Benchmark…");
     connect(benchBtn, &QPushButton::clicked, this, &MainWindow::benchmark);
     pfl->addRow("", benchBtn);
-    pl->addWidget(perf);
+    // (not added to the Render column: the Preferences dialog takes the group)
 
     pl->addStretch(1);
     QScrollArea* scroll = new QScrollArea;
@@ -1634,9 +1640,86 @@ void MainWindow::selfUpdate() {
     updater_.check();
 }
 
-void MainWindow::about() {
+// File > Preferences: what is not a render setting. General (theme, updates, developer controls), Performance (the
+// hardware group, moved out of the Render column) and System (this machine, read-only; it was in About, where the
+// long lines wrapped). Built once; the Performance group is reparented into it.
+void MainWindow::preferences() {
+    if (prefsDlg_) { prefsDlg_->show(); prefsDlg_->raise(); prefsDlg_->activateWindow(); return; }
+    QDialog* d = new QDialog(this);
+    prefsDlg_ = d;
+    d->setWindowTitle("Preferences");
+    d->resize(640, 460);
+    QVBoxLayout* l = new QVBoxLayout(d);
+    QTabWidget* tabs = new QTabWidget;
+    l->addWidget(tabs, 1);
+
+    // ---- General
+    QWidget* gen = new QWidget;
+    QFormLayout* gf = new QFormLayout(gen);
+    gf->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    QComboBox* theme = new QComboBox;
+    theme->addItem("Dark", "dark");
+    theme->addItem("Light", "light");
+    theme->addItem("System (after restart)", "system");
+    theme->setCurrentIndex(std::max(0, theme->findData(theme_)));
+    connect(theme, &QComboBox::currentIndexChanged, this, [this, theme](int i) { setTheme(theme->itemData(i).toString()); });
+    gf->addRow("Theme", theme);
+    QCheckBox* upd = new QCheckBox("Check for updates when xLamina starts");
+    upd->setChecked(autoUpdateAct_->isChecked());
+    connect(upd, &QCheckBox::toggled, autoUpdateAct_, &QAction::setChecked);
+    connect(autoUpdateAct_, &QAction::toggled, upd, &QCheckBox::setChecked);
+    gf->addRow("Updates", upd);
+    QPushButton* chk = new QPushButton("Check now…");
+    connect(chk, &QPushButton::clicked, this, &MainWindow::checkForUpdates);
+    gf->addRow("", chk);
+    QCheckBox* dev = new QCheckBox("Developer controls: the Advanced group, the C and B radii, the outputs beyond B and C");
+    dev->setChecked(devAct_->isChecked());
+    connect(dev, &QCheckBox::toggled, devAct_, &QAction::setChecked);
+    connect(devAct_, &QAction::toggled, dev, &QCheckBox::setChecked);
+    gf->addRow("Developer", dev);
+    QPushButton* reset = new QPushButton("Reset all settings to the defaults");
+    connect(reset, &QPushButton::clicked, this, &MainWindow::resetSettings);
+    gf->addRow("", reset);
+    tabs->addTab(gen, "General");
+
+    // ---- Performance: the group built with the Render column, moved here
+    QWidget* perfTab = new QWidget;
+    QVBoxLayout* pv = new QVBoxLayout(perfTab);
+    QLabel* pnote = new QLabel("Hardware settings. They change the speed, never the result: B and C are bit-identical across all of them. "
+                               "Benchmark… tries them and applies the fastest.");
+    pnote->setWordWrap(true);
+    pv->addWidget(pnote);
+    pv->addWidget(perfGroup_);
+    pv->addStretch(1);
+    tabs->addTab(perfTab, "Performance");
+
+    // ---- System: read-only
+    QWidget* sys = new QWidget;
+    QFormLayout* sf = new QFormLayout(sys);
+    sf->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    auto ro = [](const QString& t) {
+        QLabel* lb = new QLabel(t);
+        lb->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        lb->setWordWrap(true);
+        return lb;
+    };
+    sf->addRow("xLamina", ro(XLAMINA_VERSION));
     QStringList g;
     for (const GpuInfo& gi : gpus_) g << gi.label();
+    sf->addRow("GPUs", ro(g.isEmpty() ? "no CUDA GPU found" : g.join("\n")));
+    sf->addRow("Host", ro(hostSummary()));
+    sf->addRow("Qt", ro(qVersion()));
+    sf->addRow("Program folder", ro(QDir::toNativeSeparators(QCoreApplication::applicationDirPath())));
+    sf->addRow("Settings file", ro(QDir::toNativeSeparators(appSettings().fileName())));
+    tabs->addTab(sys, "System");
+
+    QDialogButtonBox* bb = new QDialogButtonBox(QDialogButtonBox::Close);
+    connect(bb, &QDialogButtonBox::rejected, d, &QDialog::hide);
+    l->addWidget(bb);
+    d->show();
+}
+
+void MainWindow::about() {
     QMessageBox box(this);
     box.setWindowTitle("About xLamina");
     box.setIconPixmap(QPixmap(":/xlamina-128.png"));
@@ -1646,10 +1729,8 @@ void MainWindow::about() {
                         "<a href=\"https://github.com/toldxls/xLamina\">github.com/toldxls/xLamina</a></p>"
                         "<p>Travis A. Olds, Ph.D.<br>"
                         "<a href=\"https://www.mindat.org/user-8894.html\">mindat.org/user-8894.html</a></p>"
-                        "<p><b>GPUs</b><br>%2</p><p>%3<br>Qt %4</p>"
-                        "<p>Settings file: %5</p>")
-                    .arg(XLAMINA_VERSION, g.isEmpty() ? "none found" : g.join("<br>"), hostSummary(), qVersion(),
-                         QDir::toNativeSeparators(appSettings().fileName())));
+                        "<p style=\"color:#888\">This machine's details: File &gt; Preferences &gt; System.</p>")
+                    .arg(XLAMINA_VERSION));
     box.exec();
 }
 
