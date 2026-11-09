@@ -4,6 +4,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QCloseEvent>
+#include <QCollator>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -43,7 +44,8 @@
 using namespace stackcore;
 
 static const double kDeg = 180.0 / 3.14159265358979323846;
-static const char* kOutputs[] = {"B", "C", "Cn", "A", "B0", "CB", "CBn", "Cd", "Cg", "Cg2", "H"};
+static const char* kOutputs[] = {"B", "C", "Cn", "A", "B0", "CB", "CBn", "Cx", "Cd", "Cg", "Cg2", "H"};
+static const int kNumOutputs = 12;
 static const char* kOutputHelp[] = {
     "B: depth map. Each pixel from the frame where it is sharpest (regularised, refined, soft edges). Cleanest tones.",
     "C: Laplacian pyramid. Per-detail selection across all frames. Most detail; see Smoothing for its noise.",
@@ -53,6 +55,8 @@ static const char* kOutputHelp[] = {
     "CB: pyramid, falling back to B where C's choice disagrees with the depth map (no noise rule: flat areas keep C's grain).",
     "CBn: CB plus the noise rule: pyramid detail only where it is above the noise, B elsewhere. The better of the two on the\n"
     "201-frame stack (Travis, 2026-11-08); CB moved to Tools > Developer outputs.",
+    "Cx: CBn with the finer level's support in place of the dominance test: where C's choice disagrees with the depth map it\n"
+    "stays only if the level below chose the same frame. Against the glow of defocused highlights (FINDINGS 50).",
     "Cd: pyramid locked to B's depth at the fine levels (against glints from other depths).",
     "Cg: pyramid with coarse levels from B (against glare from defocused highlights).",
     "Cg2: Cg with one more coarse level from B.",
@@ -172,9 +176,21 @@ void MainWindow::buildMenus() {
     cancelAct_ = render->addAction("&Cancel", QKeySequence("Esc"), this, &MainWindow::cancel);
     cancelAct_->setEnabled(false);
     render->addSeparator();
-    dropFlagged_ = render->addAction("&Drop flagged frames", this, &MainWindow::dropFlagged);
-    dropFlagged_->setEnabled(false);
-    dropFlagged_->setToolTip("Untick the frames whose wobble (shift from the previous frame) is an outlier; then Render again.");
+    dropShifted_ = render->addAction("Drop s&hifted frames", this, &MainWindow::dropShifted);
+    dropShifted_->setEnabled(false);
+    dropShifted_->setToolTip("Untick the frames in red: the shift from the previous frame is an outlier (the stage moved); then Render again.");
+    dropSoft_ = render->addAction("Drop s&oft frames", this, &MainWindow::dropSoft);
+    dropSoft_->setEnabled(false);
+    dropSoft_->setToolTip("Untick the frames in amber: the focus energy fell under the neighbours' (blurred during the exposure); then Render again.");
+    tickAll_ = render->addAction("&Tick all frames", this, &MainWindow::tickAllFrames);
+    tickAll_->setToolTip("Tick every frame in the list again (after dropping frames, or to start over).");
+    render->addSeparator();
+    // the list is the stack order (Travis, 2026-11-09: "more options for sorting frames. By time taken, alphabetical")
+    sortName_ = render->addAction("Sort frames by &name", this, [this] { sortFrames(false); });
+    sortName_->setToolTip("Order the list, and so the stack, by file name (numbers in order: IMG_9 before IMG_10).");
+    sortTime_ = render->addAction("Sort frames by time ta&ken", this, [this] { sortFrames(true); });
+    sortTime_->setToolTip("Order the list by the capture time in each file's EXIF (DateTimeOriginal with its sub-seconds).\n"
+                          "A file without one (a JPEG, or a TIFF saved without EXIF) takes its modification time.");
     render->addSeparator();
     render->addAction("Reset settings to &defaults", this, &MainWindow::resetSettings);
 
@@ -262,7 +278,9 @@ void MainWindow::buildUi() {
     tb->addAction("Fit", [this] { view_->fit(); })->setToolTip("Fit the image in the view (Ctrl+0, or double-click)");
     tb->addAction("1:1", [this] { view_->actualSize(); })->setToolTip("One image pixel per screen pixel (Ctrl+1)");
     tb->addSeparator();
-    tb->addAction(dropFlagged_);
+    tb->addAction(dropShifted_);
+    tb->addAction(dropSoft_);
+    tb->addAction(tickAll_);
     tb->addSeparator();
     tb->addAction("Benchmark…", this, &MainWindow::benchmark);
     // the Update button, at the right end, shown only when a newer release exists
@@ -375,7 +393,7 @@ void MainWindow::buildUi() {
     QGroupBox* og = new QGroupBox("Outputs");
     QGridLayout* ol = new QGridLayout(og);
     int pos = 0;
-    for (int i = 0; i < 11; ++i) {
+    for (int i = 0; i < kNumOutputs; ++i) {
         QCheckBox* cb = new QCheckBox(kOutputs[i], og);
         cb->setToolTip(kOutputHelp[i]);
         cb->setChecked(i < 2);   // B and C; the rest are developer outputs (View > Developer controls)
@@ -407,6 +425,21 @@ void MainWindow::buildUi() {
     lockScale_ = new QCheckBox("Lock scale (telecentric optics)");
     lockScale_->setToolTip("Apply no scale change between frames; use for telecentric objectives.");
     fl->addRow("", lockScale_);
+    // the rolling shutter's two corrections (FINDINGS 51; Travis, 2026-11-09: "most of my shots suffer from rolling shutter
+    // effects, warping and brightness banding"). Both are measured by every alignment and shown in the frame list; these
+    // put the measurements into the warps. Off by default until judged at 1:1.
+    fixRs_ = new QCheckBox("Undo rolling-shutter warping");
+    fixRs_->setToolTip("The alignment solves each frame's displacement per band of sensor rows against its neighbours (the list's \"warp\" value).\n"
+                       "Ticked, every warp of the frame moves its rows back by that displacement, so detail the sensor read while the stage\n"
+                       "still vibrated lands where the rest of the stack has it instead of a few pixels off (a doubled edge where B changes frame).\n"
+                       "On the 210-frame stack the median frame is warped 2.4 px band to band. Saved files carry \"_rs\" in the name.");
+    fl->addRow("", fixRs_);
+    fixBanding_ = new QCheckBox("Undo LED banding");
+    fixBanding_->setToolTip("The LED's flicker, read out line by line, leaves a brightness ripple across each frame's rows (the list's \"band\" value,\n"
+                            "about 3 % peak-to-peak and 6 cycles per frame on the 210-frame stack). Ticked, every warp of the frame divides its rows\n"
+                            "by the fitted ripple, so neighbouring regions taken from different frames meet at the same brightness.\n"
+                            "Saved files carry \"_band\" in the name.");
+    fl->addRow("", fixBanding_);
     liveRes_ = new QComboBox;
     liveRes_->addItem("Off (fastest)", 0);
     liveRes_->addItem("Low (1/12)", 12);
@@ -428,6 +461,19 @@ void MainWindow::buildUi() {
                         "1 % more fine detail for 0.3 s more per render; Lanczos 8 about 3 % more for 3.3 s more (163 frames, FINDINGS 39).\n"
                         "Bilinear is softest and fastest (8 % less). Changing it changes every output.");
     // (not in the Render column: File > Preferences > General holds it, Travis, 2026-11-09; the setting is kept as before)
+    // the soft-frame cutoff (FINDINGS 49; Travis, 2026-11-09: frames near 0.9 with the action greyed out: "what's the cutoff?")
+    softCutoff_ = new QDoubleSpinBox;
+    softCutoff_->setRange(0.50, 0.99);
+    softCutoff_->setSingleStep(0.01);
+    softCutoff_->setDecimals(2);
+    softCutoff_->setValue(0.90);
+    softCutoff_->setToolTip("A frame is soft (amber, Render > Drop soft frames) when its focus energy is under this share of its neighbours'\n"
+                            "(the median of the five frames around it; the list shows the share as \"sharp 0.97\"). 0.90 by default: a frame\n"
+                            "blurred by movement during its exposure loses a tenth or more; the frame-to-frame scatter of a steady stack is\n"
+                            "under 0.05. Changing it re-flags the last render's frames at once, no render needed.");
+    connect(softCutoff_, &QDoubleSpinBox::valueChanged, this, [this](double) {
+        if (result_ && (int)result_->align.T.size() == jobItems_.size()) labelWobble(result_->align, &result_->result);
+    });
     mainForm_ = fl;
     smoothing_ = new QDoubleSpinBox;
     smoothing_->setRange(0, 6);
@@ -660,8 +706,11 @@ void MainWindow::loadSettings() {
     scale_->setCurrentIndex(s.value("scale", 0).toInt());
     ref_->setCurrentIndex(s.value("ref", 0).toInt());
     lockScale_->setChecked(s.value("lockScale", false).toBool());
+    fixRs_->setChecked(s.value("fixRs", false).toBool());
+    fixBanding_->setChecked(s.value("fixBanding", false).toBool());
     liveRes_->setCurrentIndex(s.value("liveRes", 2).toInt());
     interp_->setCurrentIndex(std::clamp(s.value("interp", 1).toInt(), 0, interp_->count() - 1));   // an odd ini value: never a blank combo
+    softCutoff_->setValue(s.value("softCutoff", 0.9).toDouble());
     smoothing_->setValue(s.value("smoothing", 2.0).toDouble());
     cradius_->setValue(s.value("cradius", 32.0).toDouble());
     bradius_->setValue(s.value("bradius", 0.0).toDouble());
@@ -701,8 +750,11 @@ void MainWindow::saveSettings() {
     s.setValue("scale", scale_->currentIndex());
     s.setValue("ref", ref_->currentIndex());
     s.setValue("lockScale", lockScale_->isChecked());
+    s.setValue("fixRs", fixRs_->isChecked());
+    s.setValue("fixBanding", fixBanding_->isChecked());
     s.setValue("liveRes", liveRes_->currentIndex());
     s.setValue("interp", interp_->currentIndex());
+    s.setValue("softCutoff", softCutoff_->value());
     s.setValue("smoothing", smoothing_->value());
     s.setValue("cradius", cradius_->value());
     s.setValue("bradius", bradius_->value());
@@ -728,12 +780,15 @@ void MainWindow::saveSettings() {
 
 void MainWindow::resetSettings() {
     if (QMessageBox::question(this, "xLamina", "Put every render, advanced and performance setting back to its default?") != QMessageBox::Yes) return;
-    for (int i = 0; i < 11; ++i) outputs_[kOutputs[i]]->setChecked(i < 2);
+    for (int i = 0; i < kNumOutputs; ++i) outputs_[kOutputs[i]]->setChecked(i < 2);
     scale_->setCurrentIndex(0);
     ref_->setCurrentIndex(0);
     lockScale_->setChecked(false);
+    fixRs_->setChecked(false);
+    fixBanding_->setChecked(false);
     liveRes_->setCurrentIndex(2);
     interp_->setCurrentIndex(1);
+    softCutoff_->setValue(0.9);
     smoothing_->setValue(2);
     cradius_->setValue(32);
     bradius_->setValue(0);
@@ -767,13 +822,13 @@ void MainWindow::setDeveloper(bool on) {
     if (devAct_ && devAct_->isChecked() != on) { devAct_->blockSignals(true); devAct_->setChecked(on); devAct_->blockSignals(false); }
     if (advanced_) advanced_->setVisible(on);
     if (mainForm_) { mainForm_->setRowVisible(cradius_, on); mainForm_->setRowVisible(bradius_, on); }
-    for (int i = 2; i < 11; ++i) if (!isMenuOutput(i)) outputs_[kOutputs[i]]->setVisible(on);   // A, B0 stay hidden boxes
+    for (int i = 2; i < kNumOutputs; ++i) if (!isMenuOutput(i)) outputs_[kOutputs[i]]->setVisible(on);   // A, B0 stay hidden boxes
     if (devOutMenu_) devOutMenu_->menuAction()->setVisible(on);
 }
 
 std::vector<std::string> MainWindow::selectedOutputs() const {
     std::vector<std::string> out;
-    for (int i = 0; i < 11; ++i)
+    for (int i = 0; i < kNumOutputs; ++i)
         if (outputs_[kOutputs[i]]->isChecked() && (developer_ || i < 2)) out.push_back(kOutputs[i]);
     return out;
 }
@@ -830,9 +885,12 @@ void MainWindow::openFolder(const QString& dir) {
     thumbsDone_.clear();
     folder_ = dir;
     frames_.clear();
+    frameTimes_.clear();
     jobItems_.clear();
-    flagged_.clear();
-    dropFlagged_->setEnabled(false);
+    shifted_.clear();
+    soft_.clear();
+    dropShifted_->setEnabled(false);
+    dropSoft_->setEnabled(false);
     frameList_->clear();
     liveItem_ = markedItem_ = nullptr;   // the rows they pointed at are gone
     liveView_->hide();
@@ -858,6 +916,7 @@ void MainWindow::openFolder(const QString& dir) {
         it->setSizeHint(QSize(0, frameList_->iconSize().height() + 6));   // the same for every row (uniform sizes)
         if (ok) {
             frames_ << d.filePath(files[i]);
+            frameTimes_ << QString::fromStdString(infos[i].datetime);
             it->setIcon(blank);   // holds the row height until the thumbnail arrives
             it->setFlags(it->flags() | Qt::ItemIsUserCheckable);
             it->setCheckState(Qt::Checked);
@@ -948,9 +1007,13 @@ void MainWindow::frameMenu(const QPoint& pos) {
     QAction* tickAll = menu.addAction("Tick all frames");
     QAction* untickAbove = menu.addAction("Untick the frames above this one");
     QAction* untickBelow = menu.addAction("Untick the frames below this one");
+    menu.addSeparator();
+    QAction* byName = menu.addAction("Sort by name");
+    QAction* byTime = menu.addAction("Sort by time taken");
     QAction* chosen = menu.exec(frameList_->viewport()->mapToGlobal(pos));
     if (!chosen) return;
     int row = frameList_->row(it);
+    if (chosen == byName || chosen == byTime) { sortFrames(chosen == byTime); return; }
     if (chosen == again) {
         QListWidgetItem* c = new QListWidgetItem(QFileInfo(frames_[idx]).fileName() + "  (again)");
         c->setSizeHint(it->sizeHint());
@@ -1173,15 +1236,20 @@ bool MainWindow::buildJob(JobOptions& jo, bool interactive) {
     }
     jo.align.ref_rule = ref_->currentIndex() == 0 ? "middle" : ref_->currentIndex() == 1 ? "first" : "last";
     jo.align.lock_scale = lockScale_->isChecked();
+    jo.stack.fix_rs = fixRs_->isChecked();
+    jo.stack.fix_banding = fixBanding_->isChecked();
     if (fov_->value() > 0) jo.align.um_per_px = -fov_->value();
     jo.stack.po.g.scale = scale_->currentIndex() == 0 ? 1.0 : 0.5;
     jo.stack.po.g.interp = interp_->currentIndex();
+    jo.stack.soft_cutoff = softCutoff_->value();
     jo.stack.c_smoothing = smoothing_->value();
     jo.stack.po.c_radius_px = cradius_->value();
     jo.stack.po.b_radius_px = bradius_->value();
     // the settings that name the saved files (Travis, 2026-11-08): interpolation, smoothing, C and B radii
     jobTag_ = QString("%1_s%2_c%3_b%4").arg(interp_->currentText().toLower().remove(' ')).arg(smoothing_->value(), 0, 'g', 2)
                   .arg((int)cradius_->value()).arg((int)bradius_->value());
+    if (fixRs_->isChecked()) jobTag_ += "_rs";             // the rolling-shutter corrections (FINDINGS 51) tell renders apart
+    if (fixBanding_->isChecked()) jobTag_ += "_band";
     if (advanced_->isChecked()) {
         jo.stack.po.depth_fraction = depthRes_->currentData().toDouble();
         jo.stack.po.radius_px = focusRadius_->value();
@@ -1341,10 +1409,17 @@ void MainWindow::setStatusGeometry(const JobResultData& d) {
 
 // Per-frame wobble: each frame's shift (and scale, rotation) relative to the previous
 // frame, from the alignment. Steps far from the median are flagged as outliers.
-void MainWindow::labelWobble(const stackcore::AlignOut& A) {
-    flagged_.clear();
+// Per-frame sharpness (FINDINGS 49): pass 1's focus energy against the four nearest frames' (frame_sharpness);
+// a frame blurred during its exposure is flagged soft. Render > Drop shifted frames / Drop soft frames untick each kind.
+void MainWindow::labelWobble(const stackcore::AlignOut& A, const stackcore::StackOptions::Result* R) {
+    shifted_.clear();
+    soft_.clear();
     int n = (int)A.T.size();
     if (n != jobItems_.size() || n < 2) return;
+    stackcore::FrameSharpness sharp;
+    if (R && (int)R->frame_energy.size() == n) sharp = stackcore::frame_sharpness(R->frame_energy, softCutoff_->value());
+    const bool haveSharp = sharp.threshold > 0;
+    const bool haveRs = A.rs_bands > 0 && (int)A.rs_px.size() == n, haveBand = (int)A.band_pct.size() == n;
     QVector<double> step(n, 0.0), sstep(n, 0.0), rstep(n, 0.0);
     for (int k = 1; k < n; ++k) {
         const Similarity &a = A.T[k - 1], &b = A.T[k];
@@ -1364,35 +1439,125 @@ void MainWindow::labelWobble(const stackcore::AlignOut& A) {
     double thr = med + std::max(4 * mad, 0.5);
     double worst = 0;
     int worstk = -1;
+    int nWobble = 0, softest = -1;
     for (int k = 0; k < n; ++k) {
         QListWidgetItem* it = jobItems_[k];
         QString name = QFileInfo(frames_[it->data(Qt::UserRole).toInt()]).fileName();
+        // the sharpness: the ratio to the neighbours (1.00 = as expected), shown on every row that has one
+        QString sharpTxt;
+        const bool hasRatio = haveSharp && sharp.ratio[k] > 0;
+        const bool soft = hasRatio && sharp.soft[k];
+        if (hasRatio) sharpTxt = QString("  sharp %1").arg(sharp.ratio[k], 0, 'f', 2);
+        // the rolling shutter's two marks (FINDINGS 51): the frame's band-to-band displacement and its flicker banding
+        QString rsTxt;
+        if (haveRs) rsTxt += QString("warp %1 px").arg(A.rs_px[k], 0, 'f', 1);
+        if (haveBand) rsTxt += QString("%1band %2 %").arg(rsTxt.isEmpty() ? "" : "  ").arg(A.band_pct[k], 0, 'f', 1);
+        if (!rsTxt.isEmpty()) rsTxt = "\n" + rsTxt;
         if (k == 0) {
-            it->setText(name + "\nfirst frame");
+            it->setText(name + "\nfirst frame" + sharpTxt + rsTxt);
         } else {
-            it->setText(QString("%1\nΔ %2 px  %3 %").arg(name).arg(step[k], 0, 'f', 2).arg(sstep[k], 0, 'f', 3));
+            it->setText(QString("%1\nΔ %2 px  %3 %%4%5").arg(name).arg(step[k], 0, 'f', 2).arg(sstep[k], 0, 'f', 3).arg(sharpTxt).arg(rsTxt));
         }
         bool flag = k > 0 && step[k] > thr;
-        it->setForeground(flag ? QBrush(QColor(230, 80, 80)) : QBrush());
-        it->setToolTip(QString("To the reference: shift (%1, %2) px, scale %3, rotation %4°\n"
-                               "From the previous frame: %5 px, %6 %, %7°%8")
-                           .arg(A.T[k].tx, 0, 'f', 2).arg(A.T[k].ty, 0, 'f', 2).arg(std::hypot(A.T[k].zr, A.T[k].zi), 0, 'f', 5)
-                           .arg(std::atan2(A.T[k].zi, A.T[k].zr) * kDeg, 0, 'f', 4)
-                           .arg(step[k], 0, 'f', 3).arg(sstep[k], 0, 'f', 4).arg(rstep[k], 0, 'f', 4)
-                           .arg(flag ? QString("\nFLAGGED: above %1 px (median %2 px)").arg(thr, 0, 'f', 2).arg(med, 0, 'f', 2) : ""));
-        if (flag) flagged_ << it;
+        // red = the position jumped (wobble), amber = blurred (soft); both when both
+        it->setForeground(flag ? QBrush(QColor(230, 80, 80)) : soft ? QBrush(QColor(235, 160, 40)) : QBrush());
+        QString tip = QString("To the reference: shift (%1, %2) px, scale %3, rotation %4°\n"
+                              "From the previous frame: %5 px, %6 %, %7°%8")
+                          .arg(A.T[k].tx, 0, 'f', 2).arg(A.T[k].ty, 0, 'f', 2).arg(std::hypot(A.T[k].zr, A.T[k].zi), 0, 'f', 5)
+                          .arg(std::atan2(A.T[k].zi, A.T[k].zr) * kDeg, 0, 'f', 4)
+                          .arg(step[k], 0, 'f', 3).arg(sstep[k], 0, 'f', 4).arg(rstep[k], 0, 'f', 4)
+                          .arg(flag ? QString("\nFLAGGED: above %1 px (median %2 px)").arg(thr, 0, 'f', 2).arg(med, 0, 'f', 2) : "");
+        if (hasRatio) {
+            tip += QString("\nFocus energy %1 % of the sharpest frame's, %2 of the neighbours' (soft below %3)")
+                       .arg(100.0 * sharp.energy[k] / sharp.peak, 0, 'f', 1).arg(sharp.ratio[k], 0, 'f', 3).arg(sharp.threshold, 0, 'f', 3);
+            if (soft) tip += "\nSOFT: blurred against its neighbours (movement during the exposure)";
+        }
+        if (haveRs) {
+            QString bands;
+            for (int b = 0; b < A.rs_bands; ++b)
+                bands += QString("%1(%2, %3)").arg(b ? " " : "").arg(A.rs_dx[(size_t)k * A.rs_bands + b], 0, 'f', 1).arg(A.rs_dy[(size_t)k * A.rs_bands + b], 0, 'f', 1);
+            tip += QString("\nRolling shutter: displacement per row band, top to bottom, px: %1\n  band-to-band spread %2 px (stack median %3 px)")
+                       .arg(bands).arg(A.rs_px[k], 0, 'f', 2).arg(A.rs_median_px, 0, 'f', 2);
+        }
+        if (haveBand)
+            tip += QString("\nBrightness banding: LED flicker %1 % peak-to-peak across the rows (stack median %2 %, strongest period %3 rows)")
+                       .arg(A.band_pct[k], 0, 'f', 2).arg(A.band_median_pct, 0, 'f', 2).arg(A.band_peak_cycles > 0 ? A.H / A.band_peak_cycles : 0);
+        it->setToolTip(tip);
+        if (flag) ++nWobble;
+        if (flag) shifted_ << it;
+        if (soft) soft_ << it;
         if (step[k] > worst) { worst = step[k]; worstk = it->data(Qt::UserRole).toInt(); }
+        if (soft && (softest < 0 || sharp.ratio[k] < sharp.ratio[softest])) softest = k;
     }
     wobble_ = QString("wobble: median step %1 px, largest %2 px (%3), %4 flagged")
-                  .arg(med, 0, 'f', 2).arg(worst, 0, 'f', 2).arg(worstk >= 0 ? QFileInfo(frames_[worstk]).fileName() : "-").arg(flagged_.size());
-    dropFlagged_->setEnabled(!flagged_.isEmpty());
+                  .arg(med, 0, 'f', 2).arg(worst, 0, 'f', 2).arg(worstk >= 0 ? QFileInfo(frames_[worstk]).fileName() : "-").arg(nWobble);
+    if (haveSharp) {
+        wobble_ += QString("; sharpness: %1 soft frame%2 (focus energy under %3 of the neighbours')")
+                       .arg(sharp.n_soft).arg(sharp.n_soft == 1 ? "" : "s").arg(sharp.threshold, 0, 'f', 2);
+        if (softest >= 0)
+            wobble_ += QString(", softest %1 at %2").arg(QFileInfo(frames_[jobItems_[softest]->data(Qt::UserRole).toInt()]).fileName()).arg(sharp.ratio[softest], 0, 'f', 2);
+    }
+    if (haveRs) wobble_ += QString("; rolling shutter: band-to-band displacement median %1 px").arg(A.rs_median_px, 0, 'f', 2);
+    if (haveBand) wobble_ += QString("; banding: flicker median %1 %, period %2 rows").arg(A.band_median_pct, 0, 'f', 2).arg(A.band_peak_cycles > 0 ? A.H / A.band_peak_cycles : 0);
+    dropShifted_->setEnabled(!shifted_.isEmpty());
+    dropSoft_->setEnabled(!soft_.isEmpty());
 }
 
-void MainWindow::dropFlagged() {
-    for (QListWidgetItem* it : flagged_) it->setCheckState(Qt::Unchecked);
-    statusBar()->showMessage(QString("%1 frame%2 unticked; press Render to stack without them.").arg(flagged_.size()).arg(flagged_.size() == 1 ? "" : "s"));
-    flagged_.clear();
-    dropFlagged_->setEnabled(false);
+static void untick(QList<QListWidgetItem*>& rows, QAction* act, QStatusBar* bar, const char* what) {
+    for (QListWidgetItem* it : rows) it->setCheckState(Qt::Unchecked);
+    bar->showMessage(QString("%1 %2 frame%3 unticked; press Render to stack without them.").arg(rows.size()).arg(what).arg(rows.size() == 1 ? "" : "s"));
+    rows.clear();
+    act->setEnabled(false);
+}
+
+void MainWindow::dropShifted() { untick(shifted_, dropShifted_, statusBar(), "shifted"); }
+void MainWindow::dropSoft() { untick(soft_, dropSoft_, statusBar(), "soft"); }
+
+void MainWindow::tickAllFrames() {
+    if (worker_.running()) { statusBar()->showMessage("A render is running; the list changes when it has finished.", 4000); return; }
+    int n = 0;
+    for (int r = 0; r < frameList_->count(); ++r) {
+        QListWidgetItem* o = frameList_->item(r);
+        if (o->data(Qt::UserRole).toInt() < 0) continue;
+        if (o->checkState() != Qt::Checked) { o->setCheckState(Qt::Checked); ++n; }
+    }
+    statusBar()->showMessage(n ? QString("%1 frame%2 ticked again; every frame is in the next render.").arg(n).arg(n == 1 ? "" : "s")
+                               : QString("Every frame was ticked already."), 4000);
+}
+
+// The list is the stack order: sort its rows by file name (natural order, so IMG_9 precedes IMG_10) or by the capture
+// time (the EXIF DateTimeOriginal read at folder open, the file's modification time for a frame without one). Rows of
+// files left out of the stack (grey) go to the end; a second copy of a frame sorts with its original; ties keep the
+// list's order; the selected row stays selected.
+void MainWindow::sortFrames(bool byTime) {
+    if (worker_.running()) { statusBar()->showMessage("A render is running; the list changes when it has finished.", 4000); return; }
+    if (frameList_->count() < 2) return;
+    QCollator coll;
+    coll.setNumericMode(true);
+    coll.setCaseSensitivity(Qt::CaseInsensitive);
+    int noTime = 0;
+    QStringList key(frames_.size());
+    for (int i = 0; i < frames_.size(); ++i) {
+        if (byTime) {
+            key[i] = frameTimes_.value(i);
+            if (key[i].isEmpty()) { key[i] = QFileInfo(frames_[i]).lastModified().toString("yyyy:MM:dd HH:mm:ss.zzz"); ++noTime; }
+        } else key[i] = QFileInfo(frames_[i]).fileName();
+    }
+    QListWidgetItem* current = frameList_->currentItem();
+    QList<QListWidgetItem*> rows;
+    while (frameList_->count()) rows << frameList_->takeItem(0);
+    std::stable_sort(rows.begin(), rows.end(), [&](QListWidgetItem* a, QListWidgetItem* b) {
+        int ia = a->data(Qt::UserRole).toInt(), ib = b->data(Qt::UserRole).toInt();
+        if (ia < 0 || ib < 0) return ia >= 0 && ib < 0;   // the greyed rows last, among themselves as they were
+        int c = byTime ? QString::compare(key[ia], key[ib]) : coll.compare(key[ia], key[ib]);
+        if (c == 0 && byTime) c = coll.compare(QFileInfo(frames_[ia]).fileName(), QFileInfo(frames_[ib]).fileName());
+        return c < 0;
+    });
+    for (QListWidgetItem* r : rows) frameList_->addItem(r);
+    if (current) { frameList_->setCurrentItem(current); frameList_->scrollToItem(current); }
+    QString msg = byTime ? "Frames sorted by the time they were taken" : "Frames sorted by file name";
+    if (byTime && noTime) msg += QString(" (%1 without a capture time in the file: their modification time was used)").arg(noTime);
+    statusBar()->showMessage(msg + ".", 6000);
 }
 
 void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
@@ -1423,7 +1588,7 @@ void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
     setBusy(false);
     liveView_->hide();
     resumeThumbnails();
-    labelWobble(data->align);
+    labelWobble(data->align, &data->result);
     if (data->rc == 3) { setStage("Cancelled."); return; }
     if (data->rc != 0) { setStage("Failed; see the log."); QMessageBox::warning(this, "xLamina", "The render failed. The log has the details."); return; }
     setStage(QString("Done in %1 s (alignment %2 s, fusion %3 s).").arg(data->seconds, 0, 'f', 1).arg(data->align.seconds, 0, 'f', 1).arg(data->result.seconds, 0, 'f', 1));
@@ -1701,6 +1866,7 @@ void MainWindow::preferences() {
     connect(theme, &QComboBox::currentIndexChanged, this, [this, theme](int i) { setTheme(theme->itemData(i).toString()); });
     gf->addRow("Theme", theme);
     gf->addRow("Interpolation", interp_);   // the warp's resampling filter, built with the Render column (its setting and file-name tag)
+    gf->addRow("Soft frame below", softCutoff_);
     QCheckBox* upd = new QCheckBox("Check for updates when xLamina starts");
     upd->setChecked(autoUpdateAct_->isChecked());
     connect(upd, &QCheckBox::toggled, autoUpdateAct_, &QAction::setChecked);

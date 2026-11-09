@@ -22,6 +22,7 @@
 
 #include "stackcore/convert.h"
 #include "stackcore/depth.h"
+#include "stackcore/imgops.h"
 #include "stackcore/tiff.h"
 
 namespace stackcore {
@@ -253,6 +254,60 @@ static void enqueue_view(const Hooks& hooks, AsyncPreview& fp, cudaStream_t src,
     }, vw);
 }
 
+// The per-row corrections of Pass1Options on one device at the working scale (FINDINGS 51): K x work_h gains and
+// offsets, one RowCorr per frame for load_aligned. At scale 0.5 two sensor rows make one working row (their gains
+// averaged, their offsets averaged and halved). Nothing is allocated when the options carry no tables.
+struct DevRowCorr {
+    float* gain = nullptr;
+    float2* off = nullptr;
+    int hw = 0, K = 0;
+    void upload(const Pass1Options& po, const Grid& g) {
+        free();
+        K = (int)po.T.size();
+        hw = g.work_h();
+        const int H = g.H;
+        const bool have_g = K > 0 && (int)po.row_gain.size() == K * H;
+        const bool have_o = K > 0 && (int)po.rs_dx.size() == K * H && (int)po.rs_dy.size() == K * H;
+        if (!have_g && !have_o) return;
+        const double step = (double)H / hw;   // sensor rows per working row: 1 or 2
+        auto rows_of = [&](int r, int& y0, int& y1) { y0 = std::min(H - 1, (int)(r * step)); y1 = std::max(y0, std::min(H - 1, (int)((r + 1) * step) - 1)); };
+        if (have_g) {
+            std::vector<float> t((size_t)K * hw);
+            for (int k = 0; k < K; ++k)
+                for (int r = 0; r < hw; ++r) {
+                    int y0, y1; rows_of(r, y0, y1);
+                    double s = 0; for (int y = y0; y <= y1; ++y) s += po.row_gain[(size_t)k * H + y];
+                    t[(size_t)k * hw + r] = (float)(s / (y1 - y0 + 1));
+                }
+            CK_THROW(cudaMalloc(&gain, t.size() * sizeof(float)));
+            CK_THROW(cudaMemcpy(gain, t.data(), t.size() * sizeof(float), cudaMemcpyHostToDevice));
+        }
+        if (have_o) {
+            const float sc = (float)(hw / (double)H);
+            std::vector<float2> t((size_t)K * hw);
+            for (int k = 0; k < K; ++k)
+                for (int r = 0; r < hw; ++r) {
+                    int y0, y1; rows_of(r, y0, y1);
+                    double sx = 0, sy = 0;
+                    for (int y = y0; y <= y1; ++y) { sx += po.rs_dx[(size_t)k * H + y]; sy += po.rs_dy[(size_t)k * H + y]; }
+                    t[(size_t)k * hw + r] = make_float2((float)(sx / (y1 - y0 + 1)) * sc, (float)(sy / (y1 - y0 + 1)) * sc);
+                }
+            CK_THROW(cudaMalloc(&off, t.size() * sizeof(float2)));
+            CK_THROW(cudaMemcpy(off, t.data(), t.size() * sizeof(float2), cudaMemcpyHostToDevice));
+        }
+    }
+    RowCorr at(int k) const {
+        RowCorr rc;
+        if (gain && k >= 0 && k < K) rc.gain = gain + (size_t)k * hw;
+        if (off && k >= 0 && k < K) rc.off = off + (size_t)k * hw;
+        return rc;
+    }
+    void free() {
+        cudaFree(gain); cudaFree(off);
+        gain = nullptr; off = nullptr;
+    }
+};
+
 struct FoldSlot {
     float *d_rgb = nullptr, *d_scratch = nullptr, *d_warp = nullptr;
     FoldScratch sc;
@@ -268,6 +323,8 @@ struct FoldDev {
     FoldState st;
     std::vector<FoldSlot> slots;
     std::vector<void*> fm16, lum16;   // per frame index: this GPU's volume slices (null = not here)
+    double* d_energy = nullptr;       // per frame index: the sum of the frame's focus measure (fold_energy_add), this GPU's frames
+    DevRowCorr rc;                    // the per-row corrections of every frame (FINDINGS 51), when the options carry them
     AsyncPreview bp;                  // the detail map being built (first device only)
 };
 
@@ -302,6 +359,31 @@ bool read_list(const fs::path& list, std::vector<fs::path>& paths, std::vector<S
     }
     fclose(f);
     return !paths.empty();
+}
+
+FrameSharpness frame_sharpness(const std::vector<double>& energy, double cutoff) {
+    FrameSharpness S;
+    const int K = (int)energy.size();
+    S.energy = energy;
+    S.ratio.assign(K, 0.0);
+    S.soft.assign(K, 0);
+    std::vector<int> run;   // the frames that were folded, in list order
+    for (int k = 0; k < K; ++k) if (energy[k] > 0) { run.push_back(k); S.peak = std::max(S.peak, energy[k]); }
+    const int R = (int)run.size();
+    if (R < 4) return S;
+    auto median = [](std::vector<double> v) { std::sort(v.begin(), v.end()); size_t n = v.size(); return n % 2 ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]); };
+    for (int i = 0; i < R; ++i) {
+        // the frame against the median of the five run frames centred on it (itself included): a frame far above
+        // its neighbours (a jump in content while the stage still moved, a different exposure) leaves the median
+        // alone instead of making its neighbours look soft, and two soft frames in a row are both still under it
+        std::vector<double> nb;
+        for (int j = i - 2; j <= i + 2; ++j) if (j >= 0 && j < R) nb.push_back(energy[run[j]]);
+        double ref = median(nb);
+        S.ratio[run[i]] = ref > 0 ? energy[run[i]] / ref : 0;
+    }
+    S.threshold = std::clamp(cutoff, 0.01, 0.999);
+    for (int k : run) if (S.ratio[k] > 0 && S.ratio[k] < S.threshold) { S.soft[k] = 1; ++S.n_soft; }
+    return S;
 }
 
 
@@ -366,8 +448,11 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         CK(cudaSetDevice(d));
         CK(cudaStreamCreateWithFlags(&D.fold_s, cudaStreamNonBlocking));
         D.st.alloc(d, ow, oh, fp.levels, fp.with_a);
+        D.rc.upload(po, g);
         D.fm16.assign(K, nullptr);
         D.lum16.assign(K, nullptr);
+        CK(cudaMalloc(&D.d_energy, (size_t)K * sizeof(double)));
+        CK(cudaMemset(D.d_energy, 0, (size_t)K * sizeof(double)));
         // slots per GPU from the memory left after the state: each needs the frame buffers,
         // the measure scratch and the streamer's raw upload buffer, plus a working margin
         FoldScratch probe;
@@ -400,6 +485,9 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
             } else {
                 logf("GPU %d: left out of this job, not enough memory for the volume slices plus one slot (%.2f GB free)\n", d, fr / 1e9);
                 D.st.free();
+                D.rc.free();
+                cudaFree(D.d_energy);
+                D.d_energy = nullptr;
                 cudaStreamDestroy(D.fold_s);
                 D.fold_s = nullptr;
                 dropped.push_back(d);
@@ -442,8 +530,9 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         S.fp.guard(f.stream);                                    // and the previous view's kernel with d_warp
         convert_to_rgb_f32(f.d_pixels(), *f.info, S.d_rgb, nullptr, f.stream);
         int k = ks[f.k];
-        load_aligned(S.d_rgb, g, T[k], S.d_scratch, S.d_warp, false, f.stream);
+        load_aligned(S.d_rgb, g, T[k], S.d_scratch, S.d_warp, false, f.stream, D.rc.at(k));
         fold_measure(S.d_warp, fp, S.sc, f.stream);
+        fold_energy_add(S.sc.fm, npx_out, D.d_energy + k, f.stream);   // the frame's focus energy (soft-frame flag, FINDINGS 49)
         if (volume) {   // this frame's depth-resolution slices stay on this GPU until the aggregation
             size_t nb = (size_t)vp.dw * vp.dh * 2;
             // a failure here must stop the pass, not fault a kernel; the streamer reports it and run_pass1 turns
@@ -486,6 +575,18 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
     logf("%d frames in %.3f s: %.1f frames/s, %.2f GB/s%s\n", st.frames, st.seconds, st.frames / st.seconds,
            st.bytes / st.seconds / 1e9, source_note(st).c_str());
     for (size_t i = 0; i < devs.size(); ++i) printf("  GPU %d: %d frames\n", devs[i], st.frames_per_device[i]);
+    // every frame folded on exactly one card: the per-frame focus energies add up across the cards (0 elsewhere)
+    P.frame_energy.assign(K, 0.0);
+    {
+        std::vector<double> e(K);
+        for (int d : devs) {
+            CK(cudaSetDevice(d));
+            CK(cudaMemcpy(e.data(), ctx[d].d_energy, (size_t)K * sizeof(double), cudaMemcpyDeviceToHost));
+            for (int k = 0; k < K; ++k) P.frame_energy[k] += e[k] / (double)npx_out;
+            cudaFree(ctx[d].d_energy);
+            ctx[d].d_energy = nullptr;
+        }
+    }
     // the slots (frame, warp and measure buffers, 2.2 GB each) are not needed past the streaming: free them now so
     // the volume aggregation and the depth stage have the memory (a 1/2-resolution volume's slices are 4.9 GB)
     for (int d : devs) {
@@ -675,6 +776,7 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         }
         D.bp.free();
         D.st.free();
+        D.rc.free();
         cudaStreamDestroy(D.fold_s);
     }
     if (st.errors.empty()) return 0;
@@ -699,12 +801,13 @@ struct PassDev {
     int dev = -1;
     cudaStream_t fold_s = nullptr;
     std::vector<PassSlot> slots;
+    DevRowCorr rc;     // the per-row corrections of every frame (FINDINGS 51), when the options carry them
     AsyncPreview bp;   // the map being built (first device only); the accumulate stage enqueues into it
 };
 
 template <class SlotStage, class AccStage>
 static StreamerStats run_pass(const std::vector<fs::path>& run_paths, const std::vector<int>& ks, const std::vector<Similarity>& T,
-                              const Grid& g, const std::vector<int>& devs, int streams, int readers, FrameCache* cache,
+                              const Grid& g, const Pass1Options& po, const std::vector<int>& devs, int streams, int readers, FrameCache* cache,
                               std::vector<PassDev>& ctx, SlotStage slot_stage, AccStage acc_stage, const char* what, const Hooks& hooks) {
     int ndev = 0;
     CK_THROW(cudaGetDeviceCount(&ndev));
@@ -722,6 +825,7 @@ static StreamerStats run_pass(const std::vector<fs::path>& run_paths, const std:
         D.dev = d;
         CK_THROW(cudaSetDevice(d));
         CK_THROW(cudaStreamCreateWithFlags(&D.fold_s, cudaStreamNonBlocking));
+        D.rc.upload(po, g);
         D.slots.resize(streams);
         int idx = 0;
         for (auto& S : D.slots) {
@@ -743,7 +847,7 @@ static StreamerStats run_pass(const std::vector<fs::path>& run_paths, const std:
         S.fp.guard(f.stream);
         convert_to_rgb_f32(f.d_pixels(), *f.info, S.d_rgb, nullptr, f.stream);
         int k = ks[f.k];
-        load_aligned(S.d_rgb, g, T[k], S.d_scratch, S.d_warp, false, f.stream);
+        load_aligned(S.d_rgb, g, T[k], S.d_scratch, S.d_warp, false, f.stream, D.rc.at(k));
         slot_stage(f.dev, S, k, f.stream);
         if (view) enqueue_view(hooks, S.fp, f.stream, k, S.d_warp, g.out_w(), g.out_h());
         cudaEventRecord(S.ready, f.stream);
@@ -776,6 +880,7 @@ static StreamerStats run_pass(const std::vector<fs::path>& run_paths, const std:
             S.fp.free();
         }
         D.bp.free();
+        D.rc.free();
         cudaStreamDestroy(D.fold_s);
     }
     return st;
@@ -794,10 +899,13 @@ bool parse_stack_option(const std::string& a, const std::string& v, StackOptions
     else if (a == "--streams") { so.streams = atoi(v.c_str()); so.po.opt.streams_per_gpu = so.streams; }
     else if (a == "--readers") so.po.opt.readers = atoi(v.c_str());
     else if (a == "--cache") so.cache_frames = atoi(v.c_str()) != 0;
+    else if (a == "--fix-banding") so.fix_banding = atoi(v.c_str()) != 0;
+    else if (a == "--fix-rs") so.fix_rs = atoi(v.c_str()) != 0;
     else if (a == "--refine-r") so.refine_r = atoi(v.c_str());
     else if (a == "--refine-fm-px") so.refine_fm_px = atof(v.c_str());
     else if (a == "--soft-px") so.soft_px = atof(v.c_str());
     else if (a == "--smoothing") so.c_smoothing = atof(v.c_str());
+    else if (a == "--soft-cutoff") so.soft_cutoff = atof(v.c_str());
     else if (a == "--c-radius") so.po.c_radius_px = atof(v.c_str());
     else if (a == "--b-radius") so.po.b_radius_px = atof(v.c_str());
     else if (a == "--halo-prior") so.halo_prior = atof(v.c_str());
@@ -1145,7 +1253,7 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
         std::vector<fs::path> back_paths(P.paths.rbegin(), P.paths.rend());
         std::vector<PassDev> ctx;
         std::atomic<int> refined{0};
-        run_pass(back_paths, back_k, P.T, P.g, P.devs, streams, po.opt.readers, po.opt.cache, ctx,
+        run_pass(back_paths, back_k, P.T, P.g, po, P.devs, streams, po.opt.readers, po.opt.cache, ctx,
                  [&](int dev, PassSlot& S, int, cudaStream_t ss) { refine_measure(S.d_warp, rsc[dev][S.index], ss); },
                  [&](int dev, PassSlot& S, int k, cudaStream_t fs) {
                      refine_accumulate(rst[dev], k, rsc[dev][S.index].fm, d_depth[dev], refine_r, fs);
@@ -1210,7 +1318,7 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
         if (wide) logf("compose: the smooth-depth blend spans up to %.0f frames in flat regions; %zu frames carry weight\n", so.flat_blend, ks.size());
         std::vector<PassDev> ctx;
         std::atomic<int> composed{0};
-        run_pass(sub, ks, P.T, P.g, P.devs, streams, po.opt.readers, po.opt.cache, ctx,
+        run_pass(sub, ks, P.T, P.g, po, P.devs, streams, po.opt.readers, po.opt.cache, ctx,
                  [&](int, PassSlot&, int, cudaStream_t) {},
                  [&](int dev, PassSlot& S, int k, cudaStream_t fs) {
                      compose_frame(cst[dev], k, S.d_warp, d_D[dev], d_Ds[dev], csc[dev][S.index], fs, d_W[dev]);
@@ -1266,6 +1374,16 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
         for (size_t i = 0; i < F.names.size(); ++i)
             if (wanted(F.names[i])) { Rr.names.push_back(F.names[i]); Rr.images.push_back(std::move(F.images[i])); }
         Rr.depth = R.depth_s; Rr.conf = R.conf; Rr.noise_mad = noise_mad; Rr.icc = icc;
+        Rr.frame_energy = P.frame_energy;
+    }
+    // the soft-frame flag (FINDINGS 49): the frames whose focus energy fell under their neighbours'
+    FrameSharpness sharp = frame_sharpness(P.frame_energy, so.soft_cutoff);
+    if (sharp.threshold > 0) {
+        std::string soft;
+        for (int k = 0; k < K; ++k)
+            if (sharp.soft[k]) { char b[64]; snprintf(b, sizeof b, " %s (%.2f)", P.paths[k].filename().string().c_str(), sharp.ratio[k]); soft += b; }
+        logf("sharpness: %d soft frame%s (focus energy under %.2f of the neighbours')%s%s", sharp.n_soft, sharp.n_soft == 1 ? "" : "s",
+             sharp.threshold, soft.empty() ? "" : ":", soft.c_str());
     }
 
     // ---- write
@@ -1296,11 +1414,29 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
         if (!P.flat.empty()) write_raw(od / "flat.f32", P.flat.data(), P.flat.size());   // depth-resolution grid (stack.txt: w, h x depth fraction)
         write_raw(od / "depth_smooth.f32", Ds.data(), Ds.size());
         write_raw(od / "conf.f32", R.conf.data(), R.conf.size());
+        if (getenv("STACKER_C_DEBUG")) {   // C's selection per pyramid level: the chosen frame (int16) and its energy (f32), level sizes in stack.txt
+            CK(cudaSetDevice(prim));
+            for (int l = 0; l < P.fp.levels - 1; ++l) {
+                size_t m = (size_t)P.dst.shapes[l].w * P.dst.shapes[l].h;
+                std::vector<int16_t> idx(m);
+                std::vector<float> sal(m);
+                CK(cudaMemcpy(idx.data(), P.dst.c_idx[l], m * sizeof(int16_t), cudaMemcpyDeviceToHost));
+                CK(cudaMemcpy(sal.data(), P.dst.c_sal[l], m * sizeof(float), cudaMemcpyDeviceToHost));
+                write_raw(od / ("c_idx_L" + std::to_string(l) + ".i16"), idx.data(), m);
+                write_raw(od / ("c_sal_L" + std::to_string(l) + ".f32"), sal.data(), m);
+            }
+        }
     }
     FILE* mf = fopen((od / "stack.txt").string().c_str(), "w");
     if (mf) {
         fprintf(mf, "w %d\nh %d\nframes %d\nlevels %d\nscale %g\nrect %d %d %d %d\nnoise_mad", ow, oh, K, P.fp.levels, P.g.scale, P.g.x0, P.g.y0, P.g.x1, P.g.y1);
         for (float v : noise_mad) fprintf(mf, " %.9g", v);
+        fprintf(mf, "\nlevel_shapes");
+        for (auto& sh : P.dst.shapes) fprintf(mf, " %d %d", sh.w, sh.h);
+        fprintf(mf, "\nframe_energy");
+        for (double v : P.frame_energy) fprintf(mf, " %.9g", v);
+        fprintf(mf, "\nsoft_threshold %.9g\nsoft", sharp.threshold);
+        for (int k = 0; k < K; ++k) if (sharp.soft[k]) fprintf(mf, " %d", k);
         fprintf(mf, "\noutputs");
         for (auto& nme : F.names) fprintf(mf, " %s", nme.c_str());
         fprintf(mf, "\n");
@@ -1494,10 +1630,222 @@ bool parse_align_option(const std::string& a, const std::string& v, AlignOptions
     else if (a == "--lock-scale") ao.lock_scale = v != "0" && v != "false";
     else if (a == "--um-per-px") ao.um_per_px = atof(v.c_str());
     else if (a == "--fov-mm") ao.um_per_px = -atof(v.c_str());   // resolved once the width is known
+    else if (a == "--rs-bands") ao.rs_bands = atoi(v.c_str());
+    else if (a == "--band-cycles") { auto d = parse_list(v); if (d.size() == 2) { ao.band_lo = d[0]; ao.band_hi = d[1]; } }
     else return false;
     return true;
 }
 
+
+// ---- rolling shutter and LED banding (FINDINGS 51)
+
+// Each frame's row-mean luma against the stack's median row profile. The LED's flicker, read out line by line, is
+// a ripple across the rows of a few cycles per frame, the same frequency in every frame at a random phase; the
+// frame's own content drifting in and out of focus changes the profile too, but slowly (a cycle or two) or at the
+// texture's fine scale. The fit projects each frame's ratio-to-median residual on the Fourier modes band_lo..band_hi
+// cycles per frame height and keeps only those: band_pct is their peak-to-peak, row_gain the inverse.
+static void banding_fit(const std::vector<float>& rows_all, int N, int H, const AlignOptions& ao, AlignOut& A) {
+    A.band_pct.assign(N, 0.f);
+    A.row_gain.assign((size_t)N * H, 1.f);
+    A.band_peak_cycles = 0; A.band_peak_power = 0; A.band_median_pct = 0;
+    if (N < 3 || H < 64) return;
+    const double kPi = 3.14159265358979323846;
+    // the reference profile of frame k: the median over the frames around it (the flicker's phase is random from
+    // frame to frame, so the median drops it; the content's own profile, which drifts with the focus along the
+    // stack, stays). The stack-wide median was tried first: a frame far from the middle differs from it by the
+    // content's drift alone, 14 % against the 3 % of the flicker on the 210-frame stack
+    const int half = std::min(8, (N - 1) / 2);
+    std::vector<float> med((size_t)N * H), col(2 * half + 1);
+    for (int k = 0; k < N; ++k) {
+        int k0 = std::clamp(k - half, 0, N - 1 - 2 * half), k1 = k0 + 2 * half;
+        for (int y = 0; y < H; ++y) {
+            for (int q = k0; q <= k1; ++q) col[q - k0] = rows_all[(size_t)q * H + y];
+            std::nth_element(col.begin(), col.begin() + half, col.end());
+            med[(size_t)k * H + y] = col[half];
+        }
+    }
+    const int cmax = std::min(40, H / 4);
+    const int lo = std::clamp(std::min(ao.band_lo, ao.band_hi), 1, cmax), hi = std::clamp(std::max(ao.band_lo, ao.band_hi), lo, cmax);
+    std::vector<double> cs((size_t)(cmax + 1) * H), sn((size_t)(cmax + 1) * H), power(cmax + 1, 0.0), r(H), pct(N);
+    for (int c = 1; c <= cmax; ++c)
+        for (int y = 0; y < H; ++y) { double a = 2 * kPi * c * (y + 0.5) / H; cs[(size_t)c * H + y] = std::cos(a); sn[(size_t)c * H + y] = std::sin(a); }
+    for (int k = 0; k < N; ++k) {
+        double mean = 0;
+        for (int y = 0; y < H; ++y) { float m = med[(size_t)k * H + y]; r[y] = m > 1e-6f ? rows_all[(size_t)k * H + y] / m - 1.0 : 0.0; mean += r[y]; }
+        mean /= H;
+        for (int y = 0; y < H; ++y) r[y] -= mean;
+        std::vector<double> a(cmax + 1, 0.0), b(cmax + 1, 0.0);
+        for (int c = 1; c <= cmax; ++c) {
+            double sa = 0, sb = 0;
+            const double *C = &cs[(size_t)c * H], *S = &sn[(size_t)c * H];
+            for (int y = 0; y < H; ++y) { sa += r[y] * C[y]; sb += r[y] * S[y]; }
+            a[c] = 2 * sa / H; b[c] = 2 * sb / H;
+            power[c] += (a[c] * a[c] + b[c] * b[c]) / N;
+        }
+        double fmin = 1e300, fmax = -1e300;
+        float* gain = &A.row_gain[(size_t)k * H];
+        for (int y = 0; y < H; ++y) {
+            double f = 0;
+            for (int c = lo; c <= hi; ++c) f += a[c] * cs[(size_t)c * H + y] + b[c] * sn[(size_t)c * H + y];
+            fmin = std::min(fmin, f); fmax = std::max(fmax, f);
+            gain[y] = (float)(1.0 / std::clamp(1.0 + f, 0.5, 2.0));
+        }
+        pct[k] = 100 * (fmax - fmin);
+        A.band_pct[k] = (float)pct[k];
+    }
+    int pk = std::min(2, cmax);   // the strongest mode past the frame-long trend (1 cycle = the content's drift, not flicker)
+    for (int c = pk + 1; c <= cmax; ++c) if (power[c] > power[pk]) pk = c;
+    A.band_peak_cycles = pk;
+    A.band_peak_power = power[pk];
+    std::vector<double> sp = pct;
+    std::nth_element(sp.begin(), sp.begin() + N / 2, sp.end());
+    A.band_median_pct = sp[N / 2];
+    int worst = (int)(std::max_element(pct.begin(), pct.end()) - pct.begin());
+    logf("  banding: strongest row frequency %d cycles per frame (period %d rows); flicker in cycles %d..%d: median %.2f %% peak-to-peak, largest %.2f %% (%s)\n",
+         pk, H / pk, lo, hi, A.band_median_pct, pct[worst], A.paths[worst].filename().string().c_str());
+}
+
+// The rolling shutter's warping: for the baseline-1 and -2 pairs, frame j is warped onto frame i by the pair
+// similarity from the global solve and each of rs_bands row bands gets its own translation (band_shifts). The band
+// shifts of all pairs are chained per band into one offset per frame (chain_offsets, the stack's mean held at 0):
+// the frame's displacement at that band of rows relative to the rigid model, in full-res px.
+static int rolling_shutter_pass(const std::vector<float>& luma_stack, int N, int w, int h, double fx, double fy,
+                                const std::vector<int>& devs, const AlignOptions& ao, AlignOut& A) {
+    const int NB = ao.rs_bands;
+    std::vector<std::pair<int, int>> pairs;
+    for (int i = 0; i + 1 < N; ++i) pairs.push_back({i, i + 1});
+    for (int i = 0; i + 2 < N; ++i) pairs.push_back({i, i + 2});
+    std::sort(pairs.begin(), pairs.end());   // a device's chunk walks the stack in order: its level cache serves neighbouring pairs
+    std::vector<BandShift> res(pairs.size());
+    const int nd = (int)devs.size();
+    std::vector<std::thread> workers;
+    std::vector<std::string> errs(nd);
+    auto t0 = std::chrono::steady_clock::now();
+    for (int r = 0; r < nd; ++r)
+        workers.emplace_back([&, r] {
+            const int d = devs[r];
+            try {
+                CK_THROW(cudaSetDevice(d));
+                cudaStream_t s;
+                CK_THROW(cudaStreamCreate(&s));
+                AlignWork wk;
+                wk.alloc(w, h);
+                float* d_luma;
+                CK_THROW(cudaMalloc(&d_luma, (size_t)w * h * sizeof(float)));
+                std::map<int, AlignPyramid::Level> cache;
+                std::list<int> lru;
+                auto get = [&](int k) -> const AlignPyramid::Level& {
+                    auto it = cache.find(k);
+                    if (it != cache.end()) { lru.remove(k); lru.push_back(k); return it->second; }
+                    while (cache.size() >= 6) { int v = lru.front(); lru.pop_front(); level0_free(cache[v]); cache.erase(v); }
+                    CK_THROW(cudaMemcpyAsync(d_luma, luma_stack.data() + (size_t)k * w * h, (size_t)w * h * sizeof(float), cudaMemcpyHostToDevice, s));
+                    AlignPyramid::Level L;
+                    level0_build(L, d_luma, w, h, s);
+                    CK_THROW(cudaStreamSynchronize(s));
+                    lru.push_back(k);
+                    return cache[k] = L;
+                };
+                const size_t e0 = pairs.size() * r / nd, e1 = pairs.size() * (r + 1) / nd;
+                for (size_t e = e0; e < e1; ++e) {
+                    if (ao.hooks.cancelled()) break;
+                    auto [i, j] = pairs[e];
+                    std::complex<double> zij = A.G.z[j] / A.G.z[i], tij = A.G.t[j] - zij * A.G.t[i];
+                    const AlignPyramid::Level& Li = get(i);
+                    const AlignPyramid::Level& Lj = get(j);
+                    res[e] = band_shifts(Li, Lj, zij, tij, NB, wk, s);
+                }
+                for (auto& kv : cache) level0_free(kv.second);
+                wk.free();
+                cudaFree(d_luma);
+                cudaStreamDestroy(s);
+            } catch (const std::exception& ex) { errs[r] = ex.what(); }
+        });
+    for (auto& t : workers) t.join();
+    for (int r = 0; r < nd; ++r) if (!errs[r].empty()) { logf("GPU %d: rolling shutter: %s\n", devs[r], errs[r].c_str()); return 1; }
+    if (ao.hooks.cancelled()) return 3;
+    A.rs_bands = NB;
+    A.rs_dx.assign((size_t)N * NB, 0.f);
+    A.rs_dy.assign((size_t)N * NB, 0.f);
+    A.rs_px.assign(N, 0.f);
+    const double band_px = (double)w * h / NB;
+    int used = 0;
+    for (int b = 0; b < NB; ++b) {
+        std::vector<std::complex<double>> m(pairs.size());
+        std::vector<double> wgt(pairs.size());
+        for (size_t e = 0; e < pairs.size(); ++e) {
+            const BandShift& B = res[e];
+            // a band is usable when it correlates, covers most of its pixels and did not run away
+            bool ok = (int)B.dx.size() == NB && B.ncc[b] > 0.3 && B.n[b] > 0.3 * band_px && std::hypot(B.dx[b], B.dy[b]) < 0.05 * h;
+            m[e] = {ok ? B.dx[b] : 0.0, ok ? B.dy[b] : 0.0};
+            wgt[e] = ok ? (pairs[e].second - pairs[e].first == 1 ? 1.0 : 0.5) : 0.0;
+            if (ok) ++used;
+        }
+        auto dk = chain_offsets(N, pairs, m, wgt);
+        // the chain also integrates what changes slowly along the stack (the specimen's relief read as a band-wise
+        // drift, the lens' distortion changing with focus: a frame-to-frame bias of a tenth of a pixel adds up to
+        // 20 px over 200 frames); the rolling shutter is the frame's own departure from its neighbours, so the
+        // median of the six frames around it (itself left out: a frame that is the median of its window would
+        // otherwise read 0) is taken out
+        const int hw = std::min(3, (N - 1) / 2);
+        std::vector<std::complex<double>> trend(N);
+        std::vector<double> re, im;
+        for (int k = 0; k < N; ++k) {
+            int k0 = std::clamp(k - hw, 0, N - 1 - 2 * hw);
+            re.clear(); im.clear();
+            for (int q = k0; q <= k0 + 2 * hw; ++q) if (q != k) { re.push_back(dk[q].real()); im.push_back(dk[q].imag()); }
+            if (re.empty()) { trend[k] = dk[k]; continue; }
+            auto med_of = [](std::vector<double>& v) { std::sort(v.begin(), v.end()); size_t n = v.size(); return n % 2 ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]); };
+            trend[k] = {med_of(re), med_of(im)};
+        }
+        for (int k = 0; k < N; ++k) {
+            A.rs_dx[(size_t)k * NB + b] = (float)((dk[k].real() - trend[k].real()) / fx);
+            A.rs_dy[(size_t)k * NB + b] = (float)((dk[k].imag() - trend[k].imag()) / fy);
+        }
+    }
+    std::vector<double> sp(N);
+    for (int k = 0; k < N; ++k) {
+        float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f;
+        for (int b = 0; b < NB; ++b) {
+            float x = A.rs_dx[(size_t)k * NB + b], y = A.rs_dy[(size_t)k * NB + b];
+            x0 = std::min(x0, x); x1 = std::max(x1, x); y0 = std::min(y0, y); y1 = std::max(y1, y);
+        }
+        A.rs_px[k] = std::max(x1 - x0, y1 - y0);
+        sp[k] = A.rs_px[k];
+    }
+    int worst = (int)(std::max_element(sp.begin(), sp.end()) - sp.begin());
+    std::nth_element(sp.begin(), sp.begin() + N / 2, sp.end());
+    A.rs_median_px = sp[N / 2];
+    logf("  rolling shutter: %zu pairs x %d bands (%d usable) in %.2f s; band-to-band displacement median %.2f px, largest %.2f px (%s)\n",
+         pairs.size(), NB, used, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), A.rs_median_px,
+         A.rs_px[worst], A.paths[worst].filename().string().c_str());
+    return 0;
+}
+
+// run_job: the alignment's per-frame row corrections into the fusion's warps when asked (FINDINGS 51): the gain
+// table as measured; the band offsets interpolated linearly between the band centres onto every sensor row
+static void apply_row_fixes(StackOptions& so, const AlignOut& A) {
+    const int N = (int)A.paths.size(), H = A.H;
+    so.po.row_gain.clear(); so.po.rs_dx.clear(); so.po.rs_dy.clear();
+    if (so.fix_banding && (int)A.row_gain.size() == N * H) {
+        so.po.row_gain = A.row_gain;
+        logf("  banding correction: each frame's row gain goes into its warps\n");
+    }
+    if (so.fix_rs && A.rs_bands > 0 && (int)A.rs_dx.size() == N * A.rs_bands) {
+        const int NB = A.rs_bands;
+        so.po.rs_dx.assign((size_t)N * H, 0.f);
+        so.po.rs_dy.assign((size_t)N * H, 0.f);
+        for (int k = 0; k < N; ++k)
+            for (int y = 0; y < H; ++y) {
+                double p = (y + 0.5) * NB / H - 0.5;   // band coordinate: the band centres sit at 0, 1, ..., NB-1
+                int b0 = (int)std::floor(p);
+                double f = p - b0;
+                int ba = std::clamp(b0, 0, NB - 1), bb = std::clamp(b0 + 1, 0, NB - 1);
+                so.po.rs_dx[(size_t)k * H + y] = (float)((1 - f) * A.rs_dx[(size_t)k * NB + ba] + f * A.rs_dx[(size_t)k * NB + bb]);
+                so.po.rs_dy[(size_t)k * H + y] = (float)((1 - f) * A.rs_dy[(size_t)k * NB + ba] + f * A.rs_dy[(size_t)k * NB + bb]);
+            }
+        logf("  rolling shutter correction: each frame's row offsets go into its warps\n");
+    }
+}
 
 int run_align(AlignOptions& ao, AlignOut& A) {
     const fs::path& dir = ao.dir;
@@ -1555,8 +1903,9 @@ int run_align(AlignOptions& ao, AlignOut& A) {
 
     // ---- pass 0: luma at the align scale, for every frame, to the host
     std::vector<float> luma_stack((size_t)N * w * h);
+    std::vector<float> rows_all((size_t)N * H);   // each frame's row-mean luma at full resolution (banding, FINDINGS 51)
     {
-        struct Slot { float *d_rgb = nullptr, *d_y = nullptr, *d_small = nullptr; AreaResizer rz; AsyncPreview fp; };
+        struct Slot { float *d_rgb = nullptr, *d_y = nullptr, *d_small = nullptr, *d_rows = nullptr; AreaResizer rz; AsyncPreview fp; };
         std::vector<std::vector<Slot>> slots(ndev);
         StreamerOptions opt;
         opt.devices = devs;
@@ -1579,6 +1928,7 @@ int run_align(AlignOptions& ao, AlignOut& A) {
                 CK(cudaMalloc(&S.d_rgb, (size_t)W * H * 3 * sizeof(float)));
                 CK(cudaMalloc(&S.d_y, (size_t)W * H * sizeof(float)));
                 CK(cudaMalloc(&S.d_small, (size_t)w * h * sizeof(float)));
+                CK(cudaMalloc(&S.d_rows, (size_t)H * sizeof(float)));
                 S.rz.build(W, H, w, h);
                 if (hooks.frame) S.fp.alloc_view(hooks, W, H);
             }
@@ -1592,6 +1942,8 @@ int run_align(AlignOptions& ao, AlignOut& A) {
             luma(S.d_rgb, S.d_y, (size_t)W * H, f.stream);
             S.rz.run(S.d_y, S.d_small, 1, f.stream);
             cudaMemcpyAsync(luma_stack.data() + (size_t)f.k * w * h, S.d_small, (size_t)w * h * sizeof(float), cudaMemcpyDeviceToHost, f.stream);
+            row_mean(S.d_y, W, H, S.d_rows, f.stream);
+            cudaMemcpyAsync(rows_all.data() + (size_t)f.k * H, S.d_rows, (size_t)H * sizeof(float), cudaMemcpyDeviceToHost, f.stream);
             if (hooks.progress) hooks.progress(stage_name, (double)(++done) / N);
         };
         StreamerStats st = stream_frames(paths, opt, on_frame);
@@ -1599,13 +1951,15 @@ int run_align(AlignOptions& ao, AlignOut& A) {
         for (int d : devs) {
             CK(cudaSetDevice(d));
             CK(cudaDeviceSynchronize());
-            for (auto& S : slots[d]) { S.fp.flush(hooks); cudaFree(S.d_rgb); cudaFree(S.d_y); cudaFree(S.d_small); S.rz.free(); S.fp.free(); }
+            for (auto& S : slots[d]) { S.fp.flush(hooks); cudaFree(S.d_rgb); cudaFree(S.d_y); cudaFree(S.d_small); cudaFree(S.d_rows); S.rz.free(); S.fp.free(); }
         }
         logf("align: %d frames %dx%d -> luma %dx%d in %.2f s%s\n", N, W, H, w, h, st.seconds, source_note(st).c_str());
         if (getenv("STACKER_MEM_DEBUG"))
             for (int d : devs) { size_t fr, tot; cudaSetDevice(d); cudaMemGetInfo(&fr, &tot); logf("  [mem] GPU %d after pass 0: %.2f GB free", d, fr / 1e9); }
         if (hooks.cancelled()) return 3;
     }
+
+    banding_fit(rows_all, N, H, ao, A);
 
     // ---- pairs, dynamically shared by the GPUs and by several threads per GPU (a pair's Gauss-Newton
     // loop syncs the host every iteration, so one pair at a time leaves the card mostly idle; FINDINGS 27).
@@ -1765,6 +2119,10 @@ int run_align(AlignOptions& ao, AlignOut& A) {
     for (auto& z : zr) { A.smin = std::min(A.smin, std::abs(z)); A.smax = std::max(A.smax, std::abs(z)); }
     A.T.resize(N);
     for (int k = 0; k < N; ++k) A.T[k] = {zr[k].real(), zr[k].imag(), tr[k].real(), tr[k].imag()};
+    if (ao.rs_bands > 0 && N >= 3) {
+        if (int r = rolling_shutter_pass(luma_stack, N, w, h, fx, fy, devs, ao, A)) return r;
+        if (hooks.cancelled()) return 3;
+    }
     if (ao.um_per_px < 0) ao.um_per_px = -ao.um_per_px * 1000.0 / W;   // from --fov-mm
     A.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_all).count();
     logf("  solve: %d/%d pairs usable, %d outliers, ncc min %.4f median %.4f; ref #%d; native crop %dx%d (L%d R%d T%d B%d); scale spread %.3f%%%s; %.2f s\n",
@@ -1795,13 +2153,26 @@ std::string report_json(const AlignOptions& ao, const AlignOut& A) {
             ch * ao.um_per_px / 1000.0);
     add("}},\n  \"scale_spread\": {\"s_min\": %.17g, \"s_max\": %.17g, \"total_pct\": %.17g, \"corner_shift_px\": %.17g}\n },\n \"per_frame\": [\n",
         A.smin, A.smax, 100 * (A.smax / A.smin - 1), (A.smax / A.smin - 1) * std::hypot((double)W, (double)H) / 2.0);
+    const bool have_band = (int)A.band_pct.size() == N, have_rs = A.rs_bands > 0 && (int)A.rs_px.size() == N;
     for (int k = 0; k < N; ++k) {
         std::complex<double> z(A.T[k].zr, A.T[k].zi);
-        add("  {\"i\": %d, \"file\": \"%s\", \"s\": %.17g, \"theta_deg\": %.17g, \"tx\": %.17g, \"ty\": %.17g}%s\n", k,
-            A.paths[k].filename().string().c_str(), std::abs(z), std::arg(z) * 180.0 / 3.14159265358979323846, A.T[k].tx, A.T[k].ty,
-            k + 1 < N ? "," : "");
+        add("  {\"i\": %d, \"file\": \"%s\", \"s\": %.17g, \"theta_deg\": %.17g, \"tx\": %.17g, \"ty\": %.17g", k,
+            A.paths[k].filename().string().c_str(), std::abs(z), std::arg(z) * 180.0 / 3.14159265358979323846, A.T[k].tx, A.T[k].ty);
+        if (have_band) add(", \"band_pct\": %.4g", A.band_pct[k]);
+        if (have_rs) {   // FINDINGS 51: the frame's displacement per row band (full-res px, top to bottom) and its spread
+            add(", \"rs_px\": %.4g, \"rs_dx\": [", A.rs_px[k]);
+            for (int b = 0; b < A.rs_bands; ++b) add("%s%.3f", b ? ", " : "", A.rs_dx[(size_t)k * A.rs_bands + b]);
+            add("%s", "], \"rs_dy\": [");
+            for (int b = 0; b < A.rs_bands; ++b) add("%s%.3f", b ? ", " : "", A.rs_dy[(size_t)k * A.rs_bands + b]);
+            add("%s", "]");
+        }
+        add("}%s\n", k + 1 < N ? "," : "");
     }
-    s += " ],\n \"transform_convention\": \"reference-grid centred px -> frame centred px: p_k = s e^{i theta} p + t\"\n}\n";
+    s += " ],\n";
+    if (have_band || have_rs)
+        add(" \"rolling_shutter\": {\"bands\": %d, \"median_px\": %.4g, \"banding_cycles\": [%d, %d], \"banding_peak_cycles\": %d, \"banding_median_pct\": %.4g},\n",
+            A.rs_bands, A.rs_median_px, ao.band_lo, ao.band_hi, A.band_peak_cycles, A.band_median_pct);
+    s += " \"transform_convention\": \"reference-grid centred px -> frame centred px: p_k = s e^{i theta} p + t\"\n}\n";
     return s;
 }
 
@@ -1844,6 +2215,7 @@ int run_job(JobOptions& jo, AlignOut& A, Hooks hooks) {
     write_report(ao, A, out);
     so.po.paths = A.paths;
     so.po.T = A.T;
+    apply_row_fixes(so, A);
     so.po.g.x0 = A.rect[0]; so.po.g.y0 = A.rect[1]; so.po.g.x1 = A.rect[2]; so.po.g.y1 = A.rect[3];
     so.out = so.write_outputs ? out : std::string();   // the benchmark computes everything but writes nothing
     if (int r = run_stack(so)) return r;
@@ -1872,6 +2244,7 @@ int run_sweep_job(JobOptions& jo, const std::vector<SweepVariant>& variants, con
     write_report(ao, A, out_dir);   // report.json + list.txt beside the variants: `stackcli sweep` can continue from them
     so.po.paths = A.paths;
     so.po.T = A.T;
+    apply_row_fixes(so, A);
     so.po.g.x0 = A.rect[0]; so.po.g.y0 = A.rect[1]; so.po.g.x1 = A.rect[2]; so.po.g.y1 = A.rect[3];
     if (so.outputs.empty()) so.outputs = {"B"};
     so.out.clear();

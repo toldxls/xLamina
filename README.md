@@ -42,10 +42,19 @@ off the GPU, so Full slows the render). Save as… writes the current image as a
 TIFF, JPEG or PNG; the full set plus `report.json` is also written to
 `<folder>_stacker`. The frames' ICC profile is kept in the outputs and used for display.
 
-After a render each frame in the list shows its wobble: the shift (px) and scale change
-(%) from the previous frame, from the alignment. Frames whose shift is an outlier are
-shown in red; Drop flagged unticks them, and unticked frames are left out of the next
-render.
+After a render each frame in the list shows its wobble (the shift in px and scale change
+in % from the previous frame, from the alignment) and its sharpness (its focus energy
+against the five frames around it, 1.00 = as expected). Frames whose shift is an outlier
+are shown in red, frames whose focus energy fell under their neighbours' (blurred during
+the exposure; under 0.90 by default, File > Preferences > General > Soft frame below) in
+amber; Render > Drop shifted frames and Drop soft frames untick each kind, and unticked
+frames are left out of the next render. A third line gives the frame's rolling-shutter
+marks: "warp" is its displacement from band to band of sensor rows against its neighbours
+(px), "band" the LED flicker's brightness ripple across its rows (% peak-to-peak); the
+Render column's Undo rolling-shutter warping and Undo LED banding put the measured
+corrections into every warp of the frame (off by default; saved files get _rs / _band).
+The list is the stack order: Render > Sort frames by name or by time taken (the EXIF
+capture time) reorder it, Tick all frames puts every frame back into the render.
 
 Smoothing (C) sets how much of C's weak detail is taken from B rather than from the
 sharpest frame: 0 is the raw selection (in flat areas it picks the noisiest frame),

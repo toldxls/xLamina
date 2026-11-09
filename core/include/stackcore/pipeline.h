@@ -83,6 +83,10 @@ struct Pass1Options {
     // 0.6.22 (FINDINGS 44: a fifth less ring energy in the background, detail untouched; Travis preferred it at 1:1)
     double flat_blur_px = 256.0, flat_reach_px = 24.0;
     double flat_min = 0.0;                        // DepthParams::flat_min (least-structure data term in flat regions); 0 = off
+    // per-row corrections (FINDINGS 51), K x H at full resolution, applied inside every warp of the frame (RowCorr);
+    // empty = none. row_gain flattens the frame's brightness banding; rs_dx / rs_dy are the frame's rolling-shutter
+    // displacement per sensor row (full-res px), added to the sample position
+    std::vector<float> row_gain, rs_dx, rs_dy;
     Hooks hooks;
 };
 
@@ -142,10 +146,31 @@ struct Pass1 {
     int slices = 0;
     StreamerStats st;
     double vol_seconds = 0;
+    // per frame index (the list's order): the mean of the focus measure over the output grid, summed on the GPU while
+    // the frame folds (fold_energy_add); 0 for a frame that was not run. The soft-frame flag reads it (frame_sharpness).
+    std::vector<double> frame_energy;
 };
 
 bool read_list(const std::filesystem::path& list, std::vector<std::filesystem::path>& paths, std::vector<Similarity>& T);
 int run_pass1(const Pass1Options& po, Pass1& P);
+
+// The soft-frame rule (FINDINGS 49). A frame blurred by movement during its exposure loses fine detail everywhere,
+// while the focus energy of its neighbours in the stack is nearly the same as its own would have been (the focus
+// profile across frames is smooth), so each run frame's energy is set against the median of the five run frames
+// centred on it. `ratio` 1 = as expected; a frame is `soft` when its ratio is under `cutoff` (0.90 by default: a
+// tenth under its neighbours). A spread-based rule (median minus robust sigmas of the log ratios) was tried first
+// and is degenerate here: the focus profile is locally monotone, so most frames ARE the median of their five and
+// have the ratio 1 exactly, which makes the robust sigma 0. The wobble flags the frames whose position jumped; this
+// flags the frames that are blurred, which FINDINGS 44/45 found to be different frames.
+struct FrameSharpness {
+    std::vector<double> energy;   // per frame index: Pass1::frame_energy as given (0 = not run)
+    std::vector<double> ratio;    // per frame index: energy / median of the five run frames centred on it; 0 = not run
+    std::vector<char> soft;       // per frame index: 1 = flagged soft
+    double threshold = 0;         // the ratio below which a frame is soft (0 when fewer than 4 frames were run)
+    double peak = 0;              // the largest energy (the sharpest frame's)
+    int n_soft = 0;
+};
+FrameSharpness frame_sharpness(const std::vector<double>& energy, double cutoff = 0.9);
 
 // ---- the fusion (pass 1 + depth + refine + compose + finalize)
 
@@ -155,6 +180,10 @@ struct StackOptions {
     int streams = 2, refine_r = 12;
     double refine_fm_px = 9.0, soft_px = 3.0;
     double c_smoothing = 0.0;          // C's smoothing (FinalParams::c_smoothing); 0 = the raw selection
+    double soft_cutoff = 0.9;          // the soft-frame flag's cutoff (frame_sharpness): a frame under this share of its neighbours' focus energy
+    // FINDINGS 51: apply the alignment's per-frame row corrections in every warp (run_job copies them into po):
+    // the brightness-banding gain and the rolling-shutter row offsets
+    bool fix_banding = false, fix_rs = false;
     // B's depth priors (DepthParams). On the 1/2 grid the dark prior put dark far frames into the gaps of needle
     // fans and inside bright rims (FINDINGS 33), so since 0.6.3 it is gated off within dark_reach_px of sharp
     // content and kept for defocused background (FINDINGS 34). The 0.5.x reference B is --b-reference 1.
@@ -201,6 +230,7 @@ struct StackOptions {
         std::vector<std::vector<float>> images;   // float RGB, output grid, only the requested outputs
         std::vector<float> depth, conf;
         std::vector<float> noise_mad;
+        std::vector<double> frame_energy;         // per frame (stack order): pass 1's focus energy (Pass1::frame_energy)
         std::vector<uint8_t> icc;                 // the frames' ICC profile, embedded in the outputs
         double seconds = 0;
         // where the time went (s): pass 1 (stream + merge + volume), depth, refinement, composition, finalize, writing
@@ -236,6 +266,10 @@ struct AlignOptions {
     bool lock_scale = false;
     double um_per_px = 0;             // 0 = unknown; negative = -FOV in mm, resolved once the width is known
     FrameCache* cache = nullptr;      // resident frames (pass 0 fills it); null = stream from disk
+    // rolling shutter (FINDINGS 51): the row bands per frame whose shift is solved against the neighbours (0 = off),
+    // and the row-frequency range (cycles per frame height) taken as LED flicker in the brightness profiles
+    int rs_bands = 8;
+    int band_lo = 3, band_hi = 12;
     Hooks hooks;
 };
 bool parse_align_option(const std::string& a, const std::string& v, AlignOptions& ao);
@@ -247,6 +281,17 @@ struct AlignOut {
     GlobalSolve G;
     double smin = 1, smax = 1, seconds = 0;
     std::vector<PairResult> pairs;    // only when pairs_sel was given
+    // rolling shutter (FINDINGS 51). Warping: rs_dx/rs_dy, N x rs_bands, each frame's extra displacement (full-res px) at
+    // the centre of each row band, the stack's mean removed; rs_px per frame = the larger of the two peak-to-peak
+    // spreads over the bands (0 = flat). Banding: the LED flicker in each frame's row-mean luma, as a share of the
+    // stack's median row profile, in the band_lo..band_hi cycles-per-frame range: band_pct = its peak-to-peak in
+    // percent; row_gain, N x H, the gain that flattens it (1 = none). band_peak_cycles / band_peak_power: the
+    // strongest row frequency across the stack (power of the mean spectrum). Empty when not measured.
+    int rs_bands = 0;
+    std::vector<float> rs_dx, rs_dy, rs_px;
+    std::vector<float> band_pct, row_gain;
+    int band_peak_cycles = 0;
+    double band_peak_power = 0, band_median_pct = 0, rs_median_px = 0;
 };
 int run_align(AlignOptions& ao, AlignOut& A);
 void write_report(const AlignOptions& ao, const AlignOut& A, const std::filesystem::path& od);

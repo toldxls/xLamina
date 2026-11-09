@@ -215,10 +215,23 @@ TiffInfo tiff_probe(const std::filesystem::path& path) {
     };
 
     std::vector<uint64_t> v;
+    // an ASCII tag's text (type 2), trailing NULs and blanks trimmed
+    auto ascii = [&](const uint8_t* e, uint16_t type, uint64_t count) {
+        std::string s;
+        std::vector<uint64_t> b;
+        if (type != 2 || count == 0 || count > 256 || !values(e, type, count, b)) return s;
+        for (uint64_t c : b) s.push_back((char)c);
+        while (!s.empty() && (s.back() == '\0' || s.back() == ' ')) s.pop_back();
+        return s;
+    };
+    std::string tiff_date, exif_date, exif_subsec;
+    uint64_t exif_ifd = 0;
     for (uint64_t i = 0; i < n; ++i) {
         const uint8_t* e = ent.data() + i * esz;
         uint16_t tag = (uint16_t)P.num(e, 2), type = (uint16_t)P.num(e + 2, 2);
         uint64_t count = P.num(e + 4, P.big ? 8 : 4);
+        if (tag == 306) { tiff_date = ascii(e, type, count); continue; }                                  // DateTime
+        if (tag == 34665 && values(e, type, count, v) && !v.empty()) { exif_ifd = v[0]; continue; }     // the Exif IFD's offset
         if (tag == 34675 && count > 0 && count < (1u << 24)) {   // ICC profile: raw bytes
             size_t inl = P.big ? 8 : 4;
             const uint8_t* src = e + (P.big ? 12 : 8);
@@ -251,6 +264,26 @@ TiffInfo tiff_probe(const std::filesystem::path& path) {
             default: break;
         }
     }
+    // the capture time from the Exif IFD (the GUI sorts frames by it); any failure here just leaves it empty
+    if (exif_ifd && exif_ifd + cnt_sz < t.file_size) {
+        uint8_t xc[8];
+        if (f.read_at(exif_ifd, xc, cnt_sz) == cnt_sz) {
+            uint64_t xn = P.num(xc, (int)cnt_sz);
+            if (xn > 0 && xn <= 4096) {
+                std::vector<uint8_t> xe(xn * esz);
+                if (f.read_at(exif_ifd + cnt_sz, xe.data(), xe.size()) == xe.size())
+                    for (uint64_t i = 0; i < xn; ++i) {
+                        const uint8_t* e = xe.data() + i * esz;
+                        uint16_t tag = (uint16_t)P.num(e, 2), type = (uint16_t)P.num(e + 2, 2);
+                        uint64_t count = P.num(e + 4, P.big ? 8 : 4);
+                        if (tag == 36867) exif_date = ascii(e, type, count);          // DateTimeOriginal
+                        else if (tag == 37521) exif_subsec = ascii(e, type, count);   // SubSecTimeOriginal
+                    }
+            }
+        }
+    }
+    t.datetime = !exif_date.empty() ? exif_date : tiff_date;
+    if (!exif_date.empty() && !exif_subsec.empty()) t.datetime += "." + exif_subsec;
     if (!t.width || !t.height || !t.samples) { t.error = "missing size tags"; return t; }
     if (t.samples != 1 && t.samples != 3 && t.samples != 4) { t.error = "unsupported sample count " + std::to_string(t.samples); return t; }
     if (t.bits == 0) t.bits = 8;

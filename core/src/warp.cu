@@ -71,9 +71,19 @@ __device__ __forceinline__ int reflect(int p, int len) {   // cv::borderInterpol
     return p;
 }
 
+// the per-row corrections (RowCorr, FINDINGS 51): the row offset moves the sample position by the frame's
+// rolling-shutter displacement at the row it lands on; the row gain multiplies each source row's contribution
+__device__ __forceinline__ void apply_row_offset(const float2* __restrict__ roff, int sh, double& u, double& v) {
+    if (!roff) return;
+    int ry = min(max(__double2int_rn(v), 0), sh - 1);
+    u += roff[ry].x;
+    v += roff[ry].y;
+}
+
 template <bool QUANT>
 __global__ void k_warp_bicubic(const float* __restrict__ src, int sw, int sh, float* __restrict__ dst, int ow, int oh,
-                               double m0, double m1, double m2, double m3, double m4, double m5) {
+                               double m0, double m1, double m2, double m3, double m4, double m5,
+                               const float* __restrict__ rgain, const float2* __restrict__ roff) {
     int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= ow || y >= oh) return;
     int sx, sy;
@@ -92,6 +102,7 @@ __global__ void k_warp_bicubic(const float* __restrict__ src, int sw, int sh, fl
     } else {
         // exact positions in double (float32 positions were tried: same 1e-6 rms vs OpenCV 5)
         double u = m0 * x + m1 * y + m2, v = m3 * x + m4 * y + m5;
+        apply_row_offset(roff, sh, u, v);
         double fu = floor(u), fv = floor(v);
         sx = (int)fu;
         sy = (int)fv;
@@ -120,6 +131,7 @@ __global__ void k_warp_bicubic(const float* __restrict__ src, int sw, int sh, fl
                 r = __fadd_rn(r, __fmul_rn(S[3], w[i * 4 + 1]));
                 r = __fadd_rn(r, __fmul_rn(S[6], w[i * 4 + 2]));
                 r = __fadd_rn(r, __fmul_rn(S[9], w[i * 4 + 3]));
+                if (rgain) r = __fmul_rn(r, rgain[by + i]);
                 sum = i == 0 ? r : __fadd_rn(sum, r);
             }
             o[c] = sum;
@@ -127,10 +139,12 @@ __global__ void k_warp_bicubic(const float* __restrict__ src, int sw, int sh, fl
     } else {
         // border path: every term added in turn to a running sum
         int xs[4], ys[4];
+        float gy[4];
 #pragma unroll
         for (int i = 0; i < 4; ++i) {
             xs[i] = reflect(bx + i, sw);
             ys[i] = reflect(by + i, sh);
+            gy[i] = rgain ? rgain[ys[i]] : 1.f;
         }
 #pragma unroll
         for (int c = 0; c < 3; ++c) {
@@ -139,7 +153,7 @@ __global__ void k_warp_bicubic(const float* __restrict__ src, int sw, int sh, fl
             for (int i = 0; i < 4; ++i) {
                 const float* S = src + (size_t)ys[i] * sw * 3 + c;
 #pragma unroll
-                for (int j = 0; j < 4; ++j) sum = __fadd_rn(sum, __fmul_rn(S[xs[j] * 3], w[i * 4 + j]));
+                for (int j = 0; j < 4; ++j) sum = __fadd_rn(sum, __fmul_rn(rgain ? __fmul_rn(S[xs[j] * 3], gy[i]) : S[xs[j] * 3], w[i * 4 + j]));
             }
             o[c] = sum;
         }
@@ -173,10 +187,12 @@ __device__ __forceinline__ void filter_weights(float f, float* w) {   // f: the 
 
 template <int R, int KIND>
 __global__ void k_warp_filter(const float* __restrict__ src, int sw, int sh, float* __restrict__ dst, int ow, int oh,
-                              double m0, double m1, double m2, double m3, double m4, double m5) {
+                              double m0, double m1, double m2, double m3, double m4, double m5,
+                              const float* __restrict__ rgain, const float2* __restrict__ roff) {
     int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= ow || y >= oh) return;
     double u = m0 * x + m1 * y + m2, v = m3 * x + m4 * y + m5;
+    apply_row_offset(roff, sh, u, v);
     double fu = floor(u), fv = floor(v);
     int sx = (int)fu, sy = (int)fv;
     float fx = (float)(u - fu), fy = (float)(v - fv);
@@ -203,9 +219,10 @@ __global__ void k_warp_filter(const float* __restrict__ src, int sw, int sh, flo
             r1 += S[1] * wx[j];
             r2 += S[2] * wx[j];
         }
-        acc[0] += r0 * wy[i];
-        acc[1] += r1 * wy[i];
-        acc[2] += r2 * wy[i];
+        const float wg = rgain ? wy[i] * rgain[ys[i]] : wy[i];
+        acc[0] += r0 * wg;
+        acc[1] += r1 * wg;
+        acc[2] += r2 * wg;
     }
     float* o = dst + ((size_t)y * ow + x) * 3;
     o[0] = acc[0]; o[1] = acc[1]; o[2] = acc[2];
@@ -233,13 +250,13 @@ int interp_from_name(const char* name) {
 }
 
 void warp_rgb(const float* d_src, int sw, int sh, const double M[6], float* d_dst, int ow, int oh, int interp,
-              bool quantize, cudaStream_t s) {
+              bool quantize, cudaStream_t s, RowCorr rc) {
     dim3 blk(32, 8), grd((ow + 31) / 32, (oh + 7) / 8);
     switch (interp) {
-        case kBilinear: k_warp_filter<1, 0><<<grd, blk, 0, s>>>(d_src, sw, sh, d_dst, ow, oh, M[0], M[1], M[2], M[3], M[4], M[5]); break;
-        case kLanczos3: k_warp_filter<3, 1><<<grd, blk, 0, s>>>(d_src, sw, sh, d_dst, ow, oh, M[0], M[1], M[2], M[3], M[4], M[5]); break;
-        case kLanczos8: k_warp_filter<8, 1><<<grd, blk, 0, s>>>(d_src, sw, sh, d_dst, ow, oh, M[0], M[1], M[2], M[3], M[4], M[5]); break;
-        default: warp_bicubic_rgb(d_src, sw, sh, M, d_dst, ow, oh, quantize, s); break;
+        case kBilinear: k_warp_filter<1, 0><<<grd, blk, 0, s>>>(d_src, sw, sh, d_dst, ow, oh, M[0], M[1], M[2], M[3], M[4], M[5], rc.gain, rc.off); break;
+        case kLanczos3: k_warp_filter<3, 1><<<grd, blk, 0, s>>>(d_src, sw, sh, d_dst, ow, oh, M[0], M[1], M[2], M[3], M[4], M[5], rc.gain, rc.off); break;
+        case kLanczos8: k_warp_filter<8, 1><<<grd, blk, 0, s>>>(d_src, sw, sh, d_dst, ow, oh, M[0], M[1], M[2], M[3], M[4], M[5], rc.gain, rc.off); break;
+        default: warp_bicubic_rgb(d_src, sw, sh, M, d_dst, ow, oh, quantize, s, rc); break;
     }
 }
 
@@ -250,16 +267,16 @@ void box_down2_rgb(const float* d_src, int w, int h, float* d_dst, cudaStream_t 
 }
 
 void warp_bicubic_rgb(const float* d_src, int sw, int sh, const double M[6], float* d_dst, int ow, int oh,
-                      bool quantize, cudaStream_t s) {
+                      bool quantize, cudaStream_t s, RowCorr rc) {
     dim3 blk(32, 8), grd((ow + 31) / 32, (oh + 7) / 8);
     if (quantize)
-        k_warp_bicubic<true><<<grd, blk, 0, s>>>(d_src, sw, sh, d_dst, ow, oh, M[0], M[1], M[2], M[3], M[4], M[5]);
+        k_warp_bicubic<true><<<grd, blk, 0, s>>>(d_src, sw, sh, d_dst, ow, oh, M[0], M[1], M[2], M[3], M[4], M[5], rc.gain, rc.off);
     else
-        k_warp_bicubic<false><<<grd, blk, 0, s>>>(d_src, sw, sh, d_dst, ow, oh, M[0], M[1], M[2], M[3], M[4], M[5]);
+        k_warp_bicubic<false><<<grd, blk, 0, s>>>(d_src, sw, sh, d_dst, ow, oh, M[0], M[1], M[2], M[3], M[4], M[5], rc.gain, rc.off);
 }
 
 void load_aligned(const float* d_frame, const Grid& g, const Similarity& T, float* d_scratch, float* d_out,
-                  bool quantize, cudaStream_t s) {
+                  bool quantize, cudaStream_t s, RowCorr rc) {
     double M[6];
     affine_for(T, g, M);
     for (double v : M)
@@ -272,7 +289,7 @@ void load_aligned(const float* d_frame, const Grid& g, const Similarity& T, floa
         sw = g.work_w();
         sh = g.work_h();
     }
-    warp_rgb(src, sw, sh, M, d_out, g.out_w(), g.out_h(), g.interp, quantize, s);
+    warp_rgb(src, sw, sh, M, d_out, g.out_w(), g.out_h(), g.interp, quantize, s, rc);
 }
 
 }  // namespace stackcore

@@ -441,6 +441,24 @@ void box_filter(const float* d_in, float* d_out, float* d_tmp, int w, int h, int
 
 void luma(const float* d_rgb, float* d_y, size_t n, cudaStream_t s) { k_luma<<<blocks1(n), 256, 0, s>>>(d_rgb, d_y, n); }
 
+namespace {
+__global__ void k_row_mean(const float* __restrict__ img, int w, float* __restrict__ rows) {   // one block per row
+    __shared__ float sh[256];
+    const float* r = img + (size_t)blockIdx.x * w;
+    float v = 0.f;
+    for (int x = threadIdx.x; x < w; x += 256) v += r[x];
+    sh[threadIdx.x] = v;
+    __syncthreads();
+    for (int o = 128; o > 0; o >>= 1) {
+        if (threadIdx.x < o) sh[threadIdx.x] += sh[threadIdx.x + o];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) rows[blockIdx.x] = sh[0] / (float)w;
+}
+}  // namespace
+
+void row_mean(const float* d_img, int w, int h, float* d_rows, cudaStream_t s) { k_row_mean<<<h, 256, 0, s>>>(d_img, w, d_rows); }
+
 void laplacian3_sq(const float* d_in, float* d_out, int w, int h, cudaStream_t s) {
     k_lap3<true><<<grid2(w, h), BLK, 0, s>>>(d_in, d_out, w, h);
 }

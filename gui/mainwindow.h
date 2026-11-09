@@ -83,8 +83,11 @@ private slots:
     void onComparison(int index, QImage image);
     void onLog(QString line);
     void onFinished(std::shared_ptr<JobResultData> data);
-    void dropFlagged();
+    void dropShifted();   // untick the frames whose shift from the previous frame is an outlier
+    void dropSoft();      // untick the frames whose focus energy fell under their neighbours'
     void frameMenu(const QPoint& pos);
+    void tickAllFrames();
+    void sortFrames(bool byTime);   // the list (= the stack order) by file name, or by the capture time (EXIF; file time when absent)
 
 private:
     void buildMenus();
@@ -95,7 +98,9 @@ private:
     void resumeThumbnails();
     void warmCache();      // point the thumbnail loader at the frame cache (or away from it) for the open folder
     void setStage(const QString& text);   // the stage text, drawn inside the progress bar
-    void labelWobble(const stackcore::AlignOut& A);
+    // the frame list's per-frame lines: the wobble (shift from the previous frame, alignment) and, when the render ran
+    // pass 1, the sharpness (focus energy against the neighbours', StackOptions::Result::frame_energy); outliers flagged
+    void labelWobble(const stackcore::AlignOut& A, const stackcore::StackOptions::Result* R = nullptr);
     void setBusy(bool busy);
     void setStatusGeometry(const JobResultData& d);
     void setTheme(const QString& theme);
@@ -111,12 +116,18 @@ private:
 
     QString folder_;
     QStringList frames_;
+    QStringList frameTimes_;   // per frame: the capture time from the file's EXIF ("YYYY:MM:DD HH:MM:SS[.sss]"), empty when none
     // rows carry the frame index (into frames_) in Qt::UserRole, -1 for files left out; the list order is
     // the stack order and a frame may be listed more than once, so jobs refer to rows, not frames
     QList<QListWidgetItem*> jobItems_;     // the rows of the current / last render, in stack order
-    QList<QListWidgetItem*> flagged_;      // rows whose wobble is an outlier
-    QString wobble_;                       // the wobble summary line
-    QAction* dropFlagged_ = nullptr;
+    QList<QListWidgetItem*> shifted_;      // rows whose wobble (shift from the previous frame) is an outlier
+    QList<QListWidgetItem*> soft_;         // rows whose focus energy fell under their neighbours' (blurred frames)
+    QString wobble_;                       // the wobble + sharpness summary line
+    QAction* tickAll_ = nullptr;
+    QAction* sortName_ = nullptr;
+    QAction* sortTime_ = nullptr;
+    QAction* dropShifted_ = nullptr;
+    QAction* dropSoft_ = nullptr;
     QAction* saveAct_ = nullptr;
     QAction* openOutAct_ = nullptr;
     QAction* renderAct_ = nullptr;
@@ -192,8 +203,11 @@ private:
     QComboBox* scale_ = nullptr;
     QComboBox* ref_ = nullptr;
     QCheckBox* lockScale_ = nullptr;
+    QCheckBox* fixRs_ = nullptr;        // undo the rolling-shutter warping in every warp (FINDINGS 51)
+    QCheckBox* fixBanding_ = nullptr;   // undo the LED flicker's row banding
     QDoubleSpinBox* fov_ = nullptr;
     QDoubleSpinBox* smoothing_ = nullptr;
+    QDoubleSpinBox* softCutoff_ = nullptr;   // Preferences > General: the soft-frame flag's cutoff (FINDINGS 49)
     QDoubleSpinBox* cradius_ = nullptr;
     QDoubleSpinBox* bradius_ = nullptr;
     QLineEdit* outDir_ = nullptr;

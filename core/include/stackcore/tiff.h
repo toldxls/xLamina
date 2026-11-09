@@ -30,6 +30,9 @@ struct TiffInfo {
     uint64_t data_offset = 0;     // first strip
     uint64_t data_bytes = 0;      // sum of strip bytes
     std::vector<uint8_t> icc;     // embedded ICC profile (tag 34675), if any
+    // when the frame was taken: EXIF DateTimeOriginal (36867) with SubSecTimeOriginal (37521) appended as ".sss" when
+    // present, else the TIFF DateTime (306); "YYYY:MM:DD HH:MM:SS[.sss]", sorts as text; empty = none (JPEG too)
+    std::string datetime;
     std::string error;            // non-empty: unusable for the fast path, says why
 
     bool ok() const { return error.empty(); }

@@ -34,6 +34,15 @@ struct Grid {
     int out_h() const;
 };
 
+// Per-row corrections of a frame, applied inside the warp at the frame's own (working-scale) rows (FINDINGS 51):
+// a row gain that flattens the LED flicker's brightness banding, and a row offset (work px) that undoes the
+// rolling shutter's row-dependent displacement, both measured by the alignment. Null = none; the quantized
+// (OpenCV 4 replica) bicubic ignores the offset.
+struct RowCorr {
+    const float* gain = nullptr;   // work_h floats, 1 = no change
+    const float2* off = nullptr;   // work_h offsets added to the sample position (x, y)
+};
+
 enum Interp : int { kBilinear = 0, kBicubic = 1, kLanczos3 = 2, kLanczos8 = 3 };
 const char* interp_name(int interp);      // "bilinear", "bicubic", "lanczos3", "lanczos8"
 int interp_from_name(const char* name);   // -1 when unknown
@@ -47,16 +56,17 @@ void box_down2_rgb(const float* d_src, int w, int h, float* d_dst, cudaStream_t 
 
 // Bicubic (a = -0.75) warp with BORDER_REFLECT. src: sw x sh float RGB; dst: ow x oh.
 void warp_bicubic_rgb(const float* d_src, int sw, int sh, const double M[6], float* d_dst, int ow, int oh,
-                      bool quantize, cudaStream_t s);
+                      bool quantize, cudaStream_t s, RowCorr rc = {});
 
 // Any Interp: bilinear, the bicubic above (quantize applies to it alone), Lanczos 3 (6x6 taps) or Lanczos 8
 // (16x16 taps), all with BORDER_REFLECT and exact double positions.
 void warp_rgb(const float* d_src, int sw, int sh, const double M[6], float* d_dst, int ow, int oh, int interp,
-              bool quantize, cudaStream_t s);
+              bool quantize, cudaStream_t s, RowCorr rc = {});
 
 // Convenience: full-res float RGB frame -> output grid with the grid's Interp, using a scratch buffer
-// of work_w * work_h * 3 floats when scale == 0.5 (unused otherwise).
+// of work_w * work_h * 3 floats when scale == 0.5 (unused otherwise). rc: the frame's row corrections at the
+// working scale (see RowCorr).
 void load_aligned(const float* d_frame, const Grid& g, const Similarity& T, float* d_scratch, float* d_out,
-                  bool quantize, cudaStream_t s);
+                  bool quantize, cudaStream_t s, RowCorr rc = {});
 
 }  // namespace stackcore

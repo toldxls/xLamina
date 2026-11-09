@@ -2060,10 +2060,190 @@ way (about 150 ms per frame, single-threaded, so a 200-frame JPEG folder
 takes ~30 s to fill the cache against ~10 s for TIFF), and the frames' line
 names the profile ("Adobe RGB (1998)").
 
+## 49. Soft frames: a per-frame focus energy next to the wobble (2026-11-09)
+
+Travis: "alongside the delta shift, a metric to notice soft frames would be
+useful". §45's lesson was that the wobble flags the frames whose *position*
+jumped, not the frames that are *blurred*; a frame blurred by movement during
+its exposure loses fine detail everywhere, while the focus profile across the
+stack is smooth, so its neighbours say what its energy should have been.
+
+- **The measure.** Pass 1 already computes every frame's focus measure on the
+  output grid (luma, blur 0.8, Laplacian², blur `radius`); `fold_energy_add`
+  sums it per frame on the GPU as the frame folds (one double per frame per
+  card, an atomic per block; `Pass1::frame_energy`, the mean over the grid).
+  No extra pass, no measurable cost (210 frames: 3.14 s before and after).
+- **The rule** (`frame_sharpness`, pipeline.h): each run frame's energy over
+  the median of the five run frames centred on it; soft when the ratio is
+  under a cutoff, 0.90 by default (Preferences > General > Soft frame below,
+  `--soft-cutoff`; changing it in the GUI re-flags the last render without a
+  render). The first version used the median of the four neighbours
+  *excluding* the frame, which flagged the two frames beside a spike instead
+  of the spike's own oddity; the centred five leave a single spike's
+  neighbours alone and still catch two soft frames in a row. A spread-based
+  cutoff (median of the log ratios minus 4 robust sigmas, capped at 0.9) was
+  in 0.6.38's first build and is degenerate: the focus profile is locally
+  monotone, so most frames *are* the median of their five and have the ratio
+  1 exactly, the robust sigma is 0 and the rule always fell back to the 0.9
+  cap. The 192-frame stack after the test frames were dropped has its lowest
+  ratios at 0.92, 0.95 and 0.97 (Travis, 11/09: "several frames approach
+  ~0.9 ... what's the cutoff?"), hence the setting.
+- **Verified against the raw frames.** An independent Laplacian-energy
+  measurement with OpenCV on the source TIFFs (no warp) gives the same
+  ratios to within 0.05 (frame 2: 0.651 vs the engine's 0.622 under the old
+  rule; frame 5: 0.719 vs 0.694). The energies are the frames', not the
+  warp's.
+- **What the 210-frame stack at Q:\ showed.** Frames 0..2 carry 0.39 of the
+  peak energy, frames 3..4 jump to 0.87 and 0.97, frame 5 drops to 0.53, then
+  the profile is smooth (0.6 rising to 1.0 at frame 76 and falling to 0.38 at
+  the end). The 1:1 crops explain it: frames 1 and 2 show sharp grains where
+  frames 3..6 show a different, defocused scene, and the alignment has the
+  stage wandering by 130, 24, 170, 330 and 260 px between the first six
+  frames (tx 22, 154, 178, 8, 327, 70 px). Those are frames taken while the
+  stage was still moving; the wobble flags five of them as shifted, and
+  the sharpness flags frame 5 (0.80), the one taken during the last large
+  move. Noise is not the cause: the flat-tile noise MAD is 0.0036..0.0043
+  on all six. The ends of the stack sit at 0.38..0.40 of the peak, a floor
+  made of the frames' residual texture, so a soft frame at a defocused end
+  still shows as a dip.
+- **GUI** (0.6.38): the list row reads `Δ 1.23 px  0.012 %  sharp 0.97`;
+  soft rows are amber, shifted rows red; Render > Drop shifted frames and
+  Drop soft frames untick each kind separately (Travis: "two buttons").
+  The CLI logs the soft frames, stack.txt carries `frame_energy`,
+  `soft_threshold` and `soft`.
+
+## 50. Cx: C's glow is coarse-level selection with no support below it (2026-11-09)
+
+Travis asked whether "point spread function tricks" could remove the bright
+glare in C. Deconvolution cannot: the glare is the wrong *frame* being chosen,
+not blur inside the chosen frame, and the frames are Camera Raw denoised, so
+the per-frame PSF is the denoiser's, not the lens's. What survives denoising
+is the geometry of defocus: a highlight's disc grows with the distance from
+focus and has energy at the coarse pyramid levels only.
+
+- **Where C glares** (`STACKER_C_DEBUG=1` dumps C's chosen frame and energy
+  per level; `glare_scan.py` in the scratchpad): the blobs where C's luma sits
+  above B's at a coarse scale (low-pass of C − B > 0.012 at 1/4, 22 % of the
+  image) are the milky glow at the left end of the bright prism (output px
+  4346, 2443; C − B +0.131) and hazes over the red crystals (+0.05..0.08).
+  Inside them C's chosen frame at levels 3..4 is 9..20 frames from B's depth.
+  Among the strongest 10 % of pixels per level the chosen frame is within 1..2
+  frames of the depth at levels 0..2 and drifts to 4.5 (L4), 16 (L5) and 40
+  (L6) frames: the coarse levels follow the defocus discs, not the surface.
+  The "rim" candidates (chosen frame far from the depth AND strong, level 2)
+  carry no luma excess: they are overlapping transparent crystals where C
+  legitimately shows another depth.
+- **CB/CBn already remove two thirds of the glow** (excess +0.052 → +0.014):
+  the depth test. What they leave is the dominance exception (`c_sal <
+  4 × sB`): where C's energy dwarfs B's the coefficient stays, which is exactly
+  the glow over a smooth region of B. And they cost detail: where C carries
+  fine detail B lacks (energy over 2× B's, top 3 %), CBn keeps 86 % of it.
+- **The support rule** (prototyped in Python from the dumps, `cstar_proto.py`,
+  then `k_take_support` in compose.cu): at levels ≥ 1 a coefficient whose
+  frame disagrees with the depth by more than `agree` (3) is taken from B
+  unless at least 2 of the 4 finer pixels under it chose a frame within 4 of
+  it. A glow has no support (the fine levels under it pick noise or the
+  in-focus structure); detail B missed has the same frame at every level.
+  Level 0 keeps the noise rule alone. Cx = CBn with this test in place of the
+  dominance test.
+
+  | output | glow excess over B | fine detail kept (C = 1) |
+  |---|---|---|
+  | C | +0.052 | 1.000 |
+  | CBn | +0.014 | 0.856 |
+  | Cx | +0.030 | 0.970 |
+
+  At 1:1 Cx clears the prism's glow and the haze over the red crystal nearly as
+  CBn does and keeps C's crisp internal plate lines where CBn softens them.
+  `support_min` 3 of 4 or `support_near` 2 would trade the other way; the
+  knobs are in FinalParams, not exposed yet. Travis judges at 1:1.
+- **A bug on the way:** `k_noise_w`'s `only` flag was `!use_depth`, so with
+  the support rule and no depth rule the noise weights overwrote the support
+  weights and the first Cx equalled C (+0.0520). Now `!(use_depth ||
+  use_support)`.
+- **Not fixed by selection:** the residual +0.014 of CBn is haze present in
+  the in-focus frames themselves (veiling glare from bright objects out of
+  focus), and the sparkles (§10), which only a tone stage addresses.
+
+## 51. Rolling shutter: warping and LED banding measured and undone (2026-11-09)
+
+Travis: "most of my shots also suffer from rolling shutter effects. Warping,
+and brightness banding". Both are real on the 210-frame stack, both are
+measured by every alignment now, and both can be undone in the warp.
+
+- **Warping, the probe.** Frame k+1 warped onto frame k with the stack's own
+  similarity, then phase correlation per horizontal band (Python, 0.5 scale):
+  the residual shift still varies with the row by 2..6 px (full res) on many
+  pairs, the sign alternating from pair to pair. Real, not noise: shift(k,
+  k+2) equals shift(k, k+1) + shift(k+1, k+2) to 0.34 px rms against 1.05 px
+  rms of the shifts themselves. Against its four neighbours each frame's own
+  row offset is a smooth curve over the rows, peak-to-peak 1..5 px (IMG_5572:
+  a shear of +2.4 to −2.6 px from top to bottom, IMG_5556: 3 px at the
+  bottom only). This is the frame-to-frame displacement the similarity cannot
+  model; where B switches frame across such an offset the edge doubles (§45's
+  shifted copy, and §25's "ghost outlines" are the same size).
+- **Banding, the probe.** Each frame's row-mean luma over the stack's median
+  row profile: 2..7 % peak-to-peak. The mean power spectrum over 31 frames
+  peaks at 6.0 cycles per frame (773 rows) with 3, 5, 8 and 10 beside it;
+  58 % of the residual's power sits in 3..12 cycles per frame and that
+  component is 2.4..5.5 % peak-to-peak per frame. The frame-long trend
+  (1..2 cycles, 14 %) is the content drifting in and out of focus, not
+  flicker.
+- **Engine, warping** (`band_shifts`, `chain_offsets`, `rolling_shutter_pass`):
+  after the global solve, for the baseline-1 and -2 pairs, frame j's level-0
+  luma is warped onto frame i by the solved pair similarity and each of 8 row
+  bands gets a Gauss-Newton solve of translation + gain + bias (the 6-param
+  reduce restricted to the band's pixels, the a/b rows replaced by the
+  identity; `k_gn_reduce` took an [i0, i1) range for it). Per band the pair
+  shifts are chained into one offset per frame by weighted least squares
+  (Huber, a 1e-6 pull to 0 so a frame with no usable band keeps the system
+  solvable, the mean over frames removed). **The chain integrates a drift:**
+  the first run gave 16 px median and the same pattern in every frame of a
+  run of 15 (−4, 6, −6, −7, 9, −2, 1, 16 px per band), i.e. a frame-to-frame
+  bias of a tenth of a pixel per band (the specimen's relief read band by
+  band, the lens' distortion changing with focus) summed over 200 frames. The
+  rolling shutter is the frame's own departure from its neighbours, so the
+  median of the six frames around it (itself left out, or a frame that is
+  its window's median would read 0) is subtracted. After that: median 2.4 px
+  band to band, IMG_5572 4.2 px with the probe's shear (1.5, 1.7, 1.4, −0.1,
+  −1.0, −1.5, −2.0, −2.5), the test frames 70+ px (garbage, as they should
+  be). 417 pairs × 8 bands in 2.1 s on two GPUs.
+- **Engine, banding** (`row_mean`, `banding_fit`): the row means of every
+  frame's full-resolution luma in pass 0 (one block per row), the reference
+  of frame k = the median over the 17 frames around it (the stack-wide median
+  gave 14 % for a frame far from the middle, the content's drift; the local
+  one gives the flicker alone), the residual projected on the Fourier modes
+  3..12 cycles per frame; `band_pct` is that component's peak-to-peak,
+  `row_gain` its inverse per row. Median 2.7 %, strongest mode 6 cycles
+  (773 rows), as the probe found.
+- **The correction** (`RowCorr` in warp.h): every warp kernel takes an
+  optional per-row gain and a per-row offset at the working scale; the
+  offset moves the sample position by the frame's displacement at the row it
+  lands on, the gain multiplies each source row's contribution (bit-identical
+  output when both are null). `Pass1Options` carries K × H tables,
+  `DevRowCorr` uploads them per device (two sensor rows averaged into one
+  working row at scale 0.5), `apply_row_fixes` in run_job builds them from
+  the alignment (the band offsets interpolated linearly between band
+  centres) when `fix_rs` / `fix_banding` are set. GUI: Render > Undo
+  rolling-shutter warping / Undo LED banding, off by default, `_rs` /
+  `_band` in the saved names; CLI `--fix-rs 1 --fix-banding 1`.
+- **First numbers, B on the 210 frames, both corrections on vs off:** luma
+  differs by 1.7 % rms (17 % of pixels by more than 1 %, mostly the soft
+  regions where the depth picked another frame); Laplacian energy +4 %
+  (0.00368 → 0.00384); the doubled-edge share (edge pixels with a second,
+  parallel edge of the same polarity 2..6 px along the gradient) 0.539 →
+  0.527, lower in 7 of the 8 sharpest 256-px blocks. The right direction,
+  small; Travis's 1:1 verdict decides whether either goes on by default.
+- **Open:** the band offsets are one translation per 580 rows (8 bands); a
+  vibration faster than the readout would need more bands or a spline. The
+  banding fit's range 3..12 is this camera's; the log prints the strongest
+  mode so another body's range can be read off.
+
 ## Open items
 
-- **Per-frame sharpness flag** (§45): pass 1's focus energy per frame, next
-  to the wobble in the frame list, so soft frames can be culled directly.
+- **AutoFOV link** (Travis, 11/09): an option that asks autofov.local for the
+  LAST stack's average FOV right after shooting (he stacks straight after
+  capture), ahead of the capture-log design in DESIGN.md.
 - **B: doubled plate edge / glow** (§25a): the C-style aggregation does not
   work on the normalised focus measure; needs rim rejection or ownership.
 - **C: stacked rim outlines inside bright plates** (§25): present at any C
@@ -2083,6 +2263,7 @@ names the profile ("Adobe RGB (1998)").
   Camera Raw's enhanced linear raw) is lossless-JPEG compressed and in camera colour before white balance, so
   reading it means a raw developer stage (LibRaw), not a reader tweak. The Camera Raw 16-bit TIFF export stays
   the path for now.
-- **AutoFOV link**: bring AutoFOV's per-frame blur values (and focus position)
-  into the frame list next to the alignment wobble, from a capture-side
-  sidecar, so frames can be culled or weighted from capture data too.
+- **AutoFOV capture data** (later than the FOV pull above): bring AutoFOV's
+  per-frame blur values (and focus position) into the frame list next to the
+  wobble and the sharpness, from a capture-side sidecar, so frames can be
+  culled or weighted from capture data too.

@@ -52,6 +52,8 @@ struct AlignWork {
     void *tw_fw = nullptr, *tw_fh = nullptr, *tw_iw = nullptr, *tw_ih = nullptr;
     void *fft_a = nullptr, *fft_b = nullptr, *fft_t = nullptr;
     float* fft_c = nullptr;
+    float2* rowoff = nullptr;        // band_shifts: per-row extra offsets of the warp (h entries, allocated on first use)
+    int rowoff_h = 0;
     void alloc(int w, int h);
     void free();
 };
@@ -65,6 +67,29 @@ struct AlignParams {
 // Align pair (i, j) on the current device.
 PairResult align_pair(const AlignPyramid& pi, const AlignPyramid& pj, int i, int j, AlignWork& wk, const AlignParams& p,
                       cudaStream_t s);
+
+// ---- rolling shutter (FINDINGS 51)
+
+// One frame's level-0 data without the pyramid (luma copy and gradients), for band_shifts.
+void level0_build(AlignPyramid::Level& L, const float* d_luma, int w, int h, cudaStream_t s);
+void level0_free(AlignPyramid::Level& L);
+
+struct BandShift {
+    std::vector<double> dx, dy;   // per band: the extra shift (work px) frame j's content needs in that band of frame i's rows
+    std::vector<double> ncc;      // per band: the correlation after the solve
+    std::vector<int> n;           // per band: pixels used
+};
+// Frame j warped onto frame i by the pair similarity (z, t: frame-i coords -> frame-j coords, centred work px, the
+// PairResult convention), then per horizontal band of i's rows a Gauss-Newton solve of translation + gain + bias
+// with the similarity held. A shift that differs from band to band is a row-dependent displacement the similarity
+// cannot model: the rolling shutter reading the sensor while the stage still vibrated.
+BandShift band_shifts(const AlignPyramid::Level& Li, const AlignPyramid::Level& Lj, std::complex<double> z, std::complex<double> t,
+                      int nbands, AlignWork& wk, cudaStream_t s, int iters = 8);
+// Per-frame offsets d_k from pair measurements m_e = d_j - d_i (one band, dx + i dy), weighted least squares with
+// Huber reweighting, the mean over the frames held at 0 (the common deformation is not observable and harmless);
+// a frame without a usable pair (w = 0) gets 0. Throws nothing.
+std::vector<std::complex<double>> chain_offsets(int n, const std::vector<std::pair<int, int>>& pairs,
+                                                const std::vector<std::complex<double>>& m, const std::vector<double>& w);
 
 // ---- host side: the global solve and the geometry
 

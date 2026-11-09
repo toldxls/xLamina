@@ -96,6 +96,9 @@ void fold_measure(const float* d_img, const FoldParams& p, FoldScratch& sc, cuda
 
 // Stage 2 (the device's single fold stream): fold frame k's measures into st.
 void fold_accumulate(FoldState& st, int k, const float* d_img, const FoldParams& p, FoldScratch& sc, cudaStream_t s);
+// *d_acc += sum of the n floats (the frame's focus measure, sc.fm, after fold_measure): the per-frame focus energy
+// behind the soft-frame flag (pipeline.h frame_sharpness). d_acc is a device double, zeroed by the caller.
+void fold_energy_add(const float* d_fm, size_t n, double* d_acc, cudaStream_t s);
 
 // Live preview of the running A (a_num / a_den) at 1/down of the grid, float RGB on the host (syncs the stream).
 void fold_preview(const FoldState& st, int down, std::vector<float>& rgb, int& pw, int& ph, cudaStream_t s);

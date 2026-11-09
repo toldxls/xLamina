@@ -25,6 +25,8 @@ void gaussian_blur(const float* d_in, float* d_out, float* d_tmp, int w, int h, 
 void box_filter(const float* d_in, float* d_out, float* d_tmp, int w, int h, int r, cudaStream_t s);
 // y = rgb @ (0.2126, 0.7152, 0.0722)
 void luma(const float* d_rgb, float* d_y, size_t n, cudaStream_t s);
+// rows[y] = mean over x of img[y][x] (single channel): a frame's brightness profile across the sensor rows (FINDINGS 51)
+void row_mean(const float* d_img, int w, int h, float* d_rows, cudaStream_t s);
 // out = Laplacian(in, ksize 3)^2 (OpenCV's {2,0,2,0,-8,0,2,0,2})
 void laplacian3_sq(const float* d_in, float* d_out, int w, int h, cudaStream_t s);
 // out = |Laplacian(in, ksize 3)|

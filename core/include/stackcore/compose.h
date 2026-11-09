@@ -108,10 +108,16 @@ struct FinalParams {
     // from B instead of the argmax frame (which in flat areas picks the noisiest frame).
     // 0 = the raw selection; 3 = the same gate as Cn.
     float c_smoothing = 0.f;
+    // Cx (FINDINGS 50): at levels >= 1 a coefficient whose frame disagrees with B's depth by more than `agree` is
+    // taken from B unless the finer level supports the choice: at least support_min of the 2x2 finer pixels under
+    // it chose a frame within support_near of it. A defocus glow or rim has energy at the coarse levels only (the
+    // fine levels under it pick noise or the in-focus structure), real detail that B missed has the same frame at
+    // every level. Replaces CB's dominance test, which let the glow through wherever C's energy dwarfed B's.
+    int support_near = 4, support_min = 2;
     std::vector<std::string> outputs;   // which outputs to compute (plus what they depend on); empty = all
 };
 
-// Outputs by name (A, B, B0, C, CB, Cn, CBn, Cd, Cg, Cg2, H), float RGB on the host.
+// Outputs by name (A, B, B0, C, CB, Cn, CBn, Cx, Cd, Cg, Cg2, H), float RGB on the host.
 struct FinalOutputs {
     std::vector<std::string> names;
     std::vector<std::vector<float>> images;

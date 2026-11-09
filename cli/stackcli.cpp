@@ -60,8 +60,13 @@ static int usage() {
             "  stackcli run DIR [--out DIR] [--prefix IMG_] [--scale 1|0.5] [--outputs B,C,Cn] [--ref middle] [--lock-scale 1]\n"
             "               [--fov-mm X | --um-per-px X] [--gpus 0,1] [--streams 2] [--align-scale 0.25] [--baselines 1,2,4,8] [--pair-threads 3]\n"
             "               [--smoothing 0] [--c-radius 0]   align the TIFF frames in DIR (all of them, or those starting with --prefix) and fuse them:\n"
-            "               report.json + 16-bit TIFFs in DIR_stacker (or --out). Outputs: A B B0 C CB Cn CBn Cd Cg Cg2 H\n"
+            "               report.json + 16-bit TIFFs in DIR_stacker (or --out). Outputs: A B B0 C CB Cn CBn Cx Cd Cg Cg2 H\n"
+            "               Cx: CBn with the finer level's support in place of the dominance test (against the glow of defocused highlights)\n"
             "               --smoothing S: C takes detail weaker than S x the noise from B (0 = raw selection, 2 ~ Helicon's 1, 3 = Cn)\n"
+            "               --soft-cutoff 0.9: a frame is reported soft when its focus energy is under this share of its neighbours' (stack.txt, log)\n"
+            "               --rs-bands 8 (0 = off) / --band-cycles 3,12: the rolling-shutter probe (FINDINGS 51): each frame's displacement per\n"
+            "               row band against its neighbours, and the LED flicker in its row brightness (cycles per frame height); report.json\n"
+            "               --fix-rs 1 / --fix-banding 1: undo them in every warp (the measured row offsets and row gains); default off\n"
             "               --c-radius R: C aggregates each frame's pyramid energy over R sensor px before choosing, so a strong\n"
             "                             edge's frame wins the band beside it instead of its defocus rims (0 = off, 32 is a good start)\n"
             "               --b-radius R: the same for B's focus volume: each frame's focus slice is blurred over R sensor px\n"
@@ -217,6 +222,7 @@ static void print_info(const fs::path& p, const TiffInfo& t) {
     printf("  %zu strips, %s, pixel data at %llu, %llu bytes (file %llu)\n", t.strip_offsets.size(),
            t.contiguous ? "contiguous" : "with gaps", (unsigned long long)t.data_offset,
            (unsigned long long)t.data_bytes, (unsigned long long)t.file_size);
+    printf("  taken %s\n", t.datetime.empty() ? "(no capture time in the file)" : t.datetime.c_str());
 }
 
 static std::vector<int> parse_list(const std::string& s) {

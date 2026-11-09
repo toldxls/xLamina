@@ -155,6 +155,23 @@ __global__ void k_take_b(const int16_t* c_idx, const float* dl, const float* c_s
     bool t = fabsf((float)c_idx[i] - dl[i]) > agree && c_sal[i] < dominance * sB[i];
     wb[i] = t ? 1.f : 0.f;
 }
+// Cx (FINDINGS 50): take_b = |c_idx - dl| > agree & fewer than min_n of the 2x2 finer pixels under this one chose a
+// frame within `near` of its choice. `fine` is level l-1's chosen frame (fw x fh); the coarse grid is w x h.
+__global__ void k_take_support(const int16_t* c_idx, const int16_t* fine, const float* dl, float* wb, int w, int h, int fw, int fh,
+                               float agree, int near_fr, int min_n) {   // (`near` is a Windows macro)
+    size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (i >= (size_t)w * h) return;
+    int c = c_idx[i];
+    if (fabsf((float)c - dl[i]) <= agree) { wb[i] = 0.f; return; }
+    int x = (int)(i % w), y = (int)(i / w), n = 0;
+    for (int dy = 0; dy < 2; ++dy)
+        for (int dx = 0; dx < 2; ++dx) {
+            int fx = min(2 * x + dx, fw - 1), fy = min(2 * y + dy, fh - 1);
+            if (abs((int)fine[(size_t)fy * fw + fx] - c) <= near_fr) ++n;
+        }
+    wb[i] = n < min_n ? 1.f : 0.f;
+}
+
 // far = |c_idx - dl| > glint_agree
 __global__ void k_far(const int16_t* c_idx, const float* dl, float* wb, size_t n, float glint) {
     size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
@@ -495,7 +512,7 @@ FinalOutputs finalize(const FoldState& st, const std::vector<float>& noise_mad, 
     // depth-locked ones; everything is computed in the same order as before, only the unrequested
     // outputs are skipped (FINDINGS 29)
     const bool want_H = want("H"), want_CBn = want("CBn") || want_H;
-    const bool need_depth = want("CB") || want_CBn || want("Cd");
+    const bool need_depth = want("CB") || want_CBn || want("Cd") || want("Cx");
     const bool need_B = (p.c_smoothing > 0.f && want("C")) || want("Cn") || need_depth || want("Cg") || want("Cg2");
     // A, B0
     if (want("A")) {
@@ -564,12 +581,16 @@ FinalOutputs finalize(const FoldState& st, const std::vector<float>& noise_mad, 
         tmpw[l] = dalloc<float>(m);
     }
     lv[levels - 1] = pyrB.lap[levels - 1];   // base from B
-    auto level_weights = [&](int l, bool use_depth, bool use_noise, float agree_v, float noise_k) {
+    auto level_weights = [&](int l, bool use_depth, bool use_noise, float agree_v, float noise_k, bool use_support = false) {
         auto sh = st.shapes[l];
         size_t m = (size_t)sh.w * sh.h;
-        if (use_depth) k_take_b<<<blocks1(m), 256, 0, s>>>(c_idx[l], dl_lvl[l], c_sal[l], sB[l], wb[l], m, agree_v, p.dominance);
+        if (use_support && l >= 1)   // Cx: the depth test with the finer level's support instead of the dominance test
+            k_take_support<<<blocks1(m), 256, 0, s>>>(c_idx[l], c_idx[l - 1], dl_lvl[l], wb[l], sh.w, sh.h, st.shapes[l - 1].w, st.shapes[l - 1].h,
+                                                      agree_v, p.support_near, p.support_min);
+        else if (use_depth) k_take_b<<<blocks1(m), 256, 0, s>>>(c_idx[l], dl_lvl[l], c_sal[l], sB[l], wb[l], m, agree_v, p.dominance);
         else CK(cudaMemsetAsync(wb[l], 0, m * sizeof(float), s));
-        if (use_noise) k_noise_w<<<blocks1(m), 256, 0, s>>>(lapC[l], wb[l], m, noise_k * noise_mad[l] + 1e-12f, !use_depth);
+        // `only`: the noise rule alone sets the weight; with a depth or support rule before it, it adds to that weight
+        if (use_noise) k_noise_w<<<blocks1(m), 256, 0, s>>>(lapC[l], wb[l], m, noise_k * noise_mad[l] + 1e-12f, !(use_depth || (use_support && l >= 1)));
         gaussian_blur(wb[l], wb[l], tmpw[l], sh.w, sh.h, g1, s);
         k_level_mix<<<blocks1(m), 256, 0, s>>>(wb[l], pyrB.lap[l], lapC[l], lv[l], m * 1);
     };
@@ -581,11 +602,12 @@ FinalOutputs finalize(const FoldState& st, const std::vector<float>& noise_mad, 
         emit("C", coll, n * 3);
     }
     std::vector<float> cbn_host;
-    struct V { const char* name; bool depth, noise; };
-    for (V v : {V{"CB", true, false}, V{"Cn", false, true}, V{"CBn", true, true}}) {
+    // Cx: level 0 has no finer level, so there only the noise rule applies (use_depth false)
+    struct V { const char* name; bool depth, noise, support; };
+    for (V v : {V{"CB", true, false, false}, V{"Cn", false, true, false}, V{"CBn", true, true, false}, V{"Cx", false, true, true}}) {
         bool is_cbn = std::string(v.name) == "CBn";
         if (!(is_cbn ? want_CBn : want(v.name))) continue;
-        for (int l = 0; l < levels - 1; ++l) level_weights(l, v.depth, v.noise, p.agree, p.noise_k);
+        for (int l = 0; l < levels - 1; ++l) level_weights(l, v.depth, v.noise, p.agree, p.noise_k, v.support);
         collapse_levels(lv_c);
         if (!is_cbn || want("CBn")) emit(v.name, coll, n * 3);
         if (is_cbn) cbn_host = want("CBn") ? out.images.back() : dl(coll, n * 3);

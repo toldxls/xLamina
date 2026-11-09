@@ -107,6 +107,22 @@ __global__ void k_fill_f32(float* p, size_t n, float v) {
 
 inline unsigned blocks1(size_t n) { return (unsigned)((n + 255) / 256); }
 
+// sum of a float image into *acc (double): per block a shared-memory tree, one atomic per block. A frame's
+// total focus energy, so a frame blurred by movement during its exposure stands out against its neighbours
+// (FINDINGS 49). The atomics' order varies run to run: the sum is reproducible to ~1e-15, not to the bit.
+__global__ void k_sum_f32(const float* __restrict__ a, size_t n, double* __restrict__ acc) {
+    __shared__ double sh[256];
+    double v = 0;
+    for (size_t i = blockIdx.x * 256 + threadIdx.x; i < n; i += (size_t)gridDim.x * 256) v += a[i];
+    sh[threadIdx.x] = v;
+    __syncthreads();
+    for (int o = 128; o > 0; o >>= 1) {
+        if (threadIdx.x < o) sh[threadIdx.x] += sh[threadIdx.x + o];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) atomicAdd(acc, sh[0]);
+}
+
 float median_sorted(float* d, size_t n, cudaStream_t s) {
     thrust::sort(thrust::cuda::par.on(s), thrust::device_ptr<float>(d), thrust::device_ptr<float>(d + n));
     float v[2];
@@ -247,6 +263,11 @@ void fold_measure(const float* d_img, const FoldParams& p, FoldScratch& sc, cuda
         if (p.c_radius > 0.f && l >= 1) gaussian_blur(sc.sal[l], sc.sal[l], sc.t1, a.w, a.h, sc.g_c[l], s);
         gl = sc.g[l + 1];
     }
+}
+
+void fold_energy_add(const float* d_fm, size_t n, double* d_acc, cudaStream_t s) {
+    unsigned b = (unsigned)std::min<size_t>(blocks1(n), 4096);
+    k_sum_f32<<<b, 256, 0, s>>>(d_fm, n, d_acc);
 }
 
 void fold_accumulate(FoldState& st, int k, const float* d_img, const FoldParams& p, FoldScratch& sc, cudaStream_t s) {

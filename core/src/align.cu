@@ -67,6 +67,30 @@ __global__ void k_warp_cv(const float* __restrict__ src, int w, int h, float* __
     dst[(size_t)y * w + x] = sum;
 }
 
+// the same warp with a per-row extra offset (band_shifts: each band of rows carries its own translation)
+__global__ void k_warp_cv_off(const float* __restrict__ src, int w, int h, float* __restrict__ dst,
+                              double m0, double m1, double m2, double m3, double m4, double m5, const float2* __restrict__ off) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= w || y >= h) return;
+    double u = m0 * x + m1 * y + m2 + off[y].x, v = m3 * x + m4 * y + m5 + off[y].y;
+    double fu = floor(u), fv = floor(v);
+    int sx = (int)fu - 1, sy = (int)fv - 1;
+    float wx[4], wy[4];
+    cubic_weights((float)(u - fu), wx);
+    cubic_weights((float)(v - fv), wy);
+    float sum = 0.f;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        int yy = min(max(sy + i, 0), h - 1);
+        const float* row = src + (size_t)yy * w;
+        float r = 0.f;
+#pragma unroll
+        for (int j = 0; j < 4; ++j) r += wx[j] * row[min(max(sx + j, 0), w - 1)];
+        sum += wy[i] * r;
+    }
+    dst[(size_t)y * w + x] = sum;
+}
+
 __device__ __forceinline__ int mirror_idx(int i, int n) {   // scipy mode="mirror": d c b | a b c d | c b a
     if (n <= 1) return 0;
     int sz2 = 2 * n - 2;
@@ -173,16 +197,16 @@ __global__ void k_bspline_prefilter(float* __restrict__ img, int w, int h, int a
 // per-pixel Jacobian terms and residual, reduced per block into partials[block][NSUM]
 __global__ void k_gn_reduce(const float* __restrict__ I0, const float* __restrict__ gx0, const float* __restrict__ gy0,
                             const float* __restrict__ I1w, const float* __restrict__ gx1, const float* __restrict__ gy1,
-                            int w, int h, double m0, double m1, double m2, double m3, double m4, double m5, float g, float beta,
+                            int w, int h, size_t i0, size_t i1, double m0, double m1, double m2, double m3, double m4, double m5, float g, float beta,
                             float cx, float cy, float R, double* __restrict__ partials) {
     __shared__ double red[8][NSUM];
-    size_t n = (size_t)w * h;
     // per-thread partials in float over its few dozen pixels (a thread's share is fixed by the grid,
     // so the order is deterministic), double from the warp reduction on: the all-double version ran at
-    // GeForce's 1/64 FP64 rate with 72 registers of accumulators (FINDINGS 27)
+    // GeForce's 1/64 FP64 rate with 72 registers of accumulators (FINDINGS 27). [i0, i1): the pixels taken
+    // (the whole image for a pair, one band of rows for band_shifts)
     float acc[NSUM];
     for (int q = 0; q < NSUM; ++q) acc[q] = 0.f;
-    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (size_t)gridDim.x * blockDim.x) {
+    for (size_t i = i0 + (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < i1; i += (size_t)gridDim.x * blockDim.x) {
         int x = (int)(i % w), y = (int)(i / w);
         float X = (float)(m0 * x + m1 * y + m2), Y = (float)(m3 * x + m4 * y + m5);
         if (!(X >= 3.f && X <= w - 4.f && Y >= 3.f && Y <= h - 4.f)) continue;
@@ -407,6 +431,9 @@ void AlignWork::free() {
     cudaFree(I1w); cudaFree(gxw); cudaFree(gyw); cudaFree(partials);
     for (void* p : {tw_fw, tw_fh, tw_iw, tw_ih, fft_a, fft_b, fft_t}) cudaFree(p);
     cudaFree(fft_c);
+    cudaFree(rowoff);
+    rowoff = nullptr;
+    rowoff_h = 0;
     tw_fw = tw_fh = tw_iw = tw_ih = fft_a = fft_b = fft_t = nullptr;
     fft_c = nullptr;
     fft_w = fft_h = 0;
@@ -494,7 +521,7 @@ PairResult align_pair(const AlignPyramid& pi, const AlignPyramid& pj, int i, int
             if (exact) k_warp_bspline<<<grid2(w, h), BLK, 0, s>>>(pj.coef, w, h, wk.I1w, M[0], M[1], M[2], M[3], M[4], M[5]);
             else k_warp_cv<<<grid2(w, h), BLK, 0, s>>>(L1.I, w, h, wk.I1w, M[0], M[1], M[2], M[3], M[4], M[5]);
             k_grad<<<grid2(w, h), BLK, 0, s>>>(wk.I1w, wk.gxw, wk.gyw, w, h);
-            k_gn_reduce<<<nblocks, 256, 0, s>>>(L0.I, L0.gx, L0.gy, wk.I1w, wk.gxw, wk.gyw, w, h, M[0], M[1], M[2], M[3], M[4], M[5],
+            k_gn_reduce<<<nblocks, 256, 0, s>>>(L0.I, L0.gx, L0.gy, wk.I1w, wk.gxw, wk.gyw, w, h, 0, n, M[0], M[1], M[2], M[3], M[4], M[5],
                                                  (float)p[4], (float)p[5], (float)cx, (float)cy, (float)R, wk.partials);
             k_final_reduce<<<1, 64, 0, s>>>(wk.partials, nblocks, wk.partials + (size_t)wk.max_blocks * NSUM);
             CK(cudaMemcpyAsync(sums, wk.partials + (size_t)wk.max_blocks * NSUM, NSUM * sizeof(double), cudaMemcpyDeviceToHost, s));
@@ -720,6 +747,142 @@ void common_rect(const std::vector<cd>& z, const std::vector<cd>& t, int W, int 
     rect[1] = std::max(0, (int)std::ceil(top + margin));
     rect[2] = std::min(W - 1, (int)std::floor(right - margin));
     rect[3] = std::min(H - 1, (int)std::floor(bottom - margin));
+}
+
+// ----------------------------------------------------------------------------- rolling shutter (FINDINGS 51)
+
+void level0_build(AlignPyramid::Level& L, const float* d_luma, int w, int h, cudaStream_t s) {
+    L.w = w; L.h = h; L.fx = L.fy = 1;
+    size_t n = (size_t)w * h;
+    CK(cudaMalloc(&L.I, n * sizeof(float)));
+    CK(cudaMalloc(&L.gx, n * sizeof(float)));
+    CK(cudaMalloc(&L.gy, n * sizeof(float)));
+    CK(cudaMemcpyAsync(L.I, d_luma, n * sizeof(float), cudaMemcpyDeviceToDevice, s));
+    k_grad<<<grid2(w, h), BLK, 0, s>>>(L.I, L.gx, L.gy, w, h);
+}
+
+void level0_free(AlignPyramid::Level& L) {
+    cudaFree(L.I); cudaFree(L.gx); cudaFree(L.gy);
+    L.I = L.gx = L.gy = nullptr;
+}
+
+BandShift band_shifts(const AlignPyramid::Level& Li, const AlignPyramid::Level& Lj, std::complex<double> z, std::complex<double> t,
+                      int nbands, AlignWork& wk, cudaStream_t s, int iters) {
+    const int w = Li.w, h = Li.h;
+    const int NB = std::max(1, nbands);
+    BandShift out;
+    out.dx.assign(NB, 0); out.dy.assign(NB, 0); out.ncc.assign(NB, 0); out.n.assign(NB, 0);
+    if (wk.rowoff_h != h) {
+        cudaFree(wk.rowoff);
+        CK(cudaMalloc(&wk.rowoff, (size_t)h * sizeof(float2)));
+        wk.rowoff_h = h;
+    }
+    double M[6];
+    to_affine(z.real() - 1, z.imag(), t.real(), t.imag(), w, h, M);
+    const double cx = (w - 1) / 2.0, cy = (h - 1) / 2.0, R = std::hypot((double)w, (double)h) / 2.0;
+    // per band: tx, ty (work px), gain, bias
+    std::vector<double> tx(NB, 0), ty(NB, 0), gn(NB, 1), bt(NB, 0);
+    std::vector<char> done(NB, 0);
+    std::vector<float2> off(h);
+    double sums[NSUM];
+    auto band_rows = [&](int b, int& y0, int& y1) { y0 = (int)((long long)b * h / NB); y1 = (int)((long long)(b + 1) * h / NB); };
+    for (int it = 0; it < iters; ++it) {
+        for (int b = 0; b < NB; ++b) {
+            int y0, y1;
+            band_rows(b, y0, y1);
+            for (int y = y0; y < y1; ++y) off[y] = make_float2((float)tx[b], (float)ty[b]);
+        }
+        CK(cudaMemcpyAsync(wk.rowoff, off.data(), (size_t)h * sizeof(float2), cudaMemcpyHostToDevice, s));
+        k_warp_cv_off<<<grid2(w, h), BLK, 0, s>>>(Lj.I, w, h, wk.I1w, M[0], M[1], M[2], M[3], M[4], M[5], wk.rowoff);
+        k_grad<<<grid2(w, h), BLK, 0, s>>>(wk.I1w, wk.gxw, wk.gyw, w, h);
+        bool all_done = true;
+        for (int b = 0; b < NB; ++b) {
+            int y0, y1;
+            band_rows(b, y0, y1);
+            size_t i0 = (size_t)y0 * w, i1 = (size_t)y1 * w;
+            int nblocks = (int)std::min<size_t>(wk.max_blocks, (i1 - i0 + 255) / 256);
+            // the inside test of the reduce uses the matrix: this band's offset goes into its translation
+            k_gn_reduce<<<nblocks, 256, 0, s>>>(Li.I, Li.gx, Li.gy, wk.I1w, wk.gxw, wk.gyw, w, h, i0, i1, M[0], M[1], M[2] + tx[b], M[3], M[4],
+                                                 M[5] + ty[b], (float)gn[b], (float)bt[b], (float)cx, (float)cy, (float)R, wk.partials);
+            k_final_reduce<<<1, 64, 0, s>>>(wk.partials, nblocks, wk.partials + (size_t)wk.max_blocks * NSUM);
+            CK(cudaMemcpyAsync(sums, wk.partials + (size_t)wk.max_blocks * NSUM, NSUM * sizeof(double), cudaMemcpyDeviceToHost, s));
+            CK(cudaStreamSynchronize(s));
+            double JtJ[6][6], Jtr[6];
+            int q = 0;
+            for (int a = 0; a < 6; ++a)
+                for (int c = a; c < 6; ++c) { JtJ[a][c] = sums[q]; JtJ[c][a] = sums[q]; ++q; }
+            for (int a = 0; a < 6; ++a) Jtr[a] = sums[q++];
+            double rr = sums[q++];
+            double n_sel = sums[q++];
+            (void)rr;
+            out.n[b] = (int)n_sel;
+            double s0 = sums[29], s1 = sums[30], s00 = sums[31], s11 = sums[32], s01 = sums[33];
+            if (n_sel > 10) {
+                double cov = s01 / n_sel - (s0 / n_sel) * (s1 / n_sel), v0 = s00 / n_sel - (s0 / n_sel) * (s0 / n_sel), v1 = s11 / n_sel - (s1 / n_sel) * (s1 / n_sel);
+                out.ncc[b] = v0 > 0 && v1 > 0 ? cov / std::sqrt(v0 * v1) : 0.0;
+            } else out.ncc[b] = 0.0;
+            if (done[b]) continue;
+            // translation, gain and bias only: the similarity's a, b rows are replaced by the identity
+            double A[6][6], bb[6], d[6];
+            std::memcpy(A, JtJ, sizeof A);
+            for (int a = 0; a < 6; ++a) bb[a] = Jtr[a];
+            for (int a = 0; a < 2; ++a) {
+                for (int c = 0; c < 6; ++c) { A[a][c] = 0; A[c][a] = 0; }
+                A[a][a] = 1;
+                bb[a] = 0;
+            }
+            if (n_sel < 0.2 * (double)(i1 - i0) || !solve6(A, bb, d)) { done[b] = 1; continue; }
+            tx[b] -= d[2]; ty[b] -= d[3]; gn[b] -= d[4]; bt[b] -= d[5];
+            if (!(std::isfinite(tx[b]) && std::isfinite(ty[b]))) { tx[b] = ty[b] = 0; out.ncc[b] = 0; done[b] = 1; continue; }
+            if (std::fabs(d[2]) < 1e-3 && std::fabs(d[3]) < 1e-3) done[b] = 1;
+            else all_done = false;
+        }
+        if (all_done && it > 0) break;
+    }
+    for (int b = 0; b < NB; ++b) { out.dx[b] = tx[b]; out.dy[b] = ty[b]; }
+    return out;
+}
+
+std::vector<cd> chain_offsets(int n, const std::vector<std::pair<int, int>>& pairs, const std::vector<cd>& m, const std::vector<double>& w) {
+    std::vector<std::vector<std::pair<int, cd>>> rows;
+    std::vector<cd> rhs;
+    std::vector<double> wt;
+    std::vector<size_t> pair_row;   // the row of each pair with w > 0
+    for (size_t e = 0; e < pairs.size(); ++e) {
+        if (!(w[e] > 0) || !std::isfinite(std::abs(m[e]))) { pair_row.push_back((size_t)-1); continue; }
+        pair_row.push_back(rows.size());
+        rows.push_back({{pairs[e].second, cd(1, 0)}, {pairs[e].first, cd(-1, 0)}});
+        rhs.push_back(m[e]);
+        wt.push_back(w[e]);
+    }
+    // a weak pull of every frame to 0 keeps the system solvable when a frame has no usable pair
+    for (int k = 0; k < n; ++k) { rows.push_back({{k, cd(1, 0)}}); rhs.push_back(cd(0, 0)); wt.push_back(1e-6); }
+    std::vector<double> rob(wt.size(), 1.0);
+    std::vector<cd> d(n, cd(0, 0));
+    if (n < 2) return d;
+    for (int round = 0; round < 3; ++round) {
+        std::vector<double> ww(wt.size());
+        for (size_t e = 0; e < wt.size(); ++e) ww[e] = wt[e] * rob[e];
+        try { d = wlstsq(n, rows, rhs, ww, 0); } catch (const std::exception&) { return std::vector<cd>(n, cd(0, 0)); }
+        std::vector<double> nr;
+        for (size_t e = 0; e < pairs.size(); ++e) {
+            if (pair_row[e] == (size_t)-1) continue;
+            cd r = m[e] - (d[pairs[e].second] - d[pairs[e].first]);
+            nr.push_back(std::abs(r) * std::sqrt(wt[pair_row[e]]));
+        }
+        double sg = 1.4826 * median(nr) + 1e-9;
+        size_t q = 0;
+        for (size_t e = 0; e < pairs.size(); ++e) {
+            if (pair_row[e] == (size_t)-1) continue;
+            rob[pair_row[e]] = std::min(1.0, 3.0 * sg / std::max(nr[q], 1e-12));
+            ++q;
+        }
+    }
+    cd mean(0, 0);
+    for (auto& v : d) mean += v;
+    mean /= (double)n;
+    for (auto& v : d) v -= mean;
+    return d;
 }
 
 }  // namespace stackcore
