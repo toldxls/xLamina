@@ -3,6 +3,8 @@
 #include <QMetaObject>
 #include <QTimer>
 
+#include <algorithm>
+
 #include "imageview.h"   // toQImage
 
 LivePlayer::LivePlayer(QObject* parent) : QObject(parent) {
@@ -46,6 +48,17 @@ void LivePlayer::push(int k, FloatImage rgb, int w, int h, const QRect& win, con
     if (recycle_) for (auto& d : drop) recycle_(std::move(d));
 }
 
+void LivePlayer::pushPreview(const QString& name, FloatImage rgb, int w, int h) {
+    FloatImage drop;
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        auto it = previews_.find(name);
+        if (it != previews_.end()) drop = std::move(it->second.rgb);   // the screen had not caught up: the newer one replaces it
+        previews_[name] = Item{std::move(rgb), w, h, ++seq_, QRect(), QSize()};
+    }
+    if (drop && recycle_) recycle_(std::move(drop));
+}
+
 void LivePlayer::setPass(int pass, int dir) {
     dir_.store(dir);
     if (pass_.exchange(pass) != pass) {
@@ -70,13 +83,52 @@ void LivePlayer::end() {
         ring_.clear();
         cursor_ = -1;
         newest_ = -1;
+        // (the previews stay: the finished outputs' previews arrive at the very end and must reach the screen)
     }
     pass_.store(-1);
     if (recycle_) for (auto& d : drop) recycle_(std::move(d));
 }
 
-// one step of the sweep: the next frame in stack order that has arrived, or none this tick
+// one step of the sweep: the next frame in stack order that has arrived (or none this tick), then at most one
+// waiting preview
 void LivePlayer::tick() {
+    {   // a preview first when one waits: the maps and the finished outputs must not starve behind the sweep
+        Item pv;
+        QString name;
+        QColorSpace cs;
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            if (!previews_.empty()) {
+                auto it = previews_.begin();
+                for (auto j = previews_.begin(); j != previews_.end(); ++j) if (j->second.seq < it->second.seq) it = j;   // the oldest first
+                name = it->first;
+                pv = std::move(it->second);
+                previews_.erase(it);
+                cs = cs_;
+            }
+        }
+        if (pv.rgb) {
+            float gain = 1.f;
+            if (name.startsWith("focus")) {   // the focus measure has no fixed scale: show it up to its 99th percentile
+                std::vector<float> v;
+                v.reserve((size_t)pv.w * pv.h / 4 + 1);
+                for (size_t i = 0; i < (size_t)pv.w * pv.h; i += 4) v.push_back((*pv.rgb)[i * 3]);
+                if (!v.empty()) {
+                    size_t q = v.size() * 99 / 100;
+                    std::nth_element(v.begin(), v.begin() + q, v.end());
+                    gain = v[q] > 1e-9f ? 1.f / v[q] : 1.f;
+                }
+            }
+            QImage img = toQImage(pv.rgb->data(), pv.w, pv.h, gain);
+            if (recycle_) recycle_(std::move(pv.rgb));
+            const bool grey = name.startsWith("depth") || name.startsWith("focus");
+            if (!grey && cs.isValid()) {
+                img.setColorSpace(cs);
+                img.convertToColorSpace(QColorSpace::SRgb);
+            }
+            emit previewReady(name, img);
+        }
+    }
     Item item;
     int k = -1;
     QColorSpace cs;

@@ -102,7 +102,9 @@ void Worker::launch(std::shared_ptr<JobOptions> jo, std::shared_ptr<JobResultDat
         set_log([this](const std::string& s) { emit logLine(QString::fromStdString(s)); });
         Hooks hooks;
         hooks.cancel = &cancel_;
-        hooks.preview_down = std::max(1, liveDown);
+        // the building maps go to the right pane, which never shows more than ~1/4 of the output: at Full (1) they were
+        // 31 Mpx floats converted on the GUI thread several times a second, the choppiness Travis saw (FINDINGS 47)
+        hooks.preview_down = std::max(4, liveDown);
         hooks.frame_down = std::max(1, liveDown);
         // the building maps grow on a time basis (every 50 ms at most), not every n-th frame: no steps (0.6.32)
         hooks.preview_every = 1;
@@ -116,16 +118,12 @@ void Worker::launch(std::shared_ptr<JobOptions> jo, std::shared_ptr<JobResultDat
             if (pass >= 0) player_->setPass(pass, pass == 2 ? -1 : 1);
             emit progress(QString::fromStdString(stage), f);
         };
-        previewsInFlight_ = 0;
         player_->begin();
         // timing experiments: XLAMINA_NOVIEW=1 drops the per-frame view, XLAMINA_NOPREVIEW=1 the building maps
         const bool noView = getenv("XLAMINA_NOVIEW"), noPreview = getenv("XLAMINA_NOPREVIEW");
         if (!quiet) {   // the floats go off the engine's threads in pooled buffers (see FloatImage)
             hooks.preview = [this](const std::string& name, const float* rgb, int w, int h) {
-                bool building = name.find("(building)") != std::string::npos;
-                if (building && previewsInFlight_.load() >= 2) return;   // the screen has not caught up: skip this one
-                ++previewsInFlight_;   // final previews are never skipped, but they are counted the same way
-                emit preview(QString::fromStdString(name), take(rgb, (size_t)w * h * 3), w, h);
+                player_->pushPreview(QString::fromStdString(name), take(rgb, (size_t)w * h * 3), w, h);   // converted off the GUI thread
             };
             hooks.frame = [this](int k, const float* rgb, int w, int h, const stackcore::ViewWindow& win) {
                 player_->push(k, take(rgb, (size_t)w * h * 3), w, h, QRect(win.x0, win.y0, win.w, win.h), QSize(win.fw, win.fh));

@@ -1,6 +1,8 @@
 #include "stackcore/tiff.h"
 
 #include <windows.h>
+#include <objbase.h>
+#include <wincodec.h>
 
 #include <algorithm>
 #include <chrono>
@@ -60,6 +62,86 @@ struct Parser {
 
 }  // namespace
 
+// ---- JPEG through Windows Imaging Component: nothing to ship, decodes on the calling thread (the streamer's
+// reader threads run 16 of them). The probe reads the header for the size and the embedded profile; the read
+// decodes the whole frame to 8-bit RGB into the caller's buffer.
+namespace {
+struct ComScope {
+    bool uninit = false;
+    // RPC_E_CHANGED_MODE on a thread already in the GUI's apartment: usable, and not ours to uninitialise
+    ComScope() { uninit = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)); }
+    ~ComScope() { if (uninit) CoUninitialize(); }
+};
+template <class T>
+struct ComPtr {
+    T* p = nullptr;
+    ~ComPtr() { if (p) p->Release(); }
+    T* operator->() const { return p; }
+};
+bool wic_open(const std::filesystem::path& path, ComPtr<IWICImagingFactory>& fac, ComPtr<IWICBitmapFrameDecode>& frame, std::string& err) {
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&fac.p)))) { err = "JPEG: Windows Imaging Component unavailable"; return false; }
+    ComPtr<IWICBitmapDecoder> dec;
+    if (FAILED(fac->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &dec.p))) { err = "JPEG: cannot read the header"; return false; }
+    if (FAILED(dec->GetFrame(0, &frame.p))) { err = "JPEG: no image"; return false; }
+    return true;
+}
+TiffInfo jpeg_probe(const std::filesystem::path& path, TiffInfo t) {
+    ComScope com;
+    ComPtr<IWICImagingFactory> fac;
+    ComPtr<IWICBitmapFrameDecode> frame;
+    if (!wic_open(path, fac, frame, t.error)) return t;
+    UINT w = 0, h = 0;
+    if (FAILED(frame->GetSize(&w, &h)) || w == 0 || h == 0) { t.error = "JPEG: no size"; return t; }
+    t.jpeg = true;
+    t.width = w; t.height = h;
+    t.bits = 8; t.samples = 3; t.compression = 7; t.photometric = 2; t.planar = 1; t.sample_format = 1;
+    t.big_endian = false; t.contiguous = true;
+    t.data_offset = 0; t.data_bytes = t.pixel_bytes();
+    t.strip_offsets = {0}; t.strip_bytes = {t.data_bytes};
+    // the embedded profile (Camera Raw's JPEGs carry Adobe RGB), as the TIFF path's tag 34675
+    UINT n = 0;
+    if (SUCCEEDED(frame->GetColorContexts(0, nullptr, &n)) && n > 0) {
+        std::vector<IWICColorContext*> ctx(n, nullptr);
+        bool made = true;
+        for (UINT i = 0; i < n; ++i) if (FAILED(fac->CreateColorContext(&ctx[i]))) made = false;
+        if (made && SUCCEEDED(frame->GetColorContexts(n, ctx.data(), &n))) {
+            for (UINT i = 0; i < n && t.icc.empty(); ++i) {
+                WICColorContextType type;
+                UINT bytes = 0;
+                if (SUCCEEDED(ctx[i]->GetType(&type)) && type == WICColorContextProfile && SUCCEEDED(ctx[i]->GetProfileBytes(0, nullptr, &bytes)) && bytes > 0) {
+                    t.icc.resize(bytes);
+                    if (FAILED(ctx[i]->GetProfileBytes(bytes, t.icc.data(), &bytes))) t.icc.clear();
+                }
+            }
+        }
+        for (auto* c : ctx) if (c) c->Release();
+    }
+    return t;
+}
+TiffRead jpeg_read(const std::filesystem::path& path, const TiffInfo& info, uint8_t* dst, size_t cap) {
+    TiffRead r;
+    auto t0 = std::chrono::steady_clock::now();
+    ComScope com;
+    ComPtr<IWICImagingFactory> fac;
+    ComPtr<IWICBitmapFrameDecode> frame;
+    if (!wic_open(path, fac, frame, r.error)) return r;
+    ComPtr<IWICFormatConverter> conv;
+    if (FAILED(fac->CreateFormatConverter(&conv.p)) ||
+        FAILED(conv->Initialize(frame.p, GUID_WICPixelFormat24bppRGB, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom))) {
+        r.error = "JPEG: cannot convert to RGB";
+        return r;
+    }
+    const UINT stride = info.width * 3;
+    const size_t bytes = (size_t)stride * info.height;
+    if (bytes > cap) { r.error = "buffer too small"; return r; }
+    if (FAILED(conv->CopyPixels(nullptr, stride, (UINT)bytes, dst))) { r.error = "JPEG: decode failed"; return r; }
+    r.bytes = bytes;
+    r.data_offset_in_buf = 0;
+    r.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    return r;
+}
+}  // namespace
+
 TiffInfo tiff_probe(const std::filesystem::path& path) {
     TiffInfo t;
     File f(path);
@@ -67,6 +149,7 @@ TiffInfo tiff_probe(const std::filesystem::path& path) {
     t.file_size = f.size();
     uint8_t hdr[16];
     if (f.read_at(0, hdr, 16) < 8) { t.error = "too short"; return t; }
+    if (hdr[0] == 0xFF && hdr[1] == 0xD8) return jpeg_probe(path, t);   // a JPEG (SOI marker)
     Parser P{f};
     if (hdr[0] == 'I' && hdr[1] == 'I') P.be = false;
     else if (hdr[0] == 'M' && hdr[1] == 'M') P.be = true;
@@ -164,6 +247,7 @@ TiffRead tiff_read_pixels(const std::filesystem::path& path, const TiffInfo& inf
     TiffRead r;
     auto t0 = std::chrono::steady_clock::now();
     if (!info.ok()) { r.error = info.error; return r; }
+    if (info.jpeg) return jpeg_read(path, info, dst, cap);   // decoded to 8-bit RGB, at offset 0
     if (cap < tiff_buffer_capacity(info.pixel_bytes())) { r.error = "buffer too small"; return r; }
 
     if (info.contiguous && ((uintptr_t)dst % kReadAlign) == 0) {

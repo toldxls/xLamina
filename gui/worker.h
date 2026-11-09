@@ -49,17 +49,14 @@ public:
     // thumbnail loader can fill it (0.6.24: the frames are read once, while the thumbnails load)
     void prepareCache(const QStringList& files);
     stackcore::FrameCache* cache() { return &cache_; }
-    // Building previews are dropped while two are still waiting for the GUI thread, so a slow display never
-    // queues up images and the engine never waits for the screen. The GUI returns each buffer once converted.
-    // Frame views go to the LivePlayer, which paces and orders them on its own thread (0.6.32).
-    void previewShown(FloatImage img) { --previewsInFlight_; recycle(std::move(img)); }
+    // Frame views and building previews go to the LivePlayer, which paces and orders them and converts them on its
+    // own thread (0.6.32 / 0.6.34); the engine never waits for the screen
     LivePlayer* player() { return player_; }
     // the live view's window (0.6.33): asked by the engine's threads for each view, when the live view is "Full"
     void setViewWindowProvider(std::function<stackcore::ViewWindow(int, int)> f) { viewWindow_ = std::move(f); }
 
 signals:
     void progress(QString stage, double fraction);
-    void preview(QString name, FloatImage rgb, int w, int h);
     void logLine(QString line);
     void finished(std::shared_ptr<JobResultData> data);
 
@@ -71,7 +68,6 @@ private:
     FloatImage take(const float* rgb, size_t n);   // a pooled buffer holding a copy of rgb[0..n)
     void recycle(FloatImage img);
     std::atomic<bool> cancel_{false};
-    std::atomic<int> previewsInFlight_{0};
     LivePlayer* player_ = nullptr;
     std::function<stackcore::ViewWindow(int, int)> viewWindow_;
     std::mutex poolMutex_;

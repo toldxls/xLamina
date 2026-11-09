@@ -15,5 +15,6 @@ add_library(stackcore STATIC
 target_include_directories(stackcore PUBLIC include)
 # static CUDA runtime: the executables need only the NVIDIA driver, no CUDA DLLs beside them
 # (no cuFFT: Windows ships it only as a DLL; the alignment's small DFT is done by twiddle matmuls)
-target_link_libraries(stackcore PUBLIC CUDA::cudart_static)
+# Windows Imaging Component decodes JPEG frames (tiff.cpp): part of Windows, nothing to ship
+target_link_libraries(stackcore PUBLIC CUDA::cudart_static windowscodecs ole32)
 target_compile_definitions(stackcore PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)

@@ -1516,7 +1516,7 @@ int run_align(AlignOptions& ao, AlignOut& A) {
             auto name = e.path().filename().string();
             auto ext = e.path().extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-            if (e.is_regular_file() && (ext == ".tif" || ext == ".tiff") && name.rfind(prefix, 0) == 0) paths.push_back(e.path());
+            if (e.is_regular_file() && (ext == ".tif" || ext == ".tiff" || ext == ".jpg" || ext == ".jpeg") && name.rfind(prefix, 0) == 0) paths.push_back(e.path());
         }
         std::sort(paths.begin(), paths.end());
     }

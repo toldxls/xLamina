@@ -75,7 +75,7 @@ private slots:
     void showOutput(int tab);
     void stepOutput(int delta);
     void onProgress(QString stage, double fraction);
-    void onPreview(QString name, FloatImage rgb, int w, int h);
+    void onPreview(QString name, QImage image);
     void onLiveView(int k, QImage image, QRect win, QSize full);
     void updateViewWindow();                   // the viewer's visible part, as fractions, for the engine's frame views
     void onThumbnail(int index, QImage image);

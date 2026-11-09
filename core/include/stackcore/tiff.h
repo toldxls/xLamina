@@ -1,7 +1,9 @@
 // Minimal TIFF reader for the ingest path: parses the first IFD (classic or
 // BigTIFF, either byte order) and reads uncompressed chunky 8/16-bit pixel data
-// straight into a caller-supplied (pinned) buffer. Compressed TIFFs and JPEG
-// go through libtiff / libjpeg-turbo later (docs/DESIGN.md toolchain).
+// straight into a caller-supplied (pinned) buffer. JPEG frames (0.6.34) are
+// decoded on the reading thread through Windows Imaging Component into the same
+// buffer as 8-bit RGB, so the rest of the engine sees an ordinary 8-bit frame;
+// the embedded profile comes along. Compressed TIFFs are still out.
 #pragma once
 
 #include <cstdint>
@@ -21,6 +23,7 @@ struct TiffInfo {
     uint16_t sample_format = 1;   // 1 = unsigned int
     bool big_endian = false;
     bool bigtiff = false;
+    bool jpeg = false;            // a JPEG file: decoded to 8-bit RGB by tiff_read_pixels (width x height x 3 bytes)
     uint64_t file_size = 0;
     std::vector<uint64_t> strip_offsets, strip_bytes;   // (tiles are not supported yet)
     bool contiguous = false;      // strips follow each other with no gaps

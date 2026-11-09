@@ -2020,6 +2020,46 @@ right pane opened and halved the viewport they became 461 × 306, following
 the screen. Frame views are now limited to one per 33 ms across every slot
 and card (it was per slot), so views the player would drop are not copied.
 
+## 48. JPEG frames (2026-11-09)
+
+Travis asked what JPEG input would cost or gain against 16-bit TIFF. The
+reader now takes JPEG (0.6.34): `tiff_probe` recognises the SOI marker and
+reads the size and the embedded profile through Windows Imaging Component;
+`tiff_read_pixels` decodes the whole frame to 8-bit RGB into the caller's
+pinned buffer on the reading thread, so the streamer's 16 readers decode in
+parallel and everything downstream sees an 8-bit chunky frame as from an
+8-bit TIFF. Nothing is shipped: WIC is part of Windows (no nvJPEG runtime is
+present in this CUDA install; a GPU decoder would also have had to hold the
+bitstream on the host anyway). The frame cache holds the decoded pixels, half
+a 16-bit frame's size.
+
+Measured on 16 frames exported from the 16-bit TIFFs at quality 95 with the
+Adobe RGB profile (5.1 MB each against 194 MB): the probe reports
+6960 × 4640, 8-bit × 3; the 16 are read and decoded in 0.25 s (64 frames/s
+over the reader threads); the alignment lands on the same crop with the same
+NCC as the TIFF stack; the outputs are 16-bit with the Adobe RGB profile
+embedded. Against the same 16 frames stacked from 16-bit TIFF:
+
+| output | PSNR, JPEG stack vs TIFF stack | RMS error |
+|---|---|---|
+| B | 50.7 dB | 0.3 % of full scale, under one 8-bit step |
+| C | 44.5 dB | 0.6 %, about 1.5 8-bit steps |
+
+B's difference is the 8-bit quantisation itself; C's is twice that, the
+pyramid picking up the compression's high-frequency residue as predicted
+(§47's discussion with Travis: block edges and chroma subsampling register as
+texture, ringing beside glints as detail). What the numbers do not show is
+the tonal gradation: 8 bits leave about 20 levels in the top stop, so the
+shoulders of blown reflections and the deep matrix shadows posterise where
+16 bits do not, and that only shows under later editing. The ranking stands:
+16-bit TIFF, then 8-bit TIFF (the same speed and memory gain, no artefacts),
+then JPEG at quality 95+ when export time or disk space matter more.
+
+The GUI lists `*.jpg` / `*.jpeg` beside TIFFs, thumbnails decode the same
+way (about 150 ms per frame, single-threaded, so a 200-frame JPEG folder
+takes ~30 s to fill the cache against ~10 s for TIFF), and the frames' line
+names the profile ("Adobe RGB (1998)").
+
 ## Open items
 
 - **Per-frame sharpness flag** (§45): pass 1's focus energy per frame, next

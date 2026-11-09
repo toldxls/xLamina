@@ -71,7 +71,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     buildUi();
     loadSettings();
     connect(&worker_, &Worker::progress, this, &MainWindow::onProgress);
-    connect(&worker_, &Worker::preview, this, &MainWindow::onPreview);
+    connect(worker_.player(), &LivePlayer::previewReady, this, &MainWindow::onPreview);   // converted off the GUI thread
     connect(worker_.player(), &LivePlayer::view, this, &MainWindow::onLiveView);   // paced, in stack order (0.6.32)
     connect(view_, &ImageView::viewChanged, this, &MainWindow::updateViewWindow);
     // the engine asks, from its threads, what part of the frame to render for each live view (0.6.33)
@@ -100,7 +100,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(&worker_, &Worker::finished, this, &MainWindow::onFinished);
     connect(&updater_, &Updater::available, this, &MainWindow::onUpdateAvailable);
     connect(&updater_, &Updater::upToDate, this, [this](const QString& v) {
-        if (updateManual_) QMessageBox::information(this, "Check for updates", QString("xLamina %1 is the latest version.").arg(v));
+        if (updateManual_) {
+            // a build installed by hand runs ahead of the releases (Travis, 2026-11-08: "0.6.29 is the latest" while running 0.6.33)
+            QString msg = Updater::compareVersions(v, XLAMINA_VERSION) < 0
+                              ? QString("You are running xLamina %1, newer than the latest release (%2).").arg(XLAMINA_VERSION, v)
+                              : QString("xLamina %1 is up to date: %1 is the latest release.").arg(v);
+            QMessageBox::information(this, "Check for updates", msg);
+        }
         updateManual_ = false;
     });
     connect(&updater_, &Updater::failed, this, [this](const QString& why) {
@@ -814,7 +820,7 @@ void MainWindow::openFolder(const QString& dir) {
         return;
     }
     QDir d(dir);
-    QStringList files = d.entryList({"*.tif", "*.tiff", "*.TIF", "*.TIFF"}, QDir::Files, QDir::Name);
+    QStringList files = d.entryList({"*.tif", "*.tiff", "*.TIF", "*.TIFF", "*.jpg", "*.jpeg", "*.JPG", "*.JPEG"}, QDir::Files, QDir::Name);   // JPEG since 0.6.34
     if (files.size() < 2) {
         QMessageBox::warning(this, "xLamina", QString("%1\n\nholds %2 TIFF files; a stack needs at least 2.").arg(dir).arg(files.size()));
         return;
@@ -1271,24 +1277,9 @@ void MainWindow::onProgress(QString stage, double fraction) {
     statusBar()->showMessage(progressStatus_);
 }
 
-void MainWindow::onPreview(QString name, FloatImage rgb, int w, int h) {
-    if (!rgb) return;
-    if (bench_ && bench_->running()) { worker_.previewShown(std::move(rgb)); return; }
-    float gain = 1.f;
-    if (name.startsWith("focus")) {   // the focus measure has no fixed scale: show it up to its 99th percentile
-        std::vector<float> v;
-        v.reserve((size_t)w * h / 4 + 1);
-        for (size_t i = 0; i < (size_t)w * h; i += 4) v.push_back((*rgb)[i * 3]);
-        if (!v.empty()) {
-            size_t q = v.size() * 99 / 100;
-            std::nth_element(v.begin(), v.begin() + q, v.end());
-            gain = v[q] > 1e-9f ? 1.f / v[q] : 1.f;
-        }
-    }
-    QImage image = toQImage(rgb->data(), w, h, gain);
-    worker_.previewShown(std::move(rgb));   // the buffer goes back to the pool
-    bool grey = name.startsWith("depth") || name.startsWith("focus");
-    if (!grey) image = forDisplay(image);
+// a building map or an output preview, already 8-bit and in sRGB (the LivePlayer converts them on its thread)
+void MainWindow::onPreview(QString name, QImage image) {
+    if (image.isNull() || (bench_ && bench_->running())) return;
     if (name.endsWith("(building)") || name.startsWith("depth map")) {   // the right pane: what the render is building
         if (liveView_->isHidden()) {
             liveView_->show();

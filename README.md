@@ -2,7 +2,7 @@
 
 ![xLamina](gui/icon/xlamina-128.png)
 
-A photo stacker that can utilize multiple GPUs for rapidly stacking uncompressed 16-bit TIFF photos. It is a Windows program (C++ and Qt) built on CUDA for NVIDIA GPUs.
+A photo stacker that can utilize multiple GPUs for rapidly stacking uncompressed 8/16-bit TIFF or JPEG photos. It is a Windows program (C++ and Qt) built on CUDA for NVIDIA GPUs.
 
 Open a folder of TIFF frames, choose the output algorithms, press Render, watch the stacks build in parallel for each method, and save. The program performs best when the frames sit on a RAM disk and the machine has enough RAM to also hold them resident (the frames are read once and kept pinned in memory): about twice the stack's size, 60 GB for 163 full-frame files of 180 MB. 
 
@@ -26,8 +26,10 @@ Help > Check for updates asks at any time.
 
 ## Use
 
-Open a folder (or drop one onto the window). Every TIFF of the stack's image size is a
-frame; other TIFFs in the folder are listed greyed out and left alone. Tick the outputs
+Open a folder (or drop one onto the window). Every TIFF or JPEG of the stack's image size is a
+frame; other images in the folder are listed greyed out and left alone. JPEGs are decoded to
+8-bit RGB as they are read (Windows' own decoder, the embedded profile kept); 16-bit TIFF
+remains the better source where highlights roll off and shadows are deep. Tick the outputs
 you want, set the field of view if you know it (it gives the report its µm/px), press
 Render. While it runs the viewer splits in two: on the left each frame as it is
 processed (raw while reading, so the stack's wobble is visible, then warped onto the

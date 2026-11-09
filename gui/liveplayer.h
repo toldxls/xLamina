@@ -30,6 +30,9 @@ public:
     void setColorSpace(const QColorSpace& cs);          // the frames' profile; views are converted to sRGB for the screen
     // from the engine's threads: a view of frame k, w x h pixels showing the crop `win` of a `full`-sized frame
     void push(int k, FloatImage rgb, int w, int h, const QRect& win, const QSize& full);
+    // a building map or a finished output's preview (the right pane / the output tabs): the latest per name is kept
+    // and converted here, off the GUI thread; "focus" maps are scaled to their 99th percentile, depth and focus stay grey
+    void pushPreview(const QString& name, FloatImage rgb, int w, int h);
     // the pass the engine is in (any id; a change restarts the sweep, since every pass runs through the whole stack
     // again) and its direction, +1 forward or -1 backward
     void setPass(int pass, int dir);
@@ -38,6 +41,7 @@ public:
 
 signals:
     void view(int k, QImage image, QRect win, QSize full);   // the next frame of the sweep, display-ready (queued to the GUI thread)
+    void previewReady(QString name, QImage image);           // a building map or output preview, display-ready
 
 private:
     void tick();
@@ -45,6 +49,7 @@ private:
     QThread thread_;
     std::mutex m_;
     std::map<int, Item> ring_;
+    std::map<QString, Item> previews_;   // the latest of each name
     long long seq_ = 0;
     int newest_ = -1;                 // the k that arrived last
     std::atomic<int> dir_{1};
