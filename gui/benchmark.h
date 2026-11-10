@@ -3,7 +3,9 @@
 // alone, then with the frames streamed from disk instead of resident; the
 // fastest can be applied. Thorough (minutes): the whole stack at the Render
 // panel's resolution, every hardware setting varied in turn, then the best of
-// each combined. A built-in synthetic stack stands in when no folder is open,
+// each combined. Single run: the whole stack once on the current settings, to
+// compare the machine against itself (an overclock); each Start adds a row to
+// the table. A built-in synthetic stack stands in when no folder is open,
 // or to compare machines. None of these settings changes the result (B and C
 // are bit-identical across them).
 #pragma once
@@ -64,6 +66,8 @@ private:
         double align = 0, fusion = 0, total = 0, fps = 0, pass1 = 0, depth = 0, refine = 0, compose = 0, finalize = 0;
     };
     bool quick() const;
+    bool thorough() const;
+    bool single() const;             // one render on the current settings; its rows accumulate over Starts
     bool useSample() const;
     QStringList runFrames() const;   // the frames a run uses: the quick subset or the whole stack
     void updatePlan();
@@ -86,12 +90,14 @@ private:
     QList<Config> configs_;
     QList<Row> rows_;
     int next_ = 0;
+    int keepKey_ = 0;           // the last Start: 0 = a sweep, 1 = a single run of the open stack, 2 = of the sample
     bool running_ = false, stopping_ = false, combinedDone_ = false;
     QElapsedTimer clock_, sweepClock_;
     std::thread sampleThread_;
     QStringList sample_;        // the synthetic frames, once generated
     QString sampleDir_;
     QString autoReport_;        // set by autoRun
+    int autoStarts_ = 1;        // autoRun: presses of Start still to make
 
     QComboBox* stack_ = nullptr;
     QComboBox* mode_ = nullptr;
