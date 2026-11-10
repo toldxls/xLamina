@@ -90,7 +90,7 @@ struct DepthResult {
 // d_V: dh*dw*K float32, k fastest (post-aggregation, post-sqrt), on the device; overwritten by the cost.
 // h_lum: the luma volume, float16 bits, plane-major (K planes of dh*dw) on the HOST (pinned for speed): it is
 // streamed through a 256 MB staging buffer, twice, and never sits on the device (FINDINGS 46: 3 GB less GPU
-// memory at 1/2 resolution and 200 frames; the 201-frame stack paged on a 12 GB card before).
+// memory at 1/2 resolution and 200 frames; such a stack paged on a 12 GB card before).
 // d_guide_full: oh*ow float (luma of collapsed C, clipped); d_ga: dh*dw (the same at depth res).
 // Runs on the current device and stream; needs the volume plus the SGM's path sums (1.5 GB, or bands) free.
 DepthResult depth_from_volume(const float* d_V, const uint16_t* h_lum, const float* d_guide_full, const float* d_ga,

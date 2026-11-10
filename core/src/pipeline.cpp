@@ -1155,7 +1155,7 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
                 CK(cudaMemcpyAsync(d_stage, P.V_all.data() + (size_t)k0 * nd, (size_t)c * nd * sizeof(float), cudaMemcpyHostToDevice, s));
                 planes_to_kfastest_f32_chunk(d_stage, d_V, P.vp.dw, P.vp.dh, K, k0, c, s);
                 CK(cudaStreamSynchronize(s));   // the staging buffer is reused
-                // the bar moves through the upload with the gigabytes done and the rate (Travis, 2026-11-08)
+                // the bar moves through the upload with the gigabytes done and the rate
                 double done_gb = nd * (double)(k0 + c) * 4.0 / 1e9, secs = since(tu);
                 char msg[128];
                 snprintf(msg, sizeof msg, "depth map: volume to the GPU, %.1f of %.1f GB at %.1f GB/s", done_gb, total_gb, secs > 0 ? done_gb / secs : 0.0);
@@ -1409,7 +1409,7 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
         });
     }
     struct Join { std::vector<std::thread>& t; ~Join() { for (auto& x : t) if (x.joinable()) x.join(); } } join{writers};
-    if (so.diagnostics) {   // the CLI's raw maps for analysis scripts and hash checks; the GUI writes none (Travis, 2026-11-08)
+    if (so.diagnostics) {   // the CLI's raw maps for analysis scripts and hash checks; the GUI writes none
         write_raw(od / "depth.f32", R.depth_s.data(), R.depth_s.size());
         if (!P.flat.empty()) write_raw(od / "flat.f32", P.flat.data(), P.flat.size());   // depth-resolution grid (stack.txt: w, h x depth fraction)
         write_raw(od / "depth_smooth.f32", Ds.data(), Ds.size());
@@ -1547,7 +1547,7 @@ int run_sweep(const StackOptions& base, const std::vector<SweepVariant>& variant
 
     int failed = 0;
     // progress for a front end: "variant 3 of 20, soft-px-2: pass 2: fine focus", the bar over the whole sweep
-    // (Travis, 2026-11-08: a sweep gave no indication of how far it was); a group's pass 1 counts as its first variant
+    // (a sweep gave no indication of how far it was); a group's pass 1 counts as its first variant
     const size_t nv = prep.size();
     size_t vi = 0;   // variants finished so far, over all groups
     auto sweep_progress = [&](size_t idx, const std::string& label) -> ProgressFn {

@@ -131,7 +131,7 @@ private:
     QAction* sortTime_ = nullptr;
     QAction* dropShifted_ = nullptr;
     QAction* dropSoft_ = nullptr;
-    QAction* dropWarped_ = nullptr;   // the rolling-shutter outliers (FINDINGS 51; Travis, 2026-11-09: "frames terribly warped could be dropped")
+    QAction* dropWarped_ = nullptr;   // the rolling-shutter outliers (FINDINGS 51)
     QAction* saveAct_ = nullptr;
     QAction* openOutAct_ = nullptr;
     QAction* renderAct_ = nullptr;
@@ -162,7 +162,7 @@ private:
     QElapsedTimer elapsed_;
     QTimer tick_;
     QString stageText_;
-    QString progressStatus_;               // status-bar count for the per-frame stages ("Read 157 of 163 frames"), from the progress signal
+    QString progressStatus_;               // status-bar count for the per-frame stages ("Read 194 of 200 frames"), from the progress signal
     // the live view: the frame being processed is marked in the list (a tint, moved 4 times a second, never
     // the selection, which jumped about and ended on a random frame) and shown at most ~30 times a second
     QListWidgetItem* liveItem_ = nullptr;
@@ -195,7 +195,7 @@ private:
     ImageView* view_ = nullptr;
     QListWidget* frameList_ = nullptr;
     QDockWidget* framesDock_ = nullptr;
-    QCheckBox* allFrames_ = nullptr;   // the master tick in line with the rows' ticks (Travis, 2026-11-09)
+    QCheckBox* allFrames_ = nullptr;   // the master tick in line with the rows' ticks
     QTabBar* tabs_ = nullptr;
     QPlainTextEdit* log_ = nullptr;
     QProgressBar* progress_ = nullptr;
@@ -208,8 +208,8 @@ private:
     QComboBox* scale_ = nullptr;
     QComboBox* ref_ = nullptr;
     QCheckBox* lockScale_ = nullptr;
-    QCheckBox* fixRs_ = nullptr;        // undo the rolling-shutter warping in every warp (FINDINGS 51)
-    QCheckBox* fixBanding_ = nullptr;   // undo the LED flicker's row banding
+    QCheckBox* fixRs_ = nullptr;        // correct the rolling-shutter warp in every warp (FINDINGS 51)
+    QCheckBox* fixBanding_ = nullptr;   // correct the LED flicker's row banding
     QDoubleSpinBox* fov_ = nullptr;
     QDoubleSpinBox* smoothing_ = nullptr;
     QDoubleSpinBox* softCutoff_ = nullptr;   // Preferences > General: the soft-frame flag's cutoff (FINDINGS 49)

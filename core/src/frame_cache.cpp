@@ -43,7 +43,7 @@ void FrameCache::prepare(const std::vector<fs::path>& paths, size_t budget_bytes
     }
     if (budget_bytes > 0) { budget_ = budget_bytes; return; }
     // pinned memory is never paged, so stay well inside what is free now and inside a fixed share
-    // of the machine, whatever the RAM disk and the other programs hold
+    // of the machine, whatever the other programs (or a RAM disk) hold
     MEMORYSTATUSEX ms{};
     ms.dwLength = sizeof ms;
     GlobalMemoryStatusEx(&ms);

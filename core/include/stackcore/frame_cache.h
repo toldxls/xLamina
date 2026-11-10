@@ -2,7 +2,7 @@
 // streaming passes (and, in the GUI, across jobs). The first pass that meets a
 // frame reads it from disk into a pinned buffer the cache keeps; every later
 // pass uploads straight from that buffer, so the GPUs pull at their PCIe link
-// rate instead of the RAM disk's read rate (FINDINGS 26). Frames that do not
+// rate instead of the drive's read rate (FINDINGS 26). Frames that do not
 // fit the memory budget go through the streaming ring as before.
 #pragma once
 

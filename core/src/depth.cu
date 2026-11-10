@@ -86,7 +86,7 @@ __global__ void k_curve_stats(const float* __restrict__ V, int n, int K,
 }
 
 // The luma volume is streamed through a staging buffer of `c` plane-major planes (k0 .. k0 + c - 1) instead of
-// living on the device k-fastest: 3 GB less GPU memory at 1/2 resolution and 200 frames, which kept the 201-frame
+// living on the device k-fastest: 3 GB less GPU memory at 1/2 resolution and 200 frames, which keeps such a
 // stack from paging on a 12 GB card (FINDINGS 46). Per pixel: the running min / max over the stack, and the sums
 // of the first and last `ke` planes (the end-frame means for flat_end 0 / 1), accumulated in k order as k_plane_mean
 // did, so every number is the one the resident version produced.
@@ -616,7 +616,7 @@ DepthResult depth_from_volume(const float* d_V_in, const uint16_t* h_lum, const 
     k_curve_stats<<<blocks1(n), 256, 0, s>>>(V, n, K, vmax, vmed, kmax);
     // the luma volume, plane-major on the host, streamed through a staging buffer of a few planes (FINDINGS 46): once
     // now for the per-pixel statistics, once more for the cost. It never sits on the device (3 GB at 1/2 resolution
-    // and 200 frames), which is what kept the 201-frame stack inside a 12 GB card.
+    // and 200 frames), which is what keeps a 200-frame stack inside a 12 GB card.
     const int kc = std::max(1, std::min(K, (int)(((size_t)256 << 20) / ((size_t)n * 2))));
     __half* d_lc = nullptr;
     CK(cudaMalloc(&d_lc, (size_t)kc * n * 2));
@@ -762,7 +762,7 @@ DepthResult depth_from_volume(const float* d_V_in, const uint16_t* h_lum, const 
     report("depth map: SGM", 0.45);
 
     // --- SGM, in horizontal bands when the path-sum volume does not fit beside the cost volume (at 1/2
-    // resolution 163 frames are 4.9 GB each; FINDINGS 31). The bands overlap by `ov` rows: a path's cost is
+    // resolution 200 frames are 6 GB each; FINDINGS 31). The bands overlap by `ov` rows: a path's cost is
     // capped by P2 at every step, so what it carries from rows farther away than that is nil. One band is
     // the whole image, which is the code as it always was.
     auto t1 = std::chrono::steady_clock::now();

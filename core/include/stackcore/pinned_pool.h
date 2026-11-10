@@ -1,6 +1,5 @@
 // A fixed set of page-locked host buffers that readers fill and GPU uploads
-// drain (DESIGN.md: "the RAM disk is the cache; the app streams files into a
-// small ring of pinned buffers").
+// drain: the streaming ring for frames that are not resident (frame_cache.h).
 #pragma once
 
 #include <condition_variable>

@@ -47,7 +47,8 @@ tools/    comparison harness (Helicon vs ours: difference images, noise, sharpne
   - Compressed TIFF (ZIP/LZW) decodes at only ~100–300 MB/s per core, so either use many decode threads or export uncompressed.
   - PCIe: consumer boards often split lanes x8/x8, or put a card on a chipset x4 link. Measure, don't assume.
 - **Two-pass pipeline** (alignment pass, then a fusion pass).
-- **Current workflow: a RAM disk on a 192 GB machine.** TIFFs already sit on a RAM-file-system, and today a single 3080 Ti stacks them in Helicon. That changes the picture:
+- **Superseded (FINDINGS 26 and 52):** the app now keeps the frames resident in its own pinned cache, and a fast NVMe SSD feeds it as fast as a RAM disk does, so a RAM disk is not needed. The planning notes below are kept as written.
+- **Workflow at the time: a RAM disk on a 192 GB machine.** TIFFs already sit on a RAM-file-system, and today a single 3080 Ti stacks them in Helicon. That changes the picture:
   - **The disk bottleneck is gone.** Reads run at memory speed, so the two-pass pipeline's second read is nearly free, and the app needs **no cache of its own** (that would just double RAM use). The RAM disk *is* the cache: the app streams files into a small ring of pinned buffers.
   - A 39 GB stack on the RAM disk + pinned buffers + app working memory fits easily in 192 GB, even with two stacks staged at once.
   - What's left to measure in M0:
@@ -263,7 +264,7 @@ shares come from the M0 benchmark; the dynamic queue balances them automatically
 ### Build options
 | Option | What | Verdict |
 |---|---|---|
-| **1. Current desktop (192 GB, RAM disk), 2 cards. CONFIRMED** | 3080 Ti + a 3070 Ti in the second PCIe 5.0 x16 slot (power: OK per Travis). Both cards are Gen4, so the links run at 4.0. On consumer boards a second "x16" slot is usually **electrically x8** (CPU lanes split x8/x8: ~14 GB/s each, plenty) or **x4 through the chipset** (~7 GB/s, shared with NVMe/USB: still workable for split mode). Check the "Bus Interface" field in GPU-Z, e.g. `PCIe x16 4.0 @ x8 4.0` | **Start here** for M0–M3. Target ~7–9 s per 200 frames. Measure before buying anything |
+| **1. Current desktop (192 GB, RAM disk), 2 cards. CONFIRMED** | 3080 Ti + a 3070 Ti in the second PCIe 5.0 x16 slot (power: OK). Both cards are Gen4, so the links run at 4.0. On consumer boards a second "x16" slot is usually **electrically x8** (CPU lanes split x8/x8: ~14 GB/s each, plenty) or **x4 through the chipset** (~7 GB/s, shared with NVMe/USB: still workable for split mode). Check the "Bus Interface" field in GPU-Z, e.g. `PCIe x16 4.0 @ x8 4.0` | **Start here** for M0–M3. Target ~7–9 s per 200 frames. Measure before buying anything |
 | 2. Consumer board + risers | CPU x8/x8 plus chipset slots; every chipset slot shares one ~x4 Gen4 uplink | Cheap; fine for split mode on 3–4 cards, chokes broadcast mode |
 | 3. **Used EPYC open-frame rig** | single-socket EPYC 7002/7003 (128 PCIe 4.0 lanes, 16–32 cores for TIFF decode) on a 7-slot x16 board (e.g. ASRock Rack ROMED8-2T) + 128–256 GB 8-channel RDIMM + Gen4 x16 riser cables | **Best fit for all 5**: full links, enough RAM to cache whole stacks, cores to decode. Build it only if M0 numbers justify it |
 | 4. Threadripper (TRX50) | new HEDT | Same benefits as 3 at a much higher price |

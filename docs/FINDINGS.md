@@ -217,7 +217,7 @@ is a touch hazier than Helicon B at 1:1.
 
 ## 9. B depth estimator, round 3: regularised depth (2026-11-06), now the default
 
-Travis's verdict on round 2: "B is terrible". The cost-volume filter's single
+Round 2's B was poor at 1:1. The cost-volume filter's single
 radius smeared depth across fine 3D structure (soft matrix, dull crystals) and
 left blotches and terraces in the defocused background.
 
@@ -282,7 +282,7 @@ specimen; crystal-fan needles are slightly less crisp than Helicon B at 1:1.
 
 ## 11. B edge glare and a scale-dependence bug (2026-11-06)
 
-Travis: "our B has too much glare around edges."
+At 1:1, B had too much glare around edges.
 
 - Helicon's recovered depth is fragmented in the dark surroundings of bright
   objects (many small regions, mostly darker frames). Ours was smooth, so those
@@ -310,8 +310,8 @@ Travis: "our B has too much glare around edges."
 
 ## 12. B: out-of-range regions, blend width, doubled edges (2026-11-06)
 
-Travis: "still a lot of glare and doubled edges in the crystal fan and edges;
-background edges look way worse compared to Helicon."
+At 1:1 there was still a lot of glare and doubled edges in the crystal fan and
+at edges, and background edges looked much worse than Helicon's.
 
 - **The "background edges" were regions out of focus in EVERY frame**, beyond
   the stack's depth range: 11 % of this image, mostly peaking at the first frames.
@@ -339,8 +339,8 @@ background edges look way worse compared to Helicon."
 
 ## 13. B: dark background behind bright crystals (2026-11-06)
 
-Travis: "Helicon's B handles dark background behind bright crystal much better,
-ours still has ghostly glow and doubled edges."
+Helicon's B handled dark background behind bright crystal much better; ours
+still had a ghostly glow and doubled edges.
 
 Mechanism: dark background pixels next to a bright crystal were composed from
 frames focused on the background, where the crystal is defocused. Its blur adds
@@ -761,8 +761,8 @@ Mac's including the geometry numbers.
 
 ## 24. C's noise and the Smoothing control; colour (2026-11-06)
 
-Travis: "C looks very good but we lack a smoothing option, Helicon comes out
-much less noisy". Measured as the robust std of the high-pass residual (σ = 2
+C looked very good but had no smoothing option, and Helicon's came out much
+less noisy. Measured as the robust std of the high-pass residual (σ = 2
 Gaussian removed) over the flattest 30 % of the image, per luminance band,
 in 1/255 units:
 
@@ -791,7 +791,7 @@ off" colour. The remaining difference to Helicon is its tone curve (§10).
 
 ## 25. C's ghost outlines are defocus rims from far frames; the C radius (2026-11-06)
 
-Travis: the plate edges in C (and H, CB, CBn, Cn, which share C's selection)
+At 1:1 the plate edges in C (and H, CB, CBn, Cn, which share C's selection)
 carry doubled rims and parallel "outlines" 10–40 px outside the true edge, and
 "needles" inside the plate that are not real. Checked on the top edge of the
 lower-left plate (output px 1400–2000 × 3050–3350) by re-doing C's per-level
@@ -1102,7 +1102,7 @@ The GUI benchmark's synthetic sample now writes its truth beside the frames
 (`truth/depth_frames_over_N-1.tif`, the depth per pixel as grey = z / (N - 1);
 `truth/sharp.tif`, the all-in-focus scene; a README with the scene's formula),
 and its defocus grows 1 px of sigma per frame of distance, about what a 20x /
-NA 0.4 objective does at Travis's 0.468 um steps and 0.14 um/px. At the earlier
+NA 0.4 objective does at 0.468 um steps and 0.14 um/px. At the earlier
 0.45 px per frame the depth was underdetermined at 1/4 resolution: 32 frames
 differed by less than half a pixel of blur at the volume's scale.
 
@@ -1174,9 +1174,9 @@ yet on the CLI), scored per region and judged at 1:1.
 
 ## 32. The depth volume at 1/2 resolution becomes the default (2026-11-07, late)
 
-Travis rendered the stack with Advanced ticked and Depth resolution 1/2 (the
+A render with Advanced ticked and Depth resolution 1/2 (the
 other Advanced values at their defaults: window 6, aggregation 32, dark prior
-1, halo prior 2) and found the ghost outline of the plate in his screenshot
+1, halo prior 2) had the ghost outline of the plate
 gone at 1:1, where every 1/4-resolution variant of sec. 31 (C radius 0 or 64,
 B radius 16 or 48, halo prior 4, dark prior 2, refinement range 4, soft
 labels 1.5, aggregation 64) still showed it. The 1:1 sheet of that crystal's
@@ -1187,7 +1187,7 @@ The per-region scores of sec. 31a had this variant within noise of the default
 in the image and *worse* in depth agreement with the reference on the plates
 (whole plates placed on frames 11 away), which the image did not show. Depth
 agreement with another stacker's map is evidently not the criterion; the
-eye at 1:1 is, and the doubled plate edge is the artefact Travis has flagged
+eye at 1:1 is, and the doubled plate edge is the artefact flagged
 since sec. 25. So 0.6.1 makes 1/2 the default depth resolution (engine and
 GUI; `--depth-fraction 0.25` or the Advanced panel give the 0.5.x reference
 B back). The prior weights are still those tuned at 1/4; rescaling them with
@@ -1204,8 +1204,8 @@ reference and no longer describe the default B.
 
 ## 33. The 1/2-resolution volume's blotches: the dark prior (2026-11-07, late)
 
-With the 1/2-resolution depth (sec. 32) Travis found the plate edges fixed
-but "blotchy garbage" elsewhere: a dark patch inside a needle fan, where the
+With the 1/2-resolution depth (sec. 32) the plate edges were fixed
+but the rest was blotchy: a dark patch inside a needle fan, where the
 matrix far behind the fan was rendered in place of the needles, and grainier
 flat areas. On the fan region (output grid x 3480-4608, y 3152-3756), with the
 reference B beside, in 1:1 sheets (`report_real/sgm_fan.png`, `fan2.png`):
@@ -1252,7 +1252,7 @@ the log.
 ## 34. The dark prior's reach, and defocused background on the 1/2 grid (2026-11-07, night)
 
 Turning the dark prior off (sec. 33) traded the fan blotch for a worse
-defocused background: Travis found 0.6.2's B "does poorly" there compared
+defocused background: 0.6.2's B did poorly there compared
 with the 1/4-resolution B. Two problems, two changes, both in 0.6.3.
 
 **The dark prior is back, with a reach.** It is what keeps featureless
@@ -1299,7 +1299,7 @@ and (b, 0.6.3) the SGM depth was Gaussian-blurred over half the width
 before the guided upsampling. On this stack the mask covers 64 % of the
 first background region, 92 % of the second, 9 % of the fan and 26 % of the
 ghost region (`flat.f32` is written beside `depth.f32`). The seams went,
-but Travis found the background still "blobby": the depth now ramped
+but the background was still blobby at 1:1: the depth now ramped
 smoothly from frame 0 at the matrix to the far end, and the ramp walks
 through frames 20-60.
 
@@ -1423,7 +1423,7 @@ What it says:
   thorough adds background blur 256, aggregation 0 / 64, dark reach 48, halo
   prior off, B radius 32 (12 B's, ~2.5 min). The sweep records each
   variant's change share in `sweep.json` (`change_pct`).
-- **Travis's verdict on the thorough set** (11/07, night, at 1:1 in the
+- **Verdict on the thorough set** (at 1:1 in the
   two-up viewer): background blur 256 is the best of the twelve. The 1/4
   volume looked good at first and was then rejected for its doubled plate
   edge (§32 again, even with the 0.6.2–0.6.4 additions on top). The others
@@ -1436,7 +1436,7 @@ What it says:
 Follow-up sweeps on the 1/2 volume (`Q:\_sweep_bg`, `Q:\_sweep_keep`).
 Blur 192 / 256 / 384 / 512 change 1.8 / 3.5 / 5.4 / 6.8 % of B's pixels
 (the change grows almost linearly with the width); blur 256 with flat reach
-12 / 48: 4.1 / 3.8 %. Travis: **512 gives the best background but is among
+12 / 48: 4.1 / 3.8 %. At 1:1, **512 gives the best background but is among
 the worst for detail** in parts that should have features.
 
 Why one number does both: `flat_blur_px` sets the slice blur in flat pixels,
@@ -1454,8 +1454,8 @@ focus evidence of its own keeps that share of its SGM depth. Change vs base:
 band's reach, not the smoothing); 512 + keep 1: 8.3 %; 512 + band 128 +
 keep 1 / 0.5: 5.1 / 3.0 %; 256 + keep 1: 5.1 %.
 
-**Travis: none of them is good.** Helicon "still handles things much better";
-the failures to fix are banding and "waxy lines" in the background while
+**None of them is good.** Helicon still handles the background much better;
+the failures to fix are banding and waxy lines in the background while
 features keep their detail. Parked in favour of the retouch tool; the next
 step here is another black-box study of Helicon's background (§31) aimed at
 those two artefacts. The two controls stay (default off, bit-identical B).
@@ -1487,7 +1487,7 @@ at 4 px (RMS Laplacian) than ours in every region, but it still has 20-33 %
 step pixels in the blur regions, so smoothness is not the difference: the
 choice of frame per blob is. Our fill renders the whole region as a monotone
 ramp from one end over ~200 px, which is the flat "wax" and, where the ramp
-crosses many frames, the faint concentric lines Travis sees.
+crosses many frames, the faint concentric lines seen at 1:1.
 
 **c. A model of it** (`bg_helicon_model.py`: all 163 frames warped onto the
 regions at 1/4, band-pass energies |G(a) - G(b)| per frame, per-pixel
@@ -1508,7 +1508,7 @@ blurbg_b is predicted by no band-pass scale up to 24-96 px. Not adopted yet;
 the next step is to try that rule in the fill (per-blob end from the
 band-pass argmax instead of one global end vote) and judge at 1:1.
 
-**d. Raw vs denoised frames.** Travis denoises every frame in Camera Raw
+**d. Raw vs denoised frames.** Every frame is denoised in Camera Raw
 before stacking (Helicon saw the same denoised frames, so all comparisons so
 far are fair). The same 163 shots exported without denoise
 (`Q:\163 noise`, noise MAD 0.0071 vs 0.0028 at level 0, 2.5x) stacked with the
@@ -1576,8 +1576,8 @@ smoothing gate already adapts (it reads the MADs); the SGM penalties do not.
 
 ## 39. The warp's resampling filter as an option (2026-11-08)
 
-Travis asked for Helicon's Preferences choice of interpolation ("to improve
-the preservation of details"). `Grid::interp` / `--interp` / the render
+Helicon's Preferences offer a choice of interpolation to preserve detail;
+xLamina now has the same. `Grid::interp` / `--interp` / the render
 panel's "Interpolation": bilinear, bicubic (a = -0.75, the reference; the
 only one with the OpenCV 4 `quantize` path), Lanczos 3 (6 x 6 taps), Lanczos
 8 (16 x 16 taps), all at exact double positions with reflect borders, weights
@@ -1603,7 +1603,7 @@ with the filter (the alignment does not: it has its own B-spline sampler).
 The follow-up to §37 b-c. Beyond the band beside sharp detail, 0.6.4 sent
 every flat pixel to the *quiet* end of the stack (the end frame with the
 lower coarse |G3 - G12| energy): a monotone ramp from one end, the flat
-wax and the concentric lines Travis saw. Three alternatives, all behind
+wax and the concentric lines seen at 1:1. Three alternatives, all behind
 `--flat-end` (DepthParams::flat_end):
 
 - **loud** (1): the end frame with the *higher* coarse energy, a soft
@@ -1760,10 +1760,10 @@ measured separately.
 
 ## 44. The B parameter search, round 1: scored against the source frames (2026-11-08, night)
 
-Travis judged 0.6.20's B at 1:1 ("looks great") and opened the parameter search
-he had planned: the 201-frame stack only, his eye at 1:1 as the judge, with an
-objective helper that measures against the source frames rather than against
-Helicon (his 11/06 rule: another stacker agreeing proves nothing). Winners
+0.6.20's B looked good at 1:1, which opened the planned parameter search: one
+200-frame stack, the eye at 1:1 as the judge, with an objective helper that
+measures against the source frames rather than against Helicon (another
+stacker agreeing proves nothing). Winners
 become the defaults; the knobs stay in Advanced.
 
 **The helper** (`helicon_B_analysis\score_sweep.py`): per pixel, the most
@@ -1803,7 +1803,7 @@ memory and is off the table. The base B retains 0.868 of the oracle (median),
 | soft labels 6 px | 1.1 % | 0.726 | 0.463 | 0.000 | 1.00 |
 
 Background, the two flat tiles' 4..40 px band energy against the base's (1 =
-the same): `--flat-end quiet` 0.51 / 0.94 (the smoothest, and what Travis
+the same): `--flat-end quiet` 0.51 / 0.94 (the smoothest, and what was
 rejected as wax in §36), flat blur 512: 0.84 / 0.80, flat blur 256: 0.83 /
 0.90, flat blend 32: 0.94 / 0.99, dark reach 48: 0.98 / 1.03; flat blur 0:
 1.15 / 1.32, flat blend 0: 1.03 / 1.02, flat keep 1: 1.04 / 1.08, flat min 1:
@@ -1824,7 +1824,7 @@ What it says:
   the crystal in detail6). 6 px blends a quarter of the detail away. The
   default 3 is on the soft side; 1.5 .. 2.5 are round 2's first candidates.
 - **Refine range 24 and aggregation 0 gain a little each** (0.005) without
-  seams; aggregation 0 shows a blotch in detail2 that needs Travis's eye.
+  seams; aggregation 0 shows a blotch in detail2 that needs a look at 1:1.
 - **The background knobs are orthogonal to detail** (the flat mask keeps
   them off textured pixels, as designed), so background smoothness can be
   tuned on its own: flat blur 256 and flat blend 32 are the calm candidates
@@ -1865,9 +1865,9 @@ What it says:
   vertical blotch across the plate in detail2 that the base does not have.
 - **Background**: flat blur 256 with flat blend 32 is the calm candidate
   (a fifth less ring energy, detail tiles untouched); 384 and 512 buy little
-  more. These are Travis's to judge at 1:1, as blur 512 was in §36.
+  more. These are for the eye to judge at 1:1, as blur 512 was in §36.
 
-Candidates for Travis's eye (Compare > Open sweep folder on `Q:\_sweep1` and
+Candidates to judge by eye (Compare > Open sweep folder on `Q:\_sweep1` and
 `Q:\_sweep2`, Difference overlay on): `soft-px-2_refine-r-24_vol-agg-px-16` is
 not it (aggregation); the detail candidate is **soft 2 + refine 24**, seen
 in the combined `flat-blur-256_flat-blend-32_soft-px-2_refine-r-24` with the
@@ -1875,13 +1875,12 @@ background change and in `soft-px-2_refine-r-36` without it; the aggressive
 one is `soft-px-1.5_refine-r-24`. Nothing is changed in the defaults until he
 has looked.
 
-**Travis's verdict** (the same night, at 1:1): the combined candidate "is
-quite good, it has some merits over regular base B. I prefer how it handles
-the background. But base B is still better for details." So **0.6.22 makes
+**Verdict at 1:1:** the combined candidate handles the background better
+than the base B, but the base B is still better for detail. So **0.6.22 makes
 flat blur 256 and flat blend 32 the defaults and leaves soft labels at 3 and
 the refine range at 12**. The lesson for the helper: fine-detail energy
 against the sharpest frame ranks the variants, but a higher score is not a
-better picture. Soft labels 2 measured +6 % and looked worse to him; the
+better picture. Soft labels 2 measured +6 % and looked worse; the
 blend's smoothing of frame-to-frame noise and rims is part of what reads as
 quality. The score stays a way to find candidates and to catch losses (soft 6,
 the refine window, aggregation 64), not a judge. The Run sweep presets are
@@ -1892,8 +1891,8 @@ aggregation) is gone, being within noise.
 
 ## 45. Culling the wobble outliers fixed a doubled edge; the depth stage's silence (2026-11-08, evening)
 
-Travis dropped the flagged frames (Render > Drop flagged frames: the shift from
-the previous frame an outlier) from the 201-frame stack, 195 left, shooting
+Dropping the flagged frames (Render > Drop flagged frames: the shift from
+the previous frame an outlier) from a 200-frame stack left 195, shot
 with enough overlap that coverage is not in question. At 1:1 in the two-up
 viewer, H with and without them: **a prominent doubling of one crystal edge
 is gone with the deviants removed**, the rest within the Difference overlay's
@@ -1904,8 +1903,8 @@ jumped; on this stack that is not the same as the frames that are *soft*
 sharpness flag from pass 1's focus energy would cull the soft frames directly;
 not built yet (Open items).
 
-The "hang on the depth stage" he saw at full resolution is the stage's
-silence, not a stall: timed with his settings (195 frames, Lanczos 8, nine
+The apparent hang on the depth stage at full resolution is the stage's
+silence, not a stall: timed with the same settings (195 frames, Lanczos 8, nine
 outputs) the depth stage runs 4.1 s (noise floor, the 9 GB volume to the
 GPU, cost 2.0 s, SGM 0.4 s in five bands, post) while the progress bar sat
 at zero with one report at the start. 0.6.23 reports every step (noise
@@ -1919,7 +1918,7 @@ engine retries at a quarter-resolution volume, a real stall and a softer B.
 
 ## 46. The ten-second depth stall was GPU memory paging; the luma volume now streams (2026-11-08, night)
 
-Travis's GUI log of a default stack of 201 frames at full resolution:
+The GUI log of a default stack of 200 frames at full resolution:
 
 ```
 depth: 9.4 GB volume to the GPU in 0.89 s
@@ -1965,8 +1964,8 @@ output-resolution buffers before the SGM (3.64 GB free beside the volume,
 
 ## 47. The live view as a sweep: a paced player in stack order (2026-11-08, night)
 
-Travis: no stage of the live view "is a smooth pass through visually ...
-happening in jitters and chunks and choppy"; Helicon sweeps the stack
+No stage of the live view was a smooth pass through the stack: it moved in
+jitters and chunks, where Helicon sweeps the stack
 forward once and back once, smoothly. Three causes in the plumbing:
 
 - Each GPU stream slot sent a view of the frame it had just processed, at
@@ -2000,7 +1999,7 @@ at 99 from the read and every pass-1 frame was "behind" it.
 
 At Full the engine still rationed views to one per 365 ms per slot (every
 copy off a GPU costs the uploads link time, §30), so the Full sweep was ~3
-views a second: Travis, "it looks bad on full, pretty good on high".
+views a second: it looked bad on Full and good on High.
 
 **Full now renders what the view shows** (0.6.33). A Full frame is 31 Mpx,
 388 MB, and no hardware makes 30 of those a second sensible: that is
@@ -2022,7 +2021,7 @@ and card (it was per slot), so views the player would drop are not copied.
 
 ## 48. JPEG frames (2026-11-09)
 
-Travis asked what JPEG input would cost or gain against 16-bit TIFF. The
+What would JPEG input cost or gain against 16-bit TIFF? The
 reader now takes JPEG (0.6.34): `tiff_probe` recognises the SOI marker and
 reads the size and the embedded profile through Windows Imaging Component;
 `tiff_read_pixels` decodes the whole frame to 8-bit RGB into the caller's
@@ -2047,7 +2046,7 @@ embedded. Against the same 16 frames stacked from 16-bit TIFF:
 
 B's difference is the 8-bit quantisation itself; C's is twice that, the
 pyramid picking up the compression's high-frequency residue as predicted
-(§47's discussion with Travis: block edges and chroma subsampling register as
+(as expected in §47: block edges and chroma subsampling register as
 texture, ringing beside glints as detail). What the numbers do not show is
 the tonal gradation: 8 bits leave about 20 levels in the top stop, so the
 shoulders of blown reflections and the deep matrix shadows posterise where
@@ -2062,8 +2061,8 @@ names the profile ("Adobe RGB (1998)").
 
 ## 49. Soft frames: a per-frame focus energy next to the wobble (2026-11-09)
 
-Travis: "alongside the delta shift, a metric to notice soft frames would be
-useful". §45's lesson was that the wobble flags the frames whose *position*
+Alongside the frame-to-frame shift, a metric that notices soft frames is
+useful. §45's lesson was that the wobble flags the frames whose *position*
 jumped, not the frames that are *blurred*; a frame blurred by movement during
 its exposure loses fine detail everywhere, while the focus profile across the
 stack is smooth, so its neighbours say what its energy should have been.
@@ -2086,8 +2085,8 @@ stack is smooth, so its neighbours say what its energy should have been.
   monotone, so most frames *are* the median of their five and have the ratio
   1 exactly, the robust sigma is 0 and the rule always fell back to the 0.9
   cap. The 192-frame stack after the test frames were dropped has its lowest
-  ratios at 0.92, 0.95 and 0.97 (Travis, 11/09: "several frames approach
-  ~0.9 ... what's the cutoff?"), hence the setting.
+  ratios at 0.92, 0.95 and 0.97, close enough to the cutoff that it is
+  now a setting.
 - **Verified against the raw frames.** An independent Laplacian-energy
   measurement with OpenCV on the source TIFFs (no warp) gives the same
   ratios to within 0.05 (frame 2: 0.651 vs the engine's 0.622 under the old
@@ -2108,14 +2107,14 @@ stack is smooth, so its neighbours say what its energy should have been.
   still shows as a dip.
 - **GUI** (0.6.38): the list row reads `Δ 1.23 px  0.012 %  sharp 0.97`;
   soft rows are amber, shifted rows red; Render > Drop shifted frames and
-  Drop soft frames untick each kind separately (Travis: "two buttons").
+  Drop soft frames untick each kind separately.
   The CLI logs the soft frames, stack.txt carries `frame_energy`,
   `soft_threshold` and `soft`.
 
 ## 50. Cx: C's glow is coarse-level selection with no support below it (2026-11-09)
 
-Travis asked whether "point spread function tricks" could remove the bright
-glare in C. Deconvolution cannot: the glare is the wrong *frame* being chosen,
+Could point-spread-function methods remove the bright glare in C?
+Deconvolution cannot: the glare is the wrong *frame* being chosen,
 not blur inside the chosen frame, and the frames are Camera Raw denoised, so
 the per-frame PSF is the denoiser's, not the lens's. What survives denoising
 is the geometry of defocus: a highlight's disc grows with the distance from
@@ -2156,7 +2155,7 @@ focus and has energy at the coarse pyramid levels only.
   At 1:1 Cx clears the prism's glow and the haze over the red crystal nearly as
   CBn does and keeps C's crisp internal plate lines where CBn softens them.
   `support_min` 3 of 4 or `support_near` 2 would trade the other way; the
-  knobs are in FinalParams, not exposed yet. Travis judges at 1:1.
+  knobs are in FinalParams, not exposed yet. To be judged at 1:1.
 - **A bug on the way:** `k_noise_w`'s `only` flag was `!use_depth`, so with
   the support rule and no depth rule the noise weights overwrote the support
   weights and the first Cx equalled C (+0.0520). Now `!(use_depth ||
@@ -2167,8 +2166,8 @@ focus and has energy at the coarse pyramid levels only.
 
 ## 51. Rolling shutter: warping and LED banding measured and undone (2026-11-09)
 
-Travis: "most of my shots also suffer from rolling shutter effects. Warping,
-and brightness banding". Both are real on the 210-frame stack, both are
+Most shots on this setup suffer from two rolling-shutter effects, warping and
+brightness banding. Both are real on a 200-frame test stack, both are
 measured by every alignment now, and both can be undone in the warp.
 
 - **Warping, the probe.** Frame k+1 warped onto frame k with the stack's own
@@ -2224,22 +2223,19 @@ measured by every alignment now, and both can be undone in the warp.
   `DevRowCorr` uploads them per device (two sensor rows averaged into one
   working row at scale 0.5), `apply_row_fixes` in run_job builds them from
   the alignment (the band offsets interpolated linearly between band
-  centres) when `fix_rs` / `fix_banding` are set. GUI: Render > Undo
-  rolling-shutter warping / Undo LED banding, off by default, `_rs` /
+  centres) when `fix_rs` / `fix_banding` are set. GUI: Correct
+  rolling-shutter warp / Correct LED banding, `_rs` /
   `_band` in the saved names; CLI `--fix-rs 1 --fix-banding 1`.
-- **Travis's verdicts (11/09 night).** First, on B: "very subtle. Only
-  viewable in the difference map at above 0.5 %. But I guess it is an
-  improvement." Then, after more stacks and the C outputs: "holy hell, that
-  correction for warping is enormously good, it fixes so many doubling
-  errors!" and "it's a better improvement for C type methods". C takes
+- **Verdicts at 1:1.** On B the effect is subtle, visible only in the
+  difference map above 0.5 %. On the C outputs the warp correction is a
+  large improvement: it removes most doubled edges. C takes
   coefficients from many frames at every level, so a 2..4 px disagreement
   between neighbours lands straight in the composite; B meets it only where
-  the chosen frame changes. **Undo rolling-shutter warping is the default
+  the chosen frame changes. **Correct rolling-shutter warp is the default
   from 0.6.40** (Preferences > General, with the banding fix beside it, off
   until judged). Helicon's alignment is one rigid transform per frame, so it
-  cannot do this; its doubled edges are the same mechanism. He asked for a
-  drop for the badly warped
-  frames: violet rows and Render > Drop warped frames flag `rs_px` above
+  cannot do this; its doubled edges are the same mechanism. Badly warped
+  frames can be dropped: violet rows and Render > Drop warped frames flag `rs_px` above
   median + max(4 robust sigmas, 2 px) (5.6 px on the 210-frame stack: the
   six test frames at 11..75 px and eight real frames at 5.8..26 px, IMG_5694
   the worst).
@@ -2249,17 +2245,46 @@ measured by every alignment now, and both can be undone in the warp.
   (0.00368 → 0.00384); the doubled-edge share (edge pixels with a second,
   parallel edge of the same polarity 2..6 px along the gradient) 0.539 →
   0.527, lower in 7 of the 8 sharpest 256-px blocks. The right direction,
-  small; Travis's 1:1 verdict decides whether either goes on by default.
+  small; the 1:1 verdict decides whether either goes on by default.
 - **Open:** the band offsets are one translation per 580 rows (8 bands); a
   vibration faster than the readout would need more bands or a spline. The
   banding fit's range 3..12 is this camera's; the log prints the strongest
   mode so another body's range can be read off.
 
+## 52. A RAM disk is not needed: SSD vs RAM disk, 8-bit vs 16-bit, resident vs streamed (2026-11-09)
+
+260 frames of 6960 x 4640, `stackcli run --outputs B,C`, two rounds of each
+combination, whole-run seconds (alignment + fusion, the frames read once in
+the resident runs):
+
+| frames | resident | streamed every pass (`--cache 0`) |
+|---|---|---|
+| NVMe SSD (PCIe 5), 16-bit, 47 GB | 34.4 / 34.4 | 39.9 / 40.7 |
+| NVMe SSD (PCIe 5), 8-bit, 24 GB | 31.5 / 30.0 | 31.9 / 31.4 |
+| RAM disk, 8-bit, 24 GB | 32.8 / 36.1 | 30.9 / 31.6 |
+
+- **The drive is not the limit.** The first read ran at 10.9 GB/s from the
+  SSD and from the RAM disk alike (and for 8-bit and 16-bit alike): the
+  pipeline's ingest sets the rate. A RAM disk only costs the memory it holds.
+  With a slow drive and little memory the streamed passes would be bound by
+  the drive instead (about three reads of the stack per render).
+- **Resident frames matter with 16-bit input** (about 6 s of 40, the uploads
+  of passes 1..3 at 120 frames/s from memory against 61 read) and not
+  measurably with 8-bit, where half the bytes cross per pass. The 36.1 s
+  RAM-disk run is an unexplained outlier.
+- **8-bit input costs nothing visible.** C from 8-bit exports against C from
+  the 16-bit exports of the same shots: median difference 0.39 of an 8-bit
+  level, mean 0.65, 2 % of pixels beyond 4 levels (the two alignments differed
+  by a pixel of crop, so part of that is not bit depth). The frames' noise is
+  about 0.7 of an 8-bit level, which dithers the rounding; the output is
+  computed in float and written as 16-bit either way. Tone work belongs before
+  the export or on the stacked result.
+
 ## Open items
 
-- **AutoFOV link** (Travis, 11/09): an option that asks autofov.local for the
-  LAST stack's average FOV right after shooting (he stacks straight after
-  capture), ahead of the capture-log design in DESIGN.md.
+- **AutoFOV link**: an option that asks autofov.local for the
+  LAST stack's average FOV right after shooting (stacking follows straight
+  after capture), ahead of the capture-log design in DESIGN.md.
 - **B: doubled plate edge / glow** (§25a): the C-style aggregation does not
   work on the normalised focus measure; needs rim rejection or ownership.
 - **C: stacked rim outlines inside bright plates** (§25): present at any C
@@ -2275,7 +2300,7 @@ measured by every alignment now, and both can be undone in the warp.
   than Helicon B at 1:1 (see 9).
 - Optional output tone stage (black point / contrast) to match Helicon's look,
   and optional highlight/sparkle suppression (see 10).
-- **DNG input** (Travis, 11/08): the reader takes uncompressed 8/16-bit TIFF only; a DNG (a raw mosaic, or
+- **DNG input**: the reader takes uncompressed 8/16-bit TIFF only; a DNG (a raw mosaic, or
   Camera Raw's enhanced linear raw) is lossless-JPEG compressed and in camera colour before white balance, so
   reading it means a raw developer stage (LibRaw), not a reader tweak. The Camera Raw 16-bit TIFF export stays
   the path for now.

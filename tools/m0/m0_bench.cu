@@ -7,7 +7,7 @@
 // the core per-frame kernels (uint16 -> luma, similarity warp via texture,
 // focus measure, pyramid level). All GPUs at once: concurrent H2D, to see
 // what the host side sustains. Host: memcpy bandwidth, and the read rate of
-// the frame folder (unbuffered and cached), which is the RAM disk in practice.
+// the frame folder (unbuffered and cached), a RAM disk or a fast SSD.
 //
 // Kernels here are throughput stand-ins with the right memory traffic, not
 // the reference implementations: those come in later milestones, checked
@@ -266,7 +266,7 @@ static double bench_concurrent_h2d(std::vector<GpuInfo>& gs, std::vector<DevBufs
 // ----------------------------------------------------------------------------- host side
 
 static double bench_memcpy(int threads, int reps) {
-    // each byte of a frame crosses host RAM ~3x (RAM disk -> pinned -> DMA); this is one crossing
+    // each byte of a frame crosses host RAM ~3x (file cache or RAM disk -> pinned -> DMA); this is one crossing
     std::vector<std::vector<uint8_t>> src(threads), dst(threads);
     for (int i = 0; i < threads; ++i) {
         src[i].assign(FRAME_BYTES, (uint8_t)i);

@@ -34,7 +34,7 @@ using namespace stackcore;
 // ----------------------------------------------------------------------------- the built-in sample
 
 // A synthetic stack with the features a real one has: a textured matrix whose height varies smoothly,
-// a raised plate with a bright thin rim (the edge-on plate edges of Travis's specimens), per-frame
+// a raised plate with a bright thin rim (like the edge-on edges of thin plate crystals), per-frame
 // defocus that grows with the distance to the frame's depth, sensor noise, and a little wobble.
 // Deterministic, so two machines running it are comparable.
 namespace {
@@ -143,7 +143,7 @@ QStringList generate_sample(const QString& dir, const std::function<void(const Q
                             "depth %4 x (0.82 + 0.08 ex), bright rim where |ex^2 + ey^2 - 1| < 0.012; matrix depth %4 x 0.45 x (0.5 + 0.5 sin(2 pi 1.3 x/W + 0.7) cos(2 pi 0.9 y/H + 1.9)).\n")
                         .arg(N).arg(W).arg(H).arg(N - 1).arg(kDefocusPxPerFrame).toUtf8());
     }
-    // defocus grows 1 px of sigma per frame of distance, about what a 20x / NA 0.4 objective does at Travis's
+    // defocus grows 1 px of sigma per frame of distance, about what a 20x / NA 0.4 objective does at
     // 0.468 um steps and 0.14 um/px (0.45 px/frame left the depth underdetermined at 1/4 resolution)
     const float sigmas[] = {0.f, 0.7f, 1.5f, 3.f, 5.f, 8.f, 12.f, 17.f, 24.f, 32.f};
     const int L = 10;

@@ -11,9 +11,9 @@ the blur filters):
   magick gui/icon/xlamina-256.png ... gui/icon/xlamina-16.png gui/icon/xlamina.ico
 The .ico carries 256, 128, 96, 72, 64, 48, 40, 32, 24, 20 and 16: every size Windows asks for at 100 .. 200 % scaling
 (the desktop's large icons are 96 px; a missing size is scaled from a neighbour and looks soft once the icon cache
-settles, Travis 2026-11-09). 20 and 16 use the "xL" SVG, the rest the name.
+settles). 20 and 16 use the "xL" SVG, the rest the name.
 Every size from 24 px up carries the name on all five slabs, blurred red above and blue below, sharp purple in
-the middle: unreadable at 48 px but it is the look Travis wants on the desktop (2026-11-08 evening; a 48 px "xL"
+the middle: unreadable at 48 px but it is the intended look on the desktop (2026-11-08 evening; a 48 px "xL"
 tried that morning came out cut off). Only the 16 px tile, where the layers are a smear, has a big upright "xL".
 After regenerating, touch gui/xlamina.rc and cli/stackcli.rc: Ninja does not see .ico changes.
 If the desktop still shows an old icon after a rebuild, Explorer's icon cache is stale: ie4uinit.exe -show."""

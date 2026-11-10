@@ -54,16 +54,15 @@ static const char* kOutputHelp[] = {
     "A: focus-weighted average of all frames. Smooth, soft.",
     "B0: raw per-pixel argmax of the focus measure (unregularised B).",
     "CB: pyramid, falling back to B where C's choice disagrees with the depth map (no noise rule: flat areas keep C's grain).",
-    "CBn: CB plus the noise rule: pyramid detail only where it is above the noise, B elsewhere. The better of the two on the\n"
-    "201-frame stack (Travis, 2026-11-08); CB moved to Tools > Developer outputs.",
+    "CBn: CB plus the noise rule: pyramid detail only where it is above the noise, B elsewhere.",
     "Cx: CBn with the finer level's support in place of the dominance test: where C's choice disagrees with the depth map it\n"
     "stays only if the level below chose the same frame. Against the glow of defocused highlights (FINDINGS 50).",
     "Cd: pyramid locked to B's depth at the fine levels (against glints from other depths).",
     "Cg: pyramid with coarse levels from B (against glare from defocused highlights).",
     "Cg2: Cg with one more coarse level from B.",
     "H: luma from CBn, chroma from B."};
-// A, B0 and CB are not in the Outputs list: Tools > Developer outputs (developer mode) ticks them (Travis, 2026-11-08;
-// CB since 0.6.23: CBn is the better of the two)
+// A, B0 and CB are not in the Outputs list: Tools > Developer outputs (developer mode) ticks them
+// (CB since 0.6.23: CBn is the better of the two)
 static bool isMenuOutput(int i) { return i == 3 || i == 4 || i == 5; }
 static const int kMaxRecent = 8;
 
@@ -106,7 +105,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(&updater_, &Updater::available, this, &MainWindow::onUpdateAvailable);
     connect(&updater_, &Updater::upToDate, this, [this](const QString& v) {
         if (updateManual_) {
-            // a build installed by hand runs ahead of the releases (Travis, 2026-11-08: "0.6.29 is the latest" while running 0.6.33)
+            // a build installed by hand runs ahead of the releases ("0.6.29 is the latest" while running 0.6.33)
             QString msg = Updater::compareVersions(v, XLAMINA_VERSION) < 0
                               ? QString("You are running xLamina %1, newer than the latest release (%2).").arg(XLAMINA_VERSION, v)
                               : QString("xLamina %1 is up to date: %1 is the latest release.").arg(v);
@@ -186,11 +185,11 @@ void MainWindow::buildMenus() {
     dropWarped_ = render->addAction("Drop &warped frames", this, &MainWindow::dropWarped);
     dropWarped_->setEnabled(false);
     dropWarped_->setToolTip("Untick the frames in violet: their rolling-shutter displacement from band to band is far above the stack's\n"
-                            "(shaken during the readout, beyond what Undo rolling-shutter warping can put back); then Render again.");
+                            "(shaken during the readout, beyond what Correct rolling-shutter warp can put back); then Render again.");
     tickAll_ = render->addAction("&Tick all frames", this, &MainWindow::tickAllFrames);
     tickAll_->setToolTip("Tick every frame in the list again (after dropping frames, or to start over).");
     render->addSeparator();
-    // the list is the stack order (Travis, 2026-11-09: "more options for sorting frames. By time taken, alphabetical")
+    // the list is the stack order ("more options for sorting frames. By time taken, alphabetical")
     sortName_ = render->addAction("Sort frames by &name", this, [this] { sortFrames(false); });
     sortName_->setToolTip("Order the list, and so the stack, by file name (numbers in order: IMG_9 before IMG_10).");
     sortTime_ = render->addAction("Sort frames by time ta&ken", this, [this] { sortFrames(true); });
@@ -242,7 +241,7 @@ void MainWindow::buildMenus() {
         if (result_) { QApplication::clipboard()->setText(result_->reportJson); statusBar()->showMessage("report.json copied.", 3000); }
     });
     tools->addSeparator();
-    // the outputs that left the Outputs list (A, B0: Travis, 2026-11-08) stay reachable here in developer mode;
+    // the outputs that left the Outputs list (A, B0) stay reachable here in developer mode;
     // the actions mirror hidden check boxes, filled in with the Outputs group below
     devOutMenu_ = tools->addMenu("Developer &outputs");
     devOutMenu_->setStatusTip("A (focus-weighted average) and B0 (raw argmax): developer outputs, rendered when ticked.");
@@ -320,11 +319,11 @@ void MainWindow::buildUi() {
     tabs_->setExpanding(false);
     tabs_->setDrawBase(false);
     // the active output must be unmistakable: the selected tab in the accent colour, and the viewer names its image
-    // colour only, no bold: a bold selected tab was wider, so stepping B -> C re-laid the whole row (Travis, 2026-11-08)
+    // colour only, no bold: a bold selected tab was wider, so stepping B -> C re-laid the whole row
     tabs_->setStyleSheet("QTabBar::tab { padding: 6px 16px; margin-right: 2px; }"
                          "QTabBar::tab:selected { background: #7a2fc9; color: white; }");
     tabs_->setToolTip("The outputs of the last render and any comparison images; PgUp / PgDown step through them at the same zoom.");
-    // Compare and Retouch, centred above the view (Travis, 2026-11-08): the same as Compare > Two-up viewer, and the
+    // Compare and Retouch, centred above the view: the same as Compare > Two-up viewer, and the
     // viewer with retouching switched on
     QWidget* topRow = new QWidget;
     QHBoxLayout* tl = new QHBoxLayout(topRow);
@@ -346,7 +345,7 @@ void MainWindow::buildUi() {
     tl->addStretch(1);
     cl->addWidget(topRow);
     cl->addWidget(split_, 1);
-    // the stage and its progress bar under the view (they hid at the bottom of the Render column: Travis, 2026-11-08)
+    // the stage and its progress bar under the view (they hid at the bottom of the Render column)
     QWidget* progRow = new QWidget;
     QHBoxLayout* prl = new QHBoxLayout(progRow);
     prl->setContentsMargins(6, 4, 6, 2);
@@ -383,7 +382,7 @@ void MainWindow::buildUi() {
     frameList_->setContextMenuPolicy(Qt::CustomContextMenu);
     frameList_->setToolTip("The stack's frames, in stack order: drag to reorder, right-click to add a frame again or move it.\n"
                            "Click one to see it at full resolution; greyed files are not part of the stack.");
-    // the master tick under the dock's title, in line with the rows' ticks (Travis, 2026-11-09): ticked = every frame
+    // the master tick under the dock's title, in line with the rows' ticks: ticked = every frame
     // in the render, clear = none, partly filled = some; a click ticks every frame unless all were ticked, then it clears them
     QWidget* framesBox = new QWidget;
     QVBoxLayout* fbl = new QVBoxLayout(framesBox);
@@ -465,22 +464,18 @@ void MainWindow::buildUi() {
     lockScale_ = new QCheckBox("Lock scale (telecentric optics)");
     lockScale_->setToolTip("Apply no scale change between frames; use for telecentric objectives.");
     fl->addRow("", lockScale_);
-    // the rolling shutter's two corrections (FINDINGS 51; Travis, 2026-11-09: "most of my shots suffer from rolling shutter
-    // effects, warping and brightness banding"). Both are measured by every alignment and shown in the frame list; these
-    // put the measurements into the warps. They live in File > Preferences > General (Travis, 2026-11-09 night, after
-    // judging the warping fix "enormously good, it fixes so many doubling errors": "keep it on my default, and a setting
-    // to turn off/on in preferences"); warping on by default, banding off.
-    fixRs_ = new QCheckBox("Undo rolling-shutter warping");
+    // the rolling shutter's two corrections (FINDINGS 51). Both are measured by every alignment and shown in the frame
+    // list; these put the measurements into the warps. They live in File > Preferences > General; the warp correction
+    // is on by default (it removes most doubled edges), banding off.
+    fixRs_ = new QCheckBox("Correct rolling-shutter warp");
     fixRs_->setChecked(true);
-    fixRs_->setToolTip("The alignment solves each frame's displacement per band of sensor rows against its neighbours (the list's \"warp\" value).\n"
-                       "Ticked, every warp of the frame moves its rows back by that displacement, so detail the sensor read while the stage\n"
-                       "still vibrated lands where the rest of the stack has it instead of a few pixels off (a doubled edge where the fusion\n"
-                       "changes frame). On by default (FINDINGS 51); saved files carry \"_rs\" in the name while it is on.");
-    fixBanding_ = new QCheckBox("Undo LED banding");
-    fixBanding_->setToolTip("The LED's flicker, read out line by line, leaves a brightness ripple across each frame's rows (the list's \"band\" value,\n"
-                            "about 3 % peak-to-peak and 6 cycles per frame on the 210-frame stack). Ticked, every warp of the frame divides its rows\n"
-                            "by the fitted ripple, so neighbouring regions taken from different frames meet at the same brightness. It changes\n"
-                            "no frame's overall brightness. Saved files carry \"_band\" in the name while it is on.");
+    fixRs_->setToolTip("Checked: each frame's rows are shifted back by the rolling-shutter displacement the alignment measured\n"
+                       "(the \"warp\" value in the frame list), which removes doubled edges. Saved files get \"_rs\" in the name.\n"
+                       "Unchecked: no correction.");
+    fixBanding_ = new QCheckBox("Correct LED banding");
+    fixBanding_->setToolTip("Checked: each frame's rows are divided by the brightness ripple the LED's flicker left across them\n"
+                            "(the \"band\" value in the frame list), so regions taken from different frames meet at the same brightness.\n"
+                            "Saved files get \"_band\" in the name. Unchecked: no correction.");
     liveRes_ = new QComboBox;
     liveRes_->addItem("Off (fastest)", 0);
     liveRes_->addItem("Low (1/12)", 12);
@@ -493,16 +488,16 @@ void MainWindow::buildUi() {
                          "1:1, about 2 Mpx either way, so it sweeps as smoothly as High. Every image copied off a GPU costs its uploads\n"
                          "about 3 ms, so views are limited to 30 a second. Off shows only the finished outputs.");
     fl->addRow("Live view", liveRes_);
-    // the warp's resampling filter (Travis, 2026-11-08: Helicon's Preferences offer the same choice)
+    // the warp's resampling filter (Helicon's Preferences offer the same choice)
     interp_ = new QComboBox;
     interp_->addItems({"Bilinear", "Bicubic", "Lanczos 3", "Lanczos 8"});   // the order of stackcore::Interp
     interp_->setCurrentIndex(1);
     interp_->setToolTip("How every frame is resampled onto the output grid when it is aligned.\n"
                         "Bicubic (the default, OpenCV's a = -0.75) is the reference the engine was validated with. Lanczos 3 keeps about\n"
-                        "1 % more fine detail for 0.3 s more per render; Lanczos 8 about 3 % more for 3.3 s more (163 frames, FINDINGS 39).\n"
+                        "1 % more fine detail for 0.3 s more per render; Lanczos 8 about 3 % more for 3.3 s more (about 150 frames, FINDINGS 39).\n"
                         "Bilinear is softest and fastest (8 % less). Changing it changes every output.");
-    // (not in the Render column: File > Preferences > General holds it, Travis, 2026-11-09; the setting is kept as before)
-    // the soft-frame cutoff (FINDINGS 49; Travis, 2026-11-09: frames near 0.9 with the action greyed out: "what's the cutoff?")
+    // (not in the Render column: File > Preferences > General holds it; the setting is kept as before)
+    // the soft-frame cutoff (FINDINGS 49)
     softCutoff_ = new QDoubleSpinBox;
     softCutoff_->setRange(0.50, 0.99);
     softCutoff_->setSingleStep(0.01);
@@ -549,7 +544,7 @@ void MainWindow::buildUi() {
     fl->addRow("Radius (B)", bradius_);
     fov_ = new QDoubleSpinBox;
     fov_->setRange(0, 1000);
-    fov_->setDecimals(2);   // two decimals (Travis, 2026-11-09); the report keeps four
+    fov_->setDecimals(2);   // two decimals; the report keeps four
     fov_->setSingleStep(0.01);
     fov_->setSuffix(" mm");
     fov_->setSpecialValueText("unknown");
@@ -588,7 +583,7 @@ void MainWindow::buildUi() {
     depthRes_->addItem("Full (small stacks only)", 1.0);
     depthRes_->setCurrentIndex(1);
     depthRes_->setToolTip("Resolution of the depth volume. 1/2 (the default since 0.6.1) removes the doubled edges of bright plates that 1/4\n"
-                          "left; it needs about 5 GB of GPU memory for 163 full frames and costs about 3 s. Full needs 20 GB for such a stack.");
+                          "left; it needs about 6 GB of GPU memory for 200 full frames and costs about 3 s. Full needs about 25 GB for such a stack.");
     al->addRow("Depth resolution", depthRes_);
     depthFmPx_ = dspin(1, 30, 1, 6, 0, " px", "Window of the normalised Laplacian in the depth volume, in depth-volume pixels. Default 6;\n"
                                                "3 at 1/2 resolution gave the tightest edges on the synthetic stack (FINDINGS 31).");
@@ -633,7 +628,7 @@ void MainWindow::buildUi() {
     pl->addWidget(advanced_);
 
     // ---- performance: what the benchmark tunes. Machine settings, not render settings: the group lives in
-    // File > Preferences (Travis, 2026-11-08), built here because perfToUi / perfFromUi read its widgets
+    // File > Preferences, built here because perfToUi / perfFromUi read its widgets
     perfGroup_ = new QGroupBox("Performance");
     QGroupBox* perf = perfGroup_;
     perf->setToolTip("Hardware settings. They change the speed, never the result: B and C are bit-identical across all of them.\n"
@@ -685,7 +680,7 @@ void MainWindow::buildUi() {
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);   // a narrow dock scrolls instead of clipping the spin boxes
     params->setWidget(scroll);
-    params->setMinimumWidth(380);   // the form's fields collapsed to nothing when the window was made small (Travis, 2026-11-08)
+    params->setMinimumWidth(380);   // the form's fields collapsed to nothing when the window was made small
     addDockWidget(Qt::RightDockWidgetArea, params);
 
     // ---- bottom: geometry + log
@@ -706,7 +701,7 @@ void MainWindow::buildUi() {
     lg->setWidget(log_);
     addDockWidget(Qt::BottomDockWidgetArea, lg);
     tabifyDockWidget(geo, lg);
-    // the live hardware panel (Travis, 2026-11-08: the Preferences line is a start-up snapshot and cannot show a run)
+    // the live hardware panel (the Preferences line is a start-up snapshot and cannot show a run)
     hwDock_ = new QDockWidget("Hardware", this);
     hwDock_->setObjectName("hardware");
     hwDock_->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetClosable);
@@ -1014,7 +1009,7 @@ void MainWindow::resumeThumbnails() {
 }
 
 // The frame cache takes the folder's frames as its set and a budget from the machine's free memory, and the
-// thumbnail loader reads into it (Travis, 2026-11-08: the frames were read once for the thumbnails and again for
+// thumbnail loader reads into it (the frames were read once for the thumbnails and again for
 // the render). With the cache switched off in Performance the thumbnails read as before.
 void MainWindow::warmCache() {
     bool on = cacheFrames_ && cacheFrames_->isChecked() && !worker_.running();
@@ -1245,7 +1240,7 @@ void MainWindow::rebuildTabs() {
     while (tabs_->count()) tabs_->removeTab(0);
     if (result_ && result_->rc == 0) {
         for (const auto& n : result_->result.names) tabs_->addTab(QString::fromStdString(n));
-        // (the depth map is no longer a tab or a viewer entry: Travis, 2026-11-08; outputImage("depth") still renders it)
+        // (the depth map is no longer a tab or a viewer entry; outputImage("depth") still renders it)
     }
     for (auto it = compare_.begin(); it != compare_.end(); ++it) {
         int t = tabs_->addTab(it.key());
@@ -1289,7 +1284,7 @@ bool MainWindow::buildJob(JobOptions& jo, bool interactive) {
     jo.stack.c_smoothing = smoothing_->value();
     jo.stack.po.c_radius_px = cradius_->value();
     jo.stack.po.b_radius_px = bradius_->value();
-    // the settings that name the saved files (Travis, 2026-11-08): interpolation, smoothing, C and B radii
+    // the settings that name the saved files: interpolation, smoothing, C and B radii
     jobTag_ = QString("%1_s%2_c%3_b%4").arg(interp_->currentText().toLower().remove(' ')).arg(smoothing_->value(), 0, 'g', 2)
                   .arg((int)cradius_->value()).arg((int)bradius_->value());
     if (fixRs_->isChecked()) jobTag_ += "_rs";             // the rolling-shutter corrections (FINDINGS 51) tell renders apart
@@ -1309,7 +1304,7 @@ bool MainWindow::buildJob(JobOptions& jo, bool interactive) {
         jo.stack.po.flat_blur_px = flatBlur_->value();
     }
     jo.stack.outputs = selectedOutputs();
-    jo.stack.diagnostics = false;   // no depth.f32 and friends in the output folder (Travis, 2026-11-08)
+    jo.stack.diagnostics = false;   // no depth.f32 and friends in the output folder
     jo.out = outDir_->text().isEmpty() ? std::string() : outDir_->text().toStdString();
     perfFromUi().apply(jo);
     if (interactive) {
@@ -1374,7 +1369,7 @@ void MainWindow::onProgress(QString stage, double fraction) {
     setStage(QString("%1 — %2 s").arg(stage).arg(elapsed_.elapsed() / 1000.0, 0, 'f', 1));
     progress_->setValue((int)std::lround(std::clamp(fraction, 0.0, 1.0) * 1000));
     // the frame count comes from here, not from the live view: the view is throttled and skips frames, so its
-    // last frame index stalled short of the total ("157 of 163"). Every progress call is delivered.
+    // last frame index stalled short of the total ("194 of 200"). Every progress call is delivered.
     if (stage.startsWith("reading") || stage.startsWith("frames from") || stage.startsWith("pass")) {
         const int total = jobItems_.size();
         const int n = (int)std::lround(std::clamp(fraction, 0.0, 1.0) * total);
@@ -1411,7 +1406,7 @@ void MainWindow::onPreview(QString name, QImage image) {
     statusBar()->showMessage(QString("Preview: %1").arg(name));
 }
 
-// the stage text is drawn inside the progress bar (Travis, 2026-11-08); the hidden label keeps the plain text
+// the stage text is drawn inside the progress bar; the hidden label keeps the plain text
 void MainWindow::setStage(const QString& text) {
     stage_->setText(text);
     progress_->setFormat(QString(text).replace('%', "%%"));   // a literal % in the text, not a QProgressBar field
@@ -1650,14 +1645,14 @@ void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
         resumeThumbnails();
         if (data->rc == 3) { setStage("Sweep cancelled."); return; }
         setStage(data->rc ? "Sweep finished with failures; see the log." : QString("Sweep done: %1 variants in %2 s.").arg(data->variants).arg(data->seconds, 0, 'f', 1));
-        progress_->setValue(0);   // the bar empties when the work is done; its text says so (Travis, 2026-11-08)
+        progress_->setValue(0);   // the bar empties when the work is done; its text says so
         if (QFileInfo::exists(QDir(data->outDir).filePath("sweep.json"))) { twoUp(); twoUp_->openSweep(data->outDir); }
         return;
     }
     result_ = data;
-    // the render's finish time first, as Helicon names its files (Travis, 2026-11-08): B_2026-11-08_14-15-27_bicubic_s2_c32_b0
+    // the render's finish time first, as Helicon names its files: B_2026-11-08_14-15-27_bicubic_s2_c32_b0
     result_->settingsTag = QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss") + "_" + jobTag_;
-    // the output's field of view after the crop, last (Travis, 2026-11-08): the panel's FOV is the sensor width's at
+    // the output's field of view after the crop, last: the panel's FOV is the sensor width's at
     // the reference depth, so the output's is its share of the width, as the geometry report states it
     if (fov_->value() > 0 && result_->align.W > 0) {
         const auto& A = result_->align;
@@ -1670,7 +1665,7 @@ void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
     if (data->rc == 3) { setStage("Cancelled."); return; }
     if (data->rc != 0) { setStage("Failed; see the log."); QMessageBox::warning(this, "xLamina", "The render failed. The log has the details."); return; }
     setStage(QString("Done in %1 s (alignment %2 s, fusion %3 s).").arg(data->seconds, 0, 'f', 1).arg(data->align.seconds, 0, 'f', 1).arg(data->result.seconds, 0, 'f', 1));
-    progress_->setValue(0);   // the bar empties when the work is done; its text says so (Travis, 2026-11-08)
+    progress_->setValue(0);   // the bar empties when the work is done; its text says so
     setStatusGeometry(*data);
     rebuildTabs();
     tabs_->setCurrentIndex(0);

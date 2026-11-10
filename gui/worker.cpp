@@ -104,7 +104,7 @@ void Worker::launch(std::shared_ptr<JobOptions> jo, std::shared_ptr<JobResultDat
         Hooks hooks;
         hooks.cancel = &cancel_;
         // the building maps go to the right pane, which never shows more than ~1/4 of the output: at Full (1) they were
-        // 31 Mpx floats converted on the GUI thread several times a second, the choppiness Travis saw (FINDINGS 47)
+        // 31 Mpx floats converted on the GUI thread several times a second, which made the view choppy (FINDINGS 47)
         hooks.preview_down = std::max(4, liveDown);
         hooks.frame_down = std::max(1, liveDown);
         // the building maps grow on a time basis (every 50 ms at most), not every n-th frame: no steps (0.6.32)

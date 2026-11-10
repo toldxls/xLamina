@@ -261,7 +261,7 @@ void CompareWindow::addEntry(Entry e) {
         // the same name again -> replace: a new render's outputs (in-memory images, whichever folder they were
         // written to: the path is only for retouching's 16-bit data), the same file re-opened, a sweep opened twice.
         // A FILE of the same name from another folder (B.tif of two renders) is a different image: keep both, the
-        // newcomer named by its folder, and by its full path when that folder name is taken too (Travis, 2026-11-08)
+        // newcomer named by its folder, and by its full path when that folder name is taken too
         const bool same_source = (!e.fileBacked && !entries_[i].fileBacked) || e.path.isEmpty() || entries_[i].path.isEmpty() ||
                                  sameFile(e.path, entries_[i].path);
         if (same_source) { replace(i); return; }

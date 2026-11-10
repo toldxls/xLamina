@@ -17,7 +17,7 @@ using stackcore::SweepVariant;
 namespace {
 // The sets, from the 2026-11-08 parameter search scored against the source frames (FINDINGS 44). Detail in B is
 // decided by the composition: the soft-label width is the dial (1 px = +10 % fine detail but seams, 6 = a quarter
-// lost; Travis kept 3 over the sharper 2 at 1:1), the refinement's range and window and the B radius move it a
+// lost; 3 looked better than the sharper 2 at 1:1), the refinement's range and window and the B radius move it a
 // little, aggregation 0 / 16 draw a blotch. Every depth knob (volume resolution, the ramp, the priors, SGM) leaves
 // detail unchanged and only shifts the background, which the flat-region knobs tune on their own: blur width,
 // blend width, the quiet end. The 2026-11-07 set (ramp, dark reach, halo prior, aggregation) is gone: within noise.
