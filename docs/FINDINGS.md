@@ -2227,9 +2227,18 @@ measured by every alignment now, and both can be undone in the warp.
   centres) when `fix_rs` / `fix_banding` are set. GUI: Render > Undo
   rolling-shutter warping / Undo LED banding, off by default, `_rs` /
   `_band` in the saved names; CLI `--fix-rs 1 --fix-banding 1`.
-- **Travis's verdict (11/09 night):** "very subtle. Only viewable in the
-  difference map at above 0.5 %. But I guess it is an improvement." The
-  options stay off by default. He asked for a drop for the badly warped
+- **Travis's verdicts (11/09 night).** First, on B: "very subtle. Only
+  viewable in the difference map at above 0.5 %. But I guess it is an
+  improvement." Then, after more stacks and the C outputs: "holy hell, that
+  correction for warping is enormously good, it fixes so many doubling
+  errors!" and "it's a better improvement for C type methods". C takes
+  coefficients from many frames at every level, so a 2..4 px disagreement
+  between neighbours lands straight in the composite; B meets it only where
+  the chosen frame changes. **Undo rolling-shutter warping is the default
+  from 0.6.40** (Preferences > General, with the banding fix beside it, off
+  until judged). Helicon's alignment is one rigid transform per frame, so it
+  cannot do this; its doubled edges are the same mechanism. He asked for a
+  drop for the badly warped
   frames: violet rows and Render > Drop warped frames flag `rs_px` above
   median + max(4 robust sigmas, 2 px) (5.6 px on the 210-frame stack: the
   six test frames at 11..75 px and eight real frames at 5.8..26 px, IMG_5694

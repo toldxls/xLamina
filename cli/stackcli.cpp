@@ -66,7 +66,7 @@ static int usage() {
             "               --soft-cutoff 0.9: a frame is reported soft when its focus energy is under this share of its neighbours' (stack.txt, log)\n"
             "               --rs-bands 8 (0 = off) / --band-cycles 3,12: the rolling-shutter probe (FINDINGS 51): each frame's displacement per\n"
             "               row band against its neighbours, and the LED flicker in its row brightness (cycles per frame height); report.json\n"
-            "               --fix-rs 1 / --fix-banding 1: undo them in every warp (the measured row offsets and row gains); default off\n"
+            "               --fix-rs 1 (default) / --fix-banding 0 (default): undo them in every warp (the measured row offsets, the row gains)\n"
             "               --c-radius R: C aggregates each frame's pyramid energy over R sensor px before choosing, so a strong\n"
             "                             edge's frame wins the band beside it instead of its defocus rims (0 = off, 32 is a good start)\n"
             "               --b-radius R: the same for B's focus volume: each frame's focus slice is blurred over R sensor px\n"

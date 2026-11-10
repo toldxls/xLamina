@@ -182,8 +182,9 @@ struct StackOptions {
     double c_smoothing = 0.0;          // C's smoothing (FinalParams::c_smoothing); 0 = the raw selection
     double soft_cutoff = 0.9;          // the soft-frame flag's cutoff (frame_sharpness): a frame under this share of its neighbours' focus energy
     // FINDINGS 51: apply the alignment's per-frame row corrections in every warp (run_job copies them into po):
-    // the brightness-banding gain and the rolling-shutter row offsets
-    bool fix_banding = false, fix_rs = false;
+    // the brightness-banding gain and the rolling-shutter row offsets. The warping fix is on by default (Travis,
+    // 2026-11-09: "enormously good, it fixes so many doubling errors"); the banding fix is off until judged
+    bool fix_banding = false, fix_rs = true;
     // B's depth priors (DepthParams). On the 1/2 grid the dark prior put dark far frames into the gaps of needle
     // fans and inside bright rims (FINDINGS 33), so since 0.6.3 it is gated off within dark_reach_px of sharp
     // content and kept for defocused background (FINDINGS 34). The 0.5.x reference B is --b-reference 1.

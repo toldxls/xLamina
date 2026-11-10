@@ -50,9 +50,10 @@ the exposure; under 0.90 by default, File > Preferences > General > Soft frame b
 amber; Render > Drop shifted frames and Drop soft frames untick each kind, and unticked
 frames are left out of the next render. A third line gives the frame's rolling-shutter
 marks: "warp" is its displacement from band to band of sensor rows against its neighbours
-(px), "band" the LED flicker's brightness ripple across its rows (% peak-to-peak); the
-Render column's Undo rolling-shutter warping and Undo LED banding put the measured
-corrections into every warp of the frame (off by default; saved files get _rs / _band).
+(px), "band" the LED flicker's brightness ripple across its rows (% peak-to-peak). File >
+Preferences > General > Undo rolling-shutter warping (on by default: it removes the doubled
+edges the row displacement causes) and Undo LED banding (off) put the measured corrections
+into every warp of the frame; saved files get _rs / _band while a correction is on.
 A frame warped far beyond the rest (shaken during its readout) is shown in violet and
 Render > Drop warped frames unticks it.
 The list is the stack order: Render > Sort frames by name or by time taken (the EXIF

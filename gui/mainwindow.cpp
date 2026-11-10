@@ -467,19 +467,20 @@ void MainWindow::buildUi() {
     fl->addRow("", lockScale_);
     // the rolling shutter's two corrections (FINDINGS 51; Travis, 2026-11-09: "most of my shots suffer from rolling shutter
     // effects, warping and brightness banding"). Both are measured by every alignment and shown in the frame list; these
-    // put the measurements into the warps. Off by default until judged at 1:1.
+    // put the measurements into the warps. They live in File > Preferences > General (Travis, 2026-11-09 night, after
+    // judging the warping fix "enormously good, it fixes so many doubling errors": "keep it on my default, and a setting
+    // to turn off/on in preferences"); warping on by default, banding off.
     fixRs_ = new QCheckBox("Undo rolling-shutter warping");
+    fixRs_->setChecked(true);
     fixRs_->setToolTip("The alignment solves each frame's displacement per band of sensor rows against its neighbours (the list's \"warp\" value).\n"
                        "Ticked, every warp of the frame moves its rows back by that displacement, so detail the sensor read while the stage\n"
-                       "still vibrated lands where the rest of the stack has it instead of a few pixels off (a doubled edge where B changes frame).\n"
-                       "On the 210-frame stack the median frame is warped 2.4 px band to band. Saved files carry \"_rs\" in the name.");
-    fl->addRow("", fixRs_);
+                       "still vibrated lands where the rest of the stack has it instead of a few pixels off (a doubled edge where the fusion\n"
+                       "changes frame). On by default (FINDINGS 51); saved files carry \"_rs\" in the name while it is on.");
     fixBanding_ = new QCheckBox("Undo LED banding");
     fixBanding_->setToolTip("The LED's flicker, read out line by line, leaves a brightness ripple across each frame's rows (the list's \"band\" value,\n"
                             "about 3 % peak-to-peak and 6 cycles per frame on the 210-frame stack). Ticked, every warp of the frame divides its rows\n"
-                            "by the fitted ripple, so neighbouring regions taken from different frames meet at the same brightness.\n"
-                            "Saved files carry \"_band\" in the name.");
-    fl->addRow("", fixBanding_);
+                            "by the fitted ripple, so neighbouring regions taken from different frames meet at the same brightness. It changes\n"
+                            "no frame's overall brightness. Saved files carry \"_band\" in the name while it is on.");
     liveRes_ = new QComboBox;
     liveRes_->addItem("Off (fastest)", 0);
     liveRes_->addItem("Low (1/12)", 12);
@@ -746,7 +747,7 @@ void MainWindow::loadSettings() {
     scale_->setCurrentIndex(s.value("scale", 0).toInt());
     ref_->setCurrentIndex(s.value("ref", 0).toInt());
     lockScale_->setChecked(s.value("lockScale", false).toBool());
-    fixRs_->setChecked(s.value("fixRs", false).toBool());
+    fixRs_->setChecked(s.value("fixRs", true).toBool());
     fixBanding_->setChecked(s.value("fixBanding", false).toBool());
     liveRes_->setCurrentIndex(s.value("liveRes", 2).toInt());
     interp_->setCurrentIndex(std::clamp(s.value("interp", 1).toInt(), 0, interp_->count() - 1));   // an odd ini value: never a blank combo
@@ -824,7 +825,7 @@ void MainWindow::resetSettings() {
     scale_->setCurrentIndex(0);
     ref_->setCurrentIndex(0);
     lockScale_->setChecked(false);
-    fixRs_->setChecked(false);
+    fixRs_->setChecked(true);
     fixBanding_->setChecked(false);
     liveRes_->setCurrentIndex(2);
     interp_->setCurrentIndex(1);
@@ -1944,6 +1945,8 @@ void MainWindow::preferences() {
     gf->addRow("Theme", theme);
     gf->addRow("Interpolation", interp_);   // the warp's resampling filter, built with the Render column (its setting and file-name tag)
     gf->addRow("Soft frame below", softCutoff_);
+    gf->addRow("Rolling shutter", fixRs_);   // built with the Render column (its settings and file-name tags)
+    gf->addRow("", fixBanding_);
     QCheckBox* upd = new QCheckBox("Check for updates when xLamina starts");
     upd->setChecked(autoUpdateAct_->isChecked());
     connect(upd, &QCheckBox::toggled, autoUpdateAct_, &QAction::setChecked);
