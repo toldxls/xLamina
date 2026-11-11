@@ -17,6 +17,8 @@ set NAME=xLamina-%VER%-win64
 if exist dist\%NAME% rmdir /s /q dist\%NAME%
 mkdir dist\%NAME%
 copy /y build\cli\stackcli.exe dist\%NAME%\ >nul
+rem LibRaw (raw and DNG frames), when the build has it
+if exist build\cli\raw.dll copy /y build\cli\raw.dll dist\%NAME%\ >nul
 if exist build\gui\xLamina.exe (
   copy /y build\gui\xLamina.exe dist\%NAME%\ >nul
   "%QT_DIR%\bin\windeployqt.exe" --release --no-translations --no-opengl-sw --no-system-d3d-compiler --compiler-runtime "dist\%NAME%\xLamina.exe" >nul

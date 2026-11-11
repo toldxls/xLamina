@@ -2,8 +2,8 @@
 
 ![xLamina](gui/icon/xlamina-128.png)
 
-A focus stacker that uses one or more NVIDIA GPUs to stack uncompressed 8/16-bit TIFF or JPEG
-frames quickly. It is a Windows program (C++ and Qt) built on CUDA.
+A focus stacker that uses one or more NVIDIA GPUs to stack frames quickly: 8/16-bit TIFF
+(uncompressed, LZW or ZIP) or JPEG. It is a Windows program (C++ and Qt) built on CUDA.
 
 Open a folder of frames, choose the output methods, press Render, watch the stacks build side
 by side, and save. Every render also writes a geometry report: each frame's similarity
@@ -51,10 +51,11 @@ Help > Check for updates asks at any time.
 
 ## Use
 
-Open a folder (or drop one onto the window). Every TIFF or JPEG of the stack's image size is a
-frame; other images in the folder are listed greyed out and left alone. JPEGs are decoded to
-8-bit RGB as they are read (Windows' own decoder, the embedded profile kept); 16-bit TIFF
-remains the better source where highlights roll off and shadows are deep. Tick the outputs
+Open a folder (or drop one onto the window). Every TIFF or JPEG of the stack's image
+size is a frame; other images in the folder are listed greyed out and left alone. Uncompressed
+TIFF reads fastest. Compressed TIFF (LZW, ZIP, PackBits) and JPEG are decoded as they are read,
+with the embedded profile kept. Camera raw files and DNG are not read: export TIFF from a
+raw converter. Tick the outputs
 you want, set the field of view if you know it (it gives the report its µm/px), press
 Render. While it runs the viewer splits in two: on the left each frame as it is
 processed (raw while reading, so the stack's wobble is visible, then warped onto the
@@ -86,6 +87,11 @@ capture time) reorder it, Tick all frames puts every frame back into the render.
 
 Smoothing (C): 0 is the raw selection (in flat areas it picks the noisiest frame), 2 is about
 Helicon's Smoothing 1, 3 is Cn.
+
+File > Batch render… queues several folders (add them one by one, add every subfolder of a
+folder, or drop several folders onto the window) and renders them one after the other with the
+Render panel's current settings. Each folder's outputs go to `<folder>_stacker`; a folder that
+fails or holds no stack is skipped and listed in the log at the end.
 
 Add comparison image… (File menu, or drop a file onto a finished render) loads another
 stacker's output as a tab beside xLamina's, so the two flip at the same zoom and position;
@@ -124,7 +130,7 @@ and the recent folders are kept in `%APPDATA%\xLamina\xLamina.ini`.
 
 The same engine runs from the command line:
 
-    stackcli run <folder> [--out DIR] [--outputs B,C,Cn] [--fov-mm X] [--scale 0.5] [--interp bicubic] [--smoothing 2] [--cache 0] ...
+    stackcli run <folder> [<folder2> ...] [--out DIR] [--outputs B,C,Cn] [--fov-mm X] [--scale 0.5] [--interp bicubic] [--smoothing 2] [--cache 0] ...
 
 ## Build
 

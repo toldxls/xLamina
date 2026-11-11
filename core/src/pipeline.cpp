@@ -1862,20 +1862,19 @@ int run_align(AlignOptions& ao, AlignOut& A) {
     } else {
         for (auto& e : fs::directory_iterator(dir)) {
             auto name = e.path().filename().string();
-            auto ext = e.path().extension().string();
-            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-            if (e.is_regular_file() && (ext == ".tif" || ext == ".tiff" || ext == ".jpg" || ext == ".jpeg") && name.rfind(prefix, 0) == 0) paths.push_back(e.path());
+            if (e.is_regular_file() && is_frame_file(e.path()) && name.rfind(prefix, 0) == 0) paths.push_back(e.path());
         }
         std::sort(paths.begin(), paths.end());
     }
-    // frames are the TIFFs of the most common size; anything else in the folder (a previous stack's
-    // outputs, say) is left out and reported
+    // frames are the files of the most common size; anything else in the folder (a previous stack's
+    // outputs, say) is left out and reported. Between two sizes with as many files each (the raw files and
+    // their exports side by side) the developed files win: 2 points per file, 1 more when it is not raw.
     {
         std::vector<TiffInfo> infos;
         std::map<std::pair<unsigned, unsigned>, int> sizes;
         for (auto& p : paths) {
             infos.push_back(tiff_probe(p));
-            if (infos.back().ok()) ++sizes[{infos.back().width, infos.back().height}];
+            if (infos.back().ok()) sizes[{infos.back().width, infos.back().height}] += infos.back().raw ? 2 : 3;
         }
         std::pair<unsigned, unsigned> best{0, 0};
         int bestn = 0;

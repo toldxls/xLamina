@@ -183,10 +183,10 @@ void ThumbLoader::start(const QStringList& files, int width, const QList<int>& i
             const std::filesystem::path path(files[i].toStdWString());
             TiffInfo info = tiff_probe(path.native());
             if (!info.ok() || info.samples < 3) return;
-            if (info.jpeg && width < (int)info.width / 2) {   // a thumbnail: decoded small by the codec itself; no cache fill (the render's 16 readers decode in parallel). The full-size view below decodes whole
+            if ((info.jpeg || info.raw) && width < (int)info.width / 2) {   // a thumbnail: decoded small by the codec itself (a raw file developed at half size); no cache fill (the render's 16 readers decode in parallel). The full-size view below decodes whole
                 std::vector<uint8_t> small;
                 int sw = 0, sh = 0;
-                if (!jpeg_thumbnail(path, width, small, sw, sh)) return;
+                if (!fast_thumbnail(path, info, width, small, sw, sh)) return;
                 QImage img(sw, sh, QImage::Format_RGB32);
                 for (int y = 0; y < sh; ++y) {
                     QRgb* out = reinterpret_cast<QRgb*>(img.scanLine(y));

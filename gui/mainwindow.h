@@ -42,6 +42,8 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
     void openFolder(const QString& dir);
     bool rendering() const { return worker_.running(); }
+    void startBatch(const QStringList& dirs);   // render these folders one after the other (File > Batch render's Start)
+    bool batchRunning() const { return batchRunning_; }
     void autoBenchmark(bool sample, const QString& reportPath);   // developer aid: run the benchmark unattended, quit when done
     void notifyUpdated(const QString& from);                      // the first start after an update: say so
     void selfUpdate();                                            // developer aid: update to the latest release without asking
@@ -65,6 +67,8 @@ private slots:
     void runSweep();       // the sweep dialog, then the worker renders the variants and the viewer opens on them
     void openOutputFolder();
     void benchmark();
+    void batch();          // File > Batch render: a queue of folders rendered one after the other
+    void batchNext();      // open and render the queue's next folder, or finish
     void preferences();                        // File > Preferences: General, Performance, System
     void about();
     void checkForUpdates();                    // Help > Check for updates: the result in a box
@@ -97,6 +101,10 @@ private:
     void loadSettings();
     void saveSettings();
     void updateRecent();
+    static QStringList frameFilesIn(const QString& dir);   // the folder's TIFF, JPEG and raw files, by name
+    void batchDialog(const QStringList& preset);           // the queue's dialog, with these folders already in it
+    void batchSkip(const QString& why);                     // the current batch folder cannot be rendered: note it
+    void batchFinish(bool cancelled);
     void resumeThumbnails();
     void warmCache();      // point the thumbnail loader at the frame cache (or away from it) for the open folder
     void setStage(const QString& text);   // the stage text, drawn inside the progress bar
@@ -138,6 +146,13 @@ private:
     QAction* cancelAct_ = nullptr;
     QMenu* recentMenu_ = nullptr;
     QStringList recent_;
+    // the batch queue (File > Batch render): folders still to render, the one in work, a line per folder done
+    QStringList batchQueue_, batchLog_;
+    QString batchCurrent_;
+    int batchTotal_ = 0, batchDone_ = 0;
+    bool batchRunning_ = false, batchSkipped_ = false;
+    QElapsedTimer batchClock_;
+    QAction* batchAct_ = nullptr;
     QString theme_ = "dark";
     bool developer_ = false;
     QAction* devAct_ = nullptr;

@@ -19,4 +19,5 @@ qt_add_resources(xlamina "icons" PREFIX "/" BASE "icon" FILES
 target_link_libraries(xlamina PRIVATE stackcore Qt6::Widgets Qt6::Network)
 target_include_directories(xlamina PRIVATE ${CMAKE_SOURCE_DIR}/cli)
 set_target_properties(xlamina PROPERTIES OUTPUT_NAME "xLamina")
+stackcore_copy_dlls(xlamina)
 install(TARGETS xlamina RUNTIME DESTINATION .)

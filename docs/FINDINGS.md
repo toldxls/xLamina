@@ -2300,10 +2300,20 @@ the resident runs):
   than Helicon B at 1:1 (see 9).
 - Optional output tone stage (black point / contrast) to match Helicon's look,
   and optional highlight/sparkle suppression (see 10).
-- **DNG input**: the reader takes uncompressed 8/16-bit TIFF only; a DNG (a raw mosaic, or
-  Camera Raw's enhanced linear raw) is lossless-JPEG compressed and in camera colour before white balance, so
-  reading it means a raw developer stage (LibRaw), not a reader tweak. The Camera Raw 16-bit TIFF export stays
-  the path for now.
+- **Raw / DNG input: on hold.** A reader through LibRaw is written (`core/src/raw.cpp`, behind the CMake option
+  `XLAMINA_RAW`, off by default) but has never been built or run on a raw file. It develops every frame the same
+  way (camera white balance, 16-bit Adobe RGB, no automatic brightening, no noise reduction, no lens corrections),
+  so the result will not match a raw converter's export. Still to do when it is taken up: build and test on CR3
+  and DNG, zlib for deflate-compressed DNG, raw.dll in the install and the release zip. The raw converter's TIFF
+  export stays the path for now.
+- **Checks the repo should have** (none needs the Python prototype):
+  1. a self-test on the built-in synthetic stack, whose shifts, depth map and sharp image are known: alignment,
+     depth and output error as numbers with pass limits;
+  2. a determinism check: two default runs, then one GPU, one stream, and frames streamed, with every B and C
+     hash equal (done by hand for 0.6.20, §43);
+  3. a reader check: compressed TIFF, 8/16-bit and JPEG decoded against a reference (done by hand for LZW, ZIP
+     and PackBits: bit-identical);
+  4. a low-memory check: the frame cache's budget forced to near zero, the output unchanged.
 - **AutoFOV capture data** (later than the FOV pull above): bring AutoFOV's
   per-frame blur values (and focus position) into the frame list next to the
   wobble and the sharpness, from a capture-side sidecar, so frames can be

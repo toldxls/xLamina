@@ -7,7 +7,8 @@
 #include "prefs.h"
 #include "updater.h"
 
-// xLamina [FOLDER] [--render] [--shots DIR [--every S]] [--bench REPORT.txt [--sample]] [--self-update]
+// xLamina [FOLDER] [--render] [--shots DIR [--every S]] [--bench REPORT.txt [--sample]] [--self-update] [--batch DIR DIR ...]
+//   --batch   every argument after it is a folder: render them one after the other with the saved settings, then quit
 //   --render  start a render of FOLDER at once
 //   --render-in S       developer aid: start the render S seconds after opening (the thumbnails' cache fill first)
 //   --shots   developer aid: save a grab of the window to DIR every S seconds (default 3) while a render runs
@@ -28,11 +29,13 @@ int main(int argc, char** argv) {
     MainWindow w;
     w.show();
     bool autoRender = false, sample = false, selfUpdate = false;
+    QStringList batchDirs;
     QString folder, shots, bench, updatedFrom;
     double every = 3, renderIn = -1;
     for (int i = 1; i < argc; ++i) {
         QString a = QString::fromLocal8Bit(argv[i]);
-        if (a == "--render") autoRender = true;
+        if (a == "--batch") { for (++i; i < argc; ++i) batchDirs << QString::fromLocal8Bit(argv[i]); break; }
+        else if (a == "--render") autoRender = true;
         else if (a == "--render-in" && i + 1 < argc) renderIn = atof(argv[++i]);
         else if (a == "--sample") sample = true;
         else if (a == "--self-update") selfUpdate = true;
@@ -46,6 +49,12 @@ int main(int argc, char** argv) {
     if (selfUpdate) QMetaObject::invokeMethod(&w, &MainWindow::selfUpdate, Qt::QueuedConnection);
     if (!folder.isEmpty()) w.openFolder(folder);
     if (autoRender) QMetaObject::invokeMethod(&w, "render", Qt::QueuedConnection);
+    if (!batchDirs.isEmpty()) {
+        QMetaObject::invokeMethod(&w, [&w, batchDirs] { w.startBatch(batchDirs); }, Qt::QueuedConnection);
+        QTimer* bt = new QTimer(&w);   // quit when the queue has run out
+        QObject::connect(bt, &QTimer::timeout, &w, [&w, bt] { if (!w.batchRunning()) { bt->stop(); QTimer::singleShot(1500, &w, &QWidget::close); } });
+        QTimer::singleShot(1000, bt, [bt] { bt->start(500); });
+    }
     if (renderIn >= 0) QTimer::singleShot((int)(renderIn * 1000), &w, &MainWindow::render);
     if (!bench.isEmpty()) QMetaObject::invokeMethod(&w, [&w, sample, bench] { w.autoBenchmark(sample, bench); }, Qt::QueuedConnection);
     if (!shots.isEmpty()) {

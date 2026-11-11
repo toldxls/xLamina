@@ -155,8 +155,10 @@ QImage MainWindow::forDisplay(QImage img) const {
 void MainWindow::buildMenus() {
     QMenu* file = menuBar()->addMenu("&File");
     QAction* open = file->addAction("&Open folder…", QKeySequence::Open, this, &MainWindow::chooseFolder);
-    open->setStatusTip("Open a folder of TIFF frames (or drop one onto the window).");
+    open->setStatusTip("Open a folder of TIFF or JPEG frames (or drop one onto the window).");
     recentMenu_ = file->addMenu("Open &recent");
+    batchAct_ = file->addAction("&Batch render…", QKeySequence("Ctrl+Shift+B"), this, &MainWindow::batch);
+    batchAct_->setStatusTip("Queue several folders and render them one after the other with the current settings.");
     file->addSeparator();
     QAction* prefs = file->addAction("&Preferences…", QKeySequence("Ctrl+,"), this, &MainWindow::preferences);
     prefs->setStatusTip("Theme, updates, developer controls, the hardware settings, and this machine's details.");
@@ -902,7 +904,7 @@ void MainWindow::perfToUi(const PerfSettings& p) {
 // ----------------------------------------------------------------------------- folders and frames
 
 void MainWindow::chooseFolder() {
-    QString d = QFileDialog::getExistingDirectory(this, "Folder with the stack's TIFF frames", folder_.isEmpty() ? recent_.value(0) : folder_);
+    QString d = QFileDialog::getExistingDirectory(this, "Folder with the stack's frames", folder_.isEmpty() ? recent_.value(0) : folder_);
     if (!d.isEmpty()) openFolder(d);
 }
 
@@ -912,9 +914,10 @@ void MainWindow::openFolder(const QString& dir) {
         return;
     }
     QDir d(dir);
-    QStringList files = d.entryList({"*.tif", "*.tiff", "*.TIF", "*.TIFF", "*.jpg", "*.jpeg", "*.JPG", "*.JPEG"}, QDir::Files, QDir::Name);   // JPEG since 0.6.34
+    QStringList files = frameFilesIn(dir);   // TIFF, JPEG (raw too in a build with LibRaw)
     if (files.size() < 2) {
-        QMessageBox::warning(this, "xLamina", QString("%1\n\nholds %2 TIFF files; a stack needs at least 2.").arg(dir).arg(files.size()));
+        if (batchRunning_) { batchSkip(QString("%1 image files, a stack needs at least 2").arg(files.size())); return; }
+        QMessageBox::warning(this, "xLamina", QString("%1\n\nholds %2 image files (TIFF or JPEG); a stack needs at least 2.").arg(dir).arg(files.size()));
         return;
     }
     thumbs_.stop();
@@ -934,12 +937,13 @@ void MainWindow::openFolder(const QString& dir) {
     liveView_->hide();
     colorSpace_ = QColorSpace();
     worker_.player()->setColorSpace(colorSpace_);
-    // the stack is the TIFFs of the most common size; other files in the folder are listed greyed out
+    // the stack is the files of the most common size; other files in the folder are listed greyed out. Between
+    // two sizes with as many files each (raw files beside their exports) the developed files win: see run_align
     QMap<QPair<unsigned, unsigned>, int> sizes;
     QList<TiffInfo> infos;
     for (const QString& f : files) {
         infos << tiff_probe(d.filePath(f).toStdWString());
-        if (infos.last().ok()) ++sizes[{infos.last().width, infos.last().height}];
+        if (infos.last().ok()) sizes[{infos.last().width, infos.last().height}] += infos.last().raw ? 2 : 3;
     }
     QPair<unsigned, unsigned> best{0, 0};
     int bestn = 0;
@@ -977,7 +981,7 @@ void MainWindow::openFolder(const QString& dir) {
     framesDock_->setWindowTitle(QString("Frames (%1)").arg(frames_.size()));
     syncAllFramesBox();
     QString note = QString("%1 frames of %2 x %3").arg(frames_.size()).arg(best.first).arg(best.second);
-    if (skipped) note += QString(" (%1 other TIFF%2 left out)").arg(skipped).arg(skipped > 1 ? "s" : "");
+    if (skipped) note += QString(" (%1 other file%2 left out)").arg(skipped).arg(skipped > 1 ? "s" : "");
     if (colorSpace_.isValid()) note += QString(", %1").arg(colorSpace_.description().isEmpty() ? "ICC profile" : colorSpace_.description());
     setStage(note + ". Press Render.");
     statusBar()->showMessage(note + " in " + QDir::toNativeSeparators(dir));
@@ -1662,14 +1666,173 @@ void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
     liveView_->hide();
     resumeThumbnails();
     labelWobble(data->align, &data->result);
-    if (data->rc == 3) { setStage("Cancelled."); return; }
-    if (data->rc != 0) { setStage("Failed; see the log."); QMessageBox::warning(this, "xLamina", "The render failed. The log has the details."); return; }
+    if (data->rc == 3) { setStage("Cancelled."); if (batchRunning_) batchFinish(true); return; }
+    if (data->rc != 0) {
+        setStage("Failed; see the log.");
+        if (batchRunning_) {   // no box in a batch: note it and go on
+            batchLog_ << QString("%1: FAILED (%2)").arg(QDir::toNativeSeparators(batchCurrent_), log_->toPlainText().trimmed().section('\n', -1));
+            QTimer::singleShot(0, this, &MainWindow::batchNext);
+        } else QMessageBox::warning(this, "xLamina", "The render failed. The log has the details.");
+        return;
+    }
     setStage(QString("Done in %1 s (alignment %2 s, fusion %3 s).").arg(data->seconds, 0, 'f', 1).arg(data->align.seconds, 0, 'f', 1).arg(data->result.seconds, 0, 'f', 1));
     progress_->setValue(0);   // the bar empties when the work is done; its text says so
     setStatusGeometry(*data);
     rebuildTabs();
     tabs_->setCurrentIndex(0);
     showOutput(0);
+    if (batchRunning_) {
+        ++batchDone_;
+        batchLog_ << QString("%1: %2 frames in %3 s -> %4").arg(QDir::toNativeSeparators(batchCurrent_)).arg(data->align.paths.size())
+                         .arg(data->seconds, 0, 'f', 1).arg(QDir::toNativeSeparators(data->outDir));
+        QTimer::singleShot(0, this, &MainWindow::batchNext);
+    }
+}
+
+// ----------------------------------------------------------------------------- batch
+
+QStringList MainWindow::frameFilesIn(const QString& dir) {
+    QStringList pats;
+    for (const std::string& p : frame_file_patterns()) pats << QString::fromStdString(p);
+    QStringList files = QDir(dir).entryList(pats, QDir::Files, QDir::Name);
+    files.removeDuplicates();
+    return files;
+}
+
+void MainWindow::batch() { batchDialog({}); }
+
+// The queue: folders to render one after the other with the Render panel's settings as they are at Start.
+// Each folder is opened as File > Open folder would open it (every frame ticked) and rendered; its outputs
+// and report.json go to <folder>_stacker. A folder that fails or holds no stack is noted and skipped.
+void MainWindow::batchDialog(const QStringList& preset) {
+    if (batchRunning_ || worker_.running() || (bench_ && bench_->running())) {
+        statusBar()->showMessage("A render is running; queue a batch when it has finished.", 4000);
+        return;
+    }
+    QDialog dlg(this);
+    dlg.setWindowTitle("Batch render");
+    dlg.setWindowFlag(Qt::WindowContextHelpButtonHint, false);
+    dlg.resize(680, 440);
+    dlg.setAcceptDrops(false);
+    QVBoxLayout* vl = new QVBoxLayout(&dlg);
+    QLabel* note = new QLabel("The folders are rendered one after the other with the Render panel's current settings (outputs, field of view, "
+                              "preferences). Each folder's outputs and report.json go to <folder>_stacker beside it.");
+    note->setWordWrap(true);
+    vl->addWidget(note);
+    QListWidget* list = new QListWidget;
+    list->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    vl->addWidget(list, 1);
+    QLabel* count = new QLabel;
+    vl->addWidget(count);
+    QPushButton* start = new QPushButton("Start");
+    auto refresh = [&] {
+        count->setText(list->count() == 0 ? "No folders yet." : QString("%1 folder%2 queued.").arg(list->count()).arg(list->count() == 1 ? "" : "s"));
+        start->setEnabled(list->count() > 0);
+    };
+    // a folder joins the queue when it holds at least two frame files and is not there yet
+    auto add = [&](const QString& dir) {
+        QString d = QDir::toNativeSeparators(QDir(dir).absolutePath());
+        for (int i = 0; i < list->count(); ++i) if (list->item(i)->text().compare(d, Qt::CaseInsensitive) == 0) return false;
+        int n = frameFilesIn(dir).size();
+        if (n < 2) return false;
+        QListWidgetItem* it = new QListWidgetItem(d);
+        it->setToolTip(QString("%1 image files").arg(n));
+        list->addItem(it);
+        return true;
+    };
+    for (const QString& p : preset) add(p);
+    QSettings s = appSettings();
+    QHBoxLayout* bl = new QHBoxLayout;
+    QPushButton* addOne = new QPushButton("Add folder…");
+    QPushButton* addSub = new QPushButton("Add subfolders of…");
+    addSub->setToolTip("Adds every folder directly inside the chosen one that holds at least two image files\n(folders named ..._stacker, the outputs of earlier renders, are left out).");
+    QPushButton* remove = new QPushButton("Remove");
+    QPushButton* clear = new QPushButton("Clear");
+    QPushButton* close = new QPushButton("Close");
+    start->setDefault(true);
+    for (QPushButton* b : {addOne, addSub, remove, clear}) bl->addWidget(b);
+    bl->addStretch(1);
+    bl->addWidget(start);
+    bl->addWidget(close);
+    vl->addLayout(bl);
+    auto startDir = [&] { return s.value("batch/lastDir", folder_.isEmpty() ? recent_.value(0) : QFileInfo(folder_).absolutePath()).toString(); };
+    connect(addOne, &QPushButton::clicked, &dlg, [&] {
+        QString d = QFileDialog::getExistingDirectory(&dlg, "A folder with a stack's frames", startDir());
+        if (d.isEmpty()) return;
+        s.setValue("batch/lastDir", QFileInfo(d).absolutePath());
+        if (!add(d)) count->setText(QString("%1 is already queued or holds fewer than two image files.").arg(QDir::toNativeSeparators(d)));
+        else refresh();
+    });
+    connect(addSub, &QPushButton::clicked, &dlg, [&] {
+        QString d = QFileDialog::getExistingDirectory(&dlg, "A folder whose subfolders are the stacks", startDir());
+        if (d.isEmpty()) return;
+        s.setValue("batch/lastDir", d);
+        int added = 0;
+        for (const QString& sub : QDir(d).entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name))
+            if (!sub.endsWith("_stacker", Qt::CaseInsensitive) && add(QDir(d).filePath(sub))) ++added;
+        refresh();
+        if (!added) count->setText("No subfolder there holds two or more image files.");
+    });
+    connect(remove, &QPushButton::clicked, &dlg, [&] { qDeleteAll(list->selectedItems()); refresh(); });
+    connect(clear, &QPushButton::clicked, &dlg, [&] { list->clear(); refresh(); });
+    connect(close, &QPushButton::clicked, &dlg, &QDialog::reject);
+    connect(start, &QPushButton::clicked, &dlg, [&] {
+        if (selectedOutputs().empty()) { count->setText("Tick at least one output in the Render panel first."); return; }
+        dlg.accept();
+    });
+    refresh();
+    if (dlg.exec() != QDialog::Accepted || list->count() == 0) return;
+    QStringList dirs;
+    for (int i = 0; i < list->count(); ++i) dirs << QDir::fromNativeSeparators(list->item(i)->text());
+    startBatch(dirs);
+}
+
+void MainWindow::startBatch(const QStringList& dirs) {
+    if (batchRunning_ || worker_.running() || dirs.isEmpty()) return;
+    batchQueue_ = dirs;
+    batchLog_.clear();
+    batchTotal_ = batchQueue_.size();
+    batchDone_ = 0;
+    batchRunning_ = true;
+    batchAct_->setEnabled(false);
+    batchClock_.start();
+    batchNext();
+}
+
+void MainWindow::batchSkip(const QString& why) {
+    batchSkipped_ = true;
+    batchLog_ << QString("%1: skipped (%2)").arg(QDir::toNativeSeparators(batchCurrent_), why);
+}
+
+void MainWindow::batchNext() {
+    if (!batchRunning_) return;
+    if (worker_.running()) { QTimer::singleShot(200, this, &MainWindow::batchNext); return; }   // the worker's thread is still winding down
+    if (batchQueue_.isEmpty()) { batchFinish(false); return; }
+    batchCurrent_ = batchQueue_.takeFirst();
+    batchSkipped_ = false;
+    openFolder(batchCurrent_);
+    if (!batchSkipped_ && (QDir(folder_) != QDir(batchCurrent_) || frames_.size() < 2)) batchSkip("no two frames of one size");
+    if (!batchSkipped_) {
+        setWindowTitle(windowTitle() + QString("  [batch %1 of %2]").arg(batchTotal_ - batchQueue_.size()).arg(batchTotal_));
+        render();
+        if (!worker_.running()) batchSkip("the render could not start");
+    }
+    if (batchSkipped_) QTimer::singleShot(0, this, &MainWindow::batchNext);
+}
+
+void MainWindow::batchFinish(bool cancelled) {
+    batchRunning_ = false;
+    batchAct_->setEnabled(true);
+    batchQueue_.clear();
+    double took = batchClock_.elapsed() / 1000.0;
+    QString sum = QString("Batch %1: %2 of %3 folders rendered in %4.").arg(cancelled ? "cancelled" : "done").arg(batchDone_).arg(batchTotal_)
+                      .arg(took < 120 ? QString("%1 s").arg(took, 0, 'f', 0) : QString("%1 min").arg(took / 60, 0, 'f', 1));
+    onLog("");
+    onLog(sum);
+    for (const QString& l : batchLog_) onLog("  " + l);
+    setStage(sum + (batchDone_ < batchTotal_ ? " See the log." : ""));
+    statusBar()->showMessage(sum);
+    if (!folder_.isEmpty()) setWindowTitle(QString("xLamina %1 — %2").arg(XLAMINA_VERSION, QDir::toNativeSeparators(folder_)));
 }
 
 QImage MainWindow::outputImage(const QString& name) {
@@ -2018,6 +2181,10 @@ void MainWindow::dragEnterEvent(QDragEnterEvent* e) {
 }
 
 void MainWindow::dropEvent(QDropEvent* e) {
+    // several folders dropped at once: a batch
+    QStringList dirs;
+    for (const QUrl& u : e->mimeData()->urls()) if (QFileInfo(u.toLocalFile()).isDir()) dirs << u.toLocalFile();
+    if (dirs.size() > 1) { QTimer::singleShot(0, this, [this, dirs] { batchDialog(dirs); }); return; }
     for (const QUrl& u : e->mimeData()->urls()) {
         QString p = u.toLocalFile();
         QFileInfo fi(p);
@@ -2038,6 +2205,7 @@ void MainWindow::dropEvent(QDropEvent* e) {
 void MainWindow::closeEvent(QCloseEvent* e) {
     if (worker_.running()) {
         if (QMessageBox::question(this, "xLamina", "A render is running. Cancel it and quit?") != QMessageBox::Yes) { e->ignore(); return; }
+        batchRunning_ = false;
         worker_.cancel();
     }
     saveSettings();

@@ -1,4 +1,4 @@
-﻿// stackcli: headless runner (DESIGN.md repo layout). Step 1 commands:
+// stackcli: headless runner (DESIGN.md repo layout). Step 1 commands:
 //
 //   stackcli probe  FILE.tif                       TIFF layout as the reader sees it
 //   stackcli dump   FILE.tif OUT.f32 [--gpu N]     read -> GPU -> float RGB -> raw file (H x W x 3 float32)
@@ -57,10 +57,11 @@ static int usage() {
     fprintf(stderr,
             "xLamina " XLAMINA_VERSION " - multi-GPU photomicroscopy stacker\n"
             "usage:\n"
-            "  stackcli run DIR [--out DIR] [--prefix IMG_] [--scale 1|0.5] [--outputs B,C,Cn] [--ref middle] [--lock-scale 1]\n"
+            "  stackcli run DIR [DIR2 ...] [--out DIR] [--prefix IMG_] [--scale 1|0.5] [--outputs B,C,Cn] [--ref middle] [--lock-scale 1]\n"
             "               [--fov-mm X | --um-per-px X] [--gpus 0,1] [--streams 2] [--align-scale 0.25] [--baselines 1,2,4,8] [--pair-threads 3]\n"
-            "               [--smoothing 0] [--c-radius 0]   align the TIFF frames in DIR (all of them, or those starting with --prefix) and fuse them:\n"
+            "               [--smoothing 0] [--c-radius 0]   align the frames in DIR (TIFF, JPEG; all of them, or those starting with --prefix) and fuse them:\n"
             "               report.json + 16-bit TIFFs in DIR_stacker (or --out). Outputs: A B B0 C CB Cn CBn Cx Cd Cg Cg2 H\n"
+            "               Several DIRs are rendered one after the other (a batch): each into its own DIR_stacker, or --out\\<folder name>\n"
             "               Cx: CBn with the finer level's support in place of the dominance test (against the glow of defocused highlights)\n"
             "               --smoothing S: C takes detail weaker than S x the noise from B (0 = raw selection, 2 ~ Helicon's 1, 3 = Cn)\n"
             "               --soft-cutoff 0.9: a frame is reported soft when its focus energy is under this share of its neighbours' (stack.txt, log)\n"
@@ -244,15 +245,18 @@ static int cmd_probe(int argc, char** argv) {
     double ms_probe = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     print_info(argv[2], info);
     printf("  probe %.1f ms\n", ms_probe);
-    if (info.ok() && info.jpeg) {   // the JPEG paths' cost: the thumbnail decode and the full decode
-        std::vector<uint8_t> small;
-        int w, h;
-        auto t1 = std::chrono::steady_clock::now();
-        bool ok = jpeg_thumbnail(argv[2], 144, small, w, h);
-        double ms_thumb = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
+    if (info.ok() && info.decoded()) {   // the decoded formats' cost: the quick thumbnail (JPEG, raw) and the full decode
+        if (info.jpeg || info.raw) {
+            std::vector<uint8_t> small;
+            int w = 0, h = 0;
+            auto t1 = std::chrono::steady_clock::now();
+            bool ok = fast_thumbnail(argv[2], info, 144, small, w, h);
+            double ms_thumb = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
+            printf("  thumbnail %dx%d %s in %.1f ms\n", w, h, ok ? "ok" : "FAILED", ms_thumb);
+        }
         std::vector<uint8_t> buf(tiff_buffer_capacity(info.pixel_bytes()) + kReadAlign);
         TiffRead rd = tiff_read_pixels(argv[2], info, buf.data(), buf.size());
-        printf("  thumbnail %dx%d %s in %.1f ms; full decode %s in %.1f ms\n", w, h, ok ? "ok" : "FAILED", ms_thumb, rd.ok() ? "ok" : rd.error.c_str(), rd.ms);
+        printf("  full decode %s in %.1f ms\n", rd.ok() ? "ok" : rd.error.c_str(), rd.ms);
     }
     return 0;
 }
@@ -315,12 +319,10 @@ static int cmd_stream(int argc, char** argv) {
     std::vector<fs::path> paths;
     for (auto& e : fs::directory_iterator(dir)) {
         auto name = e.path().filename().string();
-        auto ext = e.path().extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-        if (e.is_regular_file() && (ext == ".tif" || ext == ".tiff") && name.rfind(prefix, 0) == 0) paths.push_back(e.path());
+        if (e.is_regular_file() && is_frame_file(e.path()) && name.rfind(prefix, 0) == 0) paths.push_back(e.path());
     }
     std::sort(paths.begin(), paths.end());
-    if (paths.empty()) { fprintf(stderr, "no %s*.tif in %s\n", prefix.c_str(), dir.string().c_str()); return 1; }
+    if (paths.empty()) { fprintf(stderr, "no %s* frames in %s\n", prefix.c_str(), dir.string().c_str()); return 1; }
     const int N = (int)paths.size();
 
     int ndev = 0;
@@ -662,18 +664,44 @@ static int cmd_align(int argc, char** argv) {
 
 static int cmd_run(int argc, char** argv) {
     if (argc < 3) return usage();
+    // one folder, or several to render one after the other with the same options (a batch)
+    std::vector<fs::path> dirs;
+    int i = 2;
+    for (; i < argc && std::string(argv[i]).rfind("--", 0) != 0; ++i) dirs.push_back(argv[i]);
+    if (dirs.empty()) return usage();
     JobOptions jo;
-    jo.align.dir = argv[2];
     jo.stack.po.opt.streams_per_gpu = 2;
-    for (int i = 3; i + 1 < argc; i += 2) {
+    for (; i + 1 < argc; i += 2) {
         std::string a = argv[i], v = argv[i + 1];
         if (a == "--out") jo.out = v;
         else if (parse_align_option(a, v, jo.align)) continue;
         else if (parse_stack_option(a, v, jo.stack)) continue;
         else return usage();
     }
-    AlignOut A;
-    return run_job(jo, A, Hooks{});
+    if (i < argc) { fprintf(stderr, "option %s has no value\n", argv[i]); return usage(); }
+    if (dirs.size() == 1) {
+        jo.align.dir = dirs[0];
+        AlignOut A;
+        return run_job(jo, A, Hooks{});
+    }
+    // each folder's outputs in its own place: <folder>_stacker by default, --out DIR\<folder name> when --out is given
+    int worst = 0, done = 0;
+    std::vector<std::string> failed;
+    for (const fs::path& d : dirs) {
+        JobOptions j = jo;
+        j.align.dir = d;
+        fs::path leaf = d.filename().empty() ? d.parent_path().filename() : d.filename();
+        if (!jo.out.empty()) j.out = (fs::path(jo.out) / leaf).string();
+        printf("\n=== batch %d of %zu: %s\n", done + (int)failed.size() + 1, dirs.size(), d.string().c_str());
+        int rc = 1;
+        try { AlignOut A; rc = run_job(j, A, Hooks{}); }
+        catch (const std::exception& e) { fprintf(stderr, "  failed: %s\n", e.what()); }
+        if (rc == 0) ++done;
+        else { failed.push_back(d.string()); worst = std::max(worst, rc); }
+    }
+    printf("\nbatch: %d of %zu folders rendered\n", done, dirs.size());
+    for (auto& f : failed) printf("  failed: %s\n", f.c_str());
+    return worst;
 }
 
 int main(int argc, char** argv) {

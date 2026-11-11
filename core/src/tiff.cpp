@@ -5,6 +5,7 @@
 #include <wincodec.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 
@@ -79,10 +80,10 @@ struct ComPtr {
     T* operator->() const { return p; }
 };
 bool wic_open(const std::filesystem::path& path, ComPtr<IWICImagingFactory>& fac, ComPtr<IWICBitmapFrameDecode>& frame, std::string& err) {
-    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&fac.p)))) { err = "JPEG: Windows Imaging Component unavailable"; return false; }
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&fac.p)))) { err = "decoder: Windows Imaging Component unavailable"; return false; }
     ComPtr<IWICBitmapDecoder> dec;
-    if (FAILED(fac->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &dec.p))) { err = "JPEG: cannot read the header"; return false; }
-    if (FAILED(dec->GetFrame(0, &frame.p))) { err = "JPEG: no image"; return false; }
+    if (FAILED(fac->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &dec.p))) { err = "decoder: cannot read the file"; return false; }
+    if (FAILED(dec->GetFrame(0, &frame.p))) { err = "decoder: no image"; return false; }
     return true;
 }
 // the header only, parsed here (a WIC decoder per probe cost 7.6 ms; the GUI probes every file of a folder as it
@@ -124,23 +125,32 @@ TiffInfo jpeg_probe(const std::filesystem::path& path, File& f, TiffInfo t) {
     t.strip_offsets = {0}; t.strip_bytes = {t.data_bytes};
     return t;
 }
-TiffRead jpeg_read(const std::filesystem::path& path, const TiffInfo& info, uint8_t* dst, size_t cap) {
+// a JPEG (8-bit) or a compressed / tiled TIFF (8 or 16-bit, info.bits): the whole frame decoded to chunky RGB
+TiffRead wic_read(const std::filesystem::path& path, const TiffInfo& info, uint8_t* dst, size_t cap) {
     TiffRead r;
     auto t0 = std::chrono::steady_clock::now();
     ComScope com;
     ComPtr<IWICImagingFactory> fac;
     ComPtr<IWICBitmapFrameDecode> frame;
     if (!wic_open(path, fac, frame, r.error)) return r;
+    UINT fw = 0, fh = 0;
+    if (FAILED(frame->GetSize(&fw, &fh)) || fw != info.width || fh != info.height) { r.error = "decoder: the image size differs from the header's"; return r; }
     ComPtr<IWICFormatConverter> conv;
+    const GUID fmt = info.bits == 16 ? GUID_WICPixelFormat48bppRGB : GUID_WICPixelFormat24bppRGB;
     if (FAILED(fac->CreateFormatConverter(&conv.p)) ||
-        FAILED(conv->Initialize(frame.p, GUID_WICPixelFormat24bppRGB, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom))) {
-        r.error = "JPEG: cannot convert to RGB";
+        FAILED(conv->Initialize(frame.p, fmt, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom))) {
+        r.error = "decoder: cannot convert to RGB";
         return r;
     }
-    const UINT stride = info.width * 3;
-    const size_t bytes = (size_t)stride * info.height;
+    const size_t stride = (size_t)info.width * 3 * (info.bits / 8);
+    const size_t bytes = stride * info.height;
     if (bytes > cap) { r.error = "buffer too small"; return r; }
-    if (FAILED(conv->CopyPixels(nullptr, stride, (UINT)bytes, dst))) { r.error = "JPEG: decode failed"; return r; }
+    // in bands: CopyPixels takes the buffer size as a UINT, and a 16-bit frame of 700 Mpx would pass 4 GB
+    const UINT band = (UINT)std::max<size_t>(1, ((size_t)256 << 20) / stride);
+    for (UINT y = 0; y < info.height; y += band) {
+        WICRect rc{0, (INT)y, (INT)info.width, (INT)std::min<UINT>(band, info.height - y)};
+        if (FAILED(conv->CopyPixels(&rc, (UINT)stride, (UINT)(stride * rc.Height), dst + (size_t)y * stride))) { r.error = "decoder: decode failed"; return r; }
+    }
     r.bytes = bytes;
     r.data_offset_in_buf = 0;
     r.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -169,11 +179,55 @@ bool jpeg_thumbnail(const std::filesystem::path& path, int max_w, std::vector<ui
     return SUCCEEDED(conv->CopyPixels(nullptr, (UINT)w * 3, (UINT)rgb.size(), rgb.data()));
 }
 
+bool fast_thumbnail(const std::filesystem::path& path, const TiffInfo& info, int max_w, std::vector<uint8_t>& rgb, int& w, int& h) {
+    if (info.jpeg) return jpeg_thumbnail(path, max_w, rgb, w, h);
+    if (info.raw) return raw_thumbnail(path, max_w, rgb, w, h);
+    return false;
+}
+
+namespace {
+const char* const kRawExt[] = {".dng", ".cr2", ".cr3", ".crw", ".nef", ".nrw", ".arw", ".srf", ".sr2", ".raf", ".orf", ".rw2", ".pef",
+                               ".srw", ".3fr", ".fff", ".iiq", ".erf", ".mrw", ".x3f", ".rwl", ".mos", ".kdc", ".dcr"};
+const char* const kPlainExt[] = {".tif", ".tiff", ".jpg", ".jpeg"};
+std::string lower_ext(const std::filesystem::path& p) {
+    std::string e = p.extension().string();
+    for (char& c : e) c = (char)tolower((unsigned char)c);
+    return e;
+}
+}  // namespace
+
+bool is_raw_file(const std::filesystem::path& path) {
+    std::string e = lower_ext(path);
+    for (const char* x : kRawExt) if (e == x) return true;
+    return false;
+}
+
+bool is_frame_file(const std::filesystem::path& path) {
+    std::string e = lower_ext(path);
+    for (const char* x : kPlainExt) if (e == x) return true;
+    return raw_supported() && is_raw_file(path);
+}
+
+std::vector<std::string> frame_file_patterns() {
+    std::vector<std::string> out;
+    auto add = [&](const char* x) {
+        std::string lo = std::string("*") + x, up = lo;
+        for (char& c : up) c = (char)toupper((unsigned char)c);
+        out.push_back(lo);
+        out.push_back(up);
+    };
+    for (const char* x : kPlainExt) add(x);
+    if (raw_supported()) for (const char* x : kRawExt) add(x);
+    return out;
+}
+
 TiffInfo tiff_probe(const std::filesystem::path& path) {
     TiffInfo t;
     File f(path);
     if (!f.ok()) { t.error = "cannot open"; return t; }
     t.file_size = f.size();
+    // by extension, before the header: a DNG (and most raw formats) is a TIFF container whose first image is a preview
+    if (is_raw_file(path)) return raw_probe(path, t);
     uint8_t hdr[16];
     if (f.read_at(0, hdr, 16) < 8) { t.error = "too short"; return t; }
     if (hdr[0] == 0xFF && hdr[1] == 0xD8) return jpeg_probe(path, f, t);   // a JPEG (SOI marker)
@@ -226,6 +280,7 @@ TiffInfo tiff_probe(const std::filesystem::path& path) {
     };
     std::string tiff_date, exif_date, exif_subsec;
     uint64_t exif_ifd = 0;
+    bool tiled = false;
     for (uint64_t i = 0; i < n; ++i) {
         const uint8_t* e = ent.data() + i * esz;
         uint16_t tag = (uint16_t)P.num(e, 2), type = (uint16_t)P.num(e + 2, 2);
@@ -260,7 +315,7 @@ TiffInfo tiff_probe(const std::filesystem::path& path) {
             case 279: t.strip_bytes = v; break;
             case 284: t.planar = (uint16_t)v[0]; break;
             case 339: t.sample_format = (uint16_t)v[0]; break;
-            case 322: case 323: case 324: case 325: t.error = "tiled TIFF not supported yet"; return t;
+            case 322: case 323: case 324: case 325: tiled = true; break;
             default: break;
         }
     }
@@ -284,13 +339,28 @@ TiffInfo tiff_probe(const std::filesystem::path& path) {
     }
     t.datetime = !exif_date.empty() ? exif_date : tiff_date;
     if (!exif_date.empty() && !exif_subsec.empty()) t.datetime += "." + exif_subsec;
-    if (!t.width || !t.height || !t.samples) { t.error = "missing size tags"; return t; }
-    if (t.samples != 1 && t.samples != 3 && t.samples != 4) { t.error = "unsupported sample count " + std::to_string(t.samples); return t; }
+    if (!t.width || !t.height || !t.samples) { t.error = "missing size tags"; return t; }    if (t.samples != 1 && t.samples != 3 && t.samples != 4) { t.error = "unsupported sample count " + std::to_string(t.samples); return t; }
     if (t.bits == 0) t.bits = 8;
     if (t.bits != 8 && t.bits != 16) { t.error = "unsupported bits " + std::to_string(t.bits); return t; }
     if (t.sample_format != 1) { t.error = "unsupported sample format"; return t; }
-    if (t.planar != 1) { t.error = "planar TIFF not supported"; return t; }
-    if (t.compression != 1) { t.error = "compressed TIFF (" + std::to_string(t.compression) + "): libtiff path not built yet"; return t; }
+    if (t.compression == 0) t.compression = 1;
+    if (t.compression != 1 || t.planar != 1 || tiled) {
+        // not readable straight from the file: Windows' TIFF decoder unpacks it into the buffer as chunky RGB
+        // (LZW 5, ZIP 8 / 32946, PackBits 32773, with or without the predictor; tiles; planar samples)
+        const uint16_t c = t.compression;
+        if (c != 1 && c != 5 && c != 8 && c != 32946 && c != 32773) { t.error = "TIFF compression " + std::to_string(c) + " is not supported (use none, LZW or ZIP)"; return t; }
+        if (t.photometric == 5) { t.error = "CMYK TIFF is not supported"; return t; }
+        t.wic = true;
+        t.samples = 3;
+        t.planar = 1;
+        t.big_endian = false;
+        t.contiguous = true;
+        t.data_offset = 0;
+        t.data_bytes = t.pixel_bytes();
+        t.strip_offsets = {0};
+        t.strip_bytes = {t.data_bytes};
+        return t;
+    }
     if (t.strip_offsets.empty() || t.strip_offsets.size() != t.strip_bytes.size()) { t.error = "bad strips"; return t; }
     t.data_offset = t.strip_offsets[0];
     t.contiguous = true;
@@ -307,7 +377,8 @@ TiffRead tiff_read_pixels(const std::filesystem::path& path, const TiffInfo& inf
     TiffRead r;
     auto t0 = std::chrono::steady_clock::now();
     if (!info.ok()) { r.error = info.error; return r; }
-    if (info.jpeg) return jpeg_read(path, info, dst, cap);   // decoded to 8-bit RGB, at offset 0
+    if (info.raw) return raw_read(path, info, dst, cap);                 // developed to 16-bit RGB, at offset 0
+    if (info.jpeg || info.wic) return wic_read(path, info, dst, cap);   // decoded to RGB, at offset 0
     if (cap < tiff_buffer_capacity(info.pixel_bytes())) { r.error = "buffer too small"; return r; }
 
     if (info.contiguous && ((uintptr_t)dst % kReadAlign) == 0) {

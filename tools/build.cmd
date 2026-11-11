@@ -19,6 +19,7 @@ if "%QT_DIR%"=="" (
   for /d %%d in ("C:\Qt\6.*") do if exist "%%d\msvc2022_64\lib\cmake\Qt6" set "QT_DIR=%%d\msvc2022_64"
 )
 cd /d "%~dp0.."
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="%QT_DIR%"
+rem extra arguments go to the configure step, e.g. tools\build.cmd -DXLAMINA_RAW=OFF
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="%QT_DIR%" %*
 if errorlevel 1 exit /b 20
 cmake --build build
