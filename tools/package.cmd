@@ -10,7 +10,7 @@ if "%VS%"=="" (
   if exist "%ProgramFiles%\Microsoft Visual Studio\2022\Community\VC\Redist" set "VS=%ProgramFiles%\Microsoft Visual Studio\2022\Community"
 )
 if "%QT_DIR%"=="" (
-  for /d %%d in ("C:\Qt\6.*") do if exist "%%d\msvc2022_64\bin\windeployqt.exe" set "QT_DIR=%%d\msvc2022_64"
+  for /f "delims=" %%d in ('powershell -NoProfile -Command "Get-ChildItem C:\Qt -Directory -Filter 6.* | Where-Object { Test-Path ($_.FullName + '\msvc2022_64\bin\windeployqt.exe') } | Sort-Object { [version]$_.Name } | Select-Object -Last 1 -ExpandProperty FullName"') do set "QT_DIR=%%d\msvc2022_64"
 )
 for /f "tokens=3" %%v in ('findstr /c:"XLAMINA_VERSION" cli\version.h') do set VER=%%~v
 set NAME=xLamina-%VER%-win64

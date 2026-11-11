@@ -16,7 +16,8 @@ call "%VS%\VC\Auxiliary\Build\vcvars64.bat" >nul
 if errorlevel 1 exit /b 10
 set "PATH=%VS%\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;%VS%\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;%CUDA_PATH%\bin;%PATH%"
 if "%QT_DIR%"=="" (
-  for /d %%d in ("C:\Qt\6.*") do if exist "%%d\msvc2022_64\lib\cmake\Qt6" set "QT_DIR=%%d\msvc2022_64"
+  rem the newest installed Qt 6, by version number (by name 6.11 would sort before 6.8)
+  for /f "delims=" %%d in ('powershell -NoProfile -Command "Get-ChildItem C:\Qt -Directory -Filter 6.* | Where-Object { Test-Path ($_.FullName + '\msvc2022_64\lib\cmake\Qt6') } | Sort-Object { [version]$_.Name } | Select-Object -Last 1 -ExpandProperty FullName"') do set "QT_DIR=%%d\msvc2022_64"
 )
 cd /d "%~dp0.."
 rem extra arguments go to the configure step, e.g. tools\build.cmd -DXLAMINA_RAW=OFF

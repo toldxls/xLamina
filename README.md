@@ -135,8 +135,9 @@ The same engine runs from the command line:
 ## Build
 
 Visual Studio 2022 (Build Tools with the C++ workload suffice), CUDA 13.x, and for the
-GUI Qt 6.8 for MSVC 2022 (`pip install aqtinstall` then
-`aqt install-qt windows desktop 6.8.3 win64_msvc2022_64 -O C:\Qt`).
+GUI Qt 6.11 for MSVC 2022 under `C:\Qt\<version>\msvc2022_64` (the Qt online installer, or the
+`qtbase` package from download.qt.io; only Core, Gui, Widgets and Network are used). The scripts take the
+newest Qt 6 found there; set `QT_DIR` to choose another.
 
     tools\build.cmd        builds build\gui\xLamina.exe and build\cli\stackcli.exe
     tools\package.cmd      builds and zips a release into dist\
