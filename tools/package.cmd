@@ -1,6 +1,7 @@
 @echo off
-rem Builds and zips a release: dist\xLamina-<version>-win64.zip with xLamina.exe (GUI), stackcli.exe,
-rem the Qt and VC++ runtime files, README and LICENSE.
+rem Builds and zips a release: dist\xLamina-<version>-win64.zip, one folder xLamina with xLamina.exe (GUI),
+rem stackcli.exe, the Qt and VC++ runtime files, README and LICENSE. dist\xLamina-<version>-win64\ keeps the same
+rem files unzipped, ready to run.
 setlocal
 cd /d "%~dp0.."
 call tools\build.cmd
@@ -40,7 +41,14 @@ rem the icon as a file: a shortcut that points at it keeps a sharp icon across u
 rem stale small image for a while after the exe it reads the icon from is replaced)
 copy /y gui\icon\xlamina.ico dist\%NAME%\ >nul
 if exist dist\%NAME%.zip del dist\%NAME%.zip
-powershell -NoProfile -Command "Compress-Archive -Path 'dist\%NAME%\*' -DestinationPath 'dist\%NAME%.zip'"
+rem the zip holds one folder, xLamina, with the files in it: unpacked "here" in Downloads it makes its own folder
+rem instead of putting the program among the user's files (the updater of 1.0.2 and later reads this layout; 1.0.1
+rem and earlier need the files at the top of the zip)
+if exist dist\_zip rmdir /s /q dist\_zip
+mkdir dist\_zip\xLamina
+xcopy /e /q /y dist\%NAME%\* dist\_zip\xLamina\ >nul
+powershell -NoProfile -Command "Compress-Archive -Path 'dist\_zip\xLamina' -DestinationPath 'dist\%NAME%.zip'"
+rmdir /s /q dist\_zip
 echo dist\%NAME%.zip
 rem the zip's SHA-256, for the release notes (GitHub states the same digest for the uploaded asset; the updater checks it)
 certutil -hashfile dist\%NAME%.zip SHA256 | findstr /v ":"

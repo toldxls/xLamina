@@ -41,7 +41,7 @@ gives no extra speed.
 ## Install
 
 Download `xLamina-<version>-win64.zip` from the Releases page, unzip it anywhere and run
-`xLamina.exe`. It needs a current NVIDIA driver (see Hardware).
+`xLamina.exe` in the `xLamina` folder it holds. It needs a current NVIDIA driver (see Hardware).
 
 Updates: a few seconds after it starts, xLamina asks GitHub for the latest release (Help >
 Check for updates at start turns this off). A newer one lights an **Update to x.y.z** button
