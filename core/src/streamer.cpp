@@ -67,6 +67,16 @@ StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, con
         else max_px = std::max(max_px, infos[k].pixel_bytes());
     }
     if (max_px == 0) return st;
+    // one size per pass: the callers allocate their device frames for the first frame's size, so a frame of
+    // another size (a list written by hand, a file replaced since the folder was scanned) is left out here
+    for (int k = 0, k0 = -1; k < N; ++k) {
+        if (!infos[k].ok()) continue;
+        if (k0 < 0) { k0 = k; continue; }
+        if (infos[k].width != infos[k0].width || infos[k].height != infos[k0].height) {
+            infos[k].error = "not the size of the first frame";
+            st.errors.push_back(paths[k].filename().string() + ": " + infos[k].error);
+        }
+    }
 
     std::vector<int> devs = opt.devices;
     if (devs.empty()) {
