@@ -38,7 +38,7 @@ using clk = std::chrono::steady_clock;
         cudaError_t e_ = (x);                                                              \
         if (e_ != cudaSuccess) {                                                           \
             fprintf(stderr, "CUDA error: %s\n  at %s:%d: %s\n", cudaGetErrorString(e_),    \
-                    __FILE__, __LINE__, #x);                                               \
+                    "m0_bench.cu", __LINE__, #x);                                               \
             exit(1);                                                                       \
         }                                                                                  \
     } while (0)

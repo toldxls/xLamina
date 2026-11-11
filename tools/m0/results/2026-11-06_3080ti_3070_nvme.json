@@ -6,5 +6,5 @@
  ],
  "concurrent_h2d_ms": 29.052,
  "host_memcpy_gbps": {"1": 23.02, "8": 25.93},
- "read": {"dir": "C:\Users\user\Pictures\2026_10_31", "files": 163, "bytes": 31587659312, "threads": 8, "unbuffered_gbps": 6.499, "buffered_gbps": 6.554}
+ "read": {"dir": "C:\frames", "files": 163, "bytes": 31587659312, "threads": 8, "unbuffered_gbps": 6.499, "buffered_gbps": 6.554}
 }

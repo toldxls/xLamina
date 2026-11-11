@@ -33,7 +33,7 @@ namespace fs = std::filesystem;
     do {                                                                                        \
         cudaError_t e_ = (x);                                                                   \
         if (e_ != cudaSuccess) {                                                                \
-            logf("CUDA error: %s (%s:%d)", cudaGetErrorString(e_), __FILE__, __LINE__);         \
+            logf("CUDA error: %s (%s:%d)", cudaGetErrorString(e_), "pipeline.cpp", __LINE__);         \
             return 1;                                                                           \
         }                                                                                       \
     } while (0)
@@ -48,11 +48,11 @@ namespace fs = std::filesystem;
         cudaError_t e_ = (x);                                                                   \
         if (e_ == cudaErrorMemoryAllocation) {                                                  \
             cudaGetLastError();                                                                 \
-            logf("GPU memory ran out (%s:%d)", __FILE__, __LINE__);                             \
+            logf("GPU memory ran out (%s:%d)", "pipeline.cpp", __LINE__);                             \
             return 4;                                                                           \
         }                                                                                       \
         if (e_ != cudaSuccess) {                                                                \
-            logf("CUDA error: %s (%s:%d)", cudaGetErrorString(e_), __FILE__, __LINE__);         \
+            logf("CUDA error: %s (%s:%d)", cudaGetErrorString(e_), "pipeline.cpp", __LINE__);         \
             return 1;                                                                           \
         }                                                                                       \
     } while (0)

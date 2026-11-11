@@ -43,7 +43,7 @@ using namespace stackcore;
     do {                                                                                        \
         cudaError_t e_ = (x);                                                                   \
         if (e_ != cudaSuccess) {                                                                \
-            fprintf(stderr, "CUDA error: %s (%s:%d)\n", cudaGetErrorString(e_), __FILE__, __LINE__); \
+            fprintf(stderr, "CUDA error: %s (%s:%d)\n", cudaGetErrorString(e_), "stackcli.cpp", __LINE__); \
             return 1;                                                                           \
         }                                                                                       \
     } while (0)
