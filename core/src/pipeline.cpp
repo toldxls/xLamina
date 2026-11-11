@@ -886,8 +886,43 @@ static StreamerStats run_pass(const std::vector<fs::path>& run_paths, const std:
     return st;
 }
 
+// Upper limits on the size parameters, far above any useful value (the GUI's own ranges end well below them):
+// a radius of 10^9 px typed on the command line ran a kernel for minutes instead of failing, and 0 streams
+// indexed an empty slot list. A value that is not a number takes the lower end.
+static void limit_stack_options(StackOptions& so) {
+    auto lim = [](const char* name, double& v, double hi) {
+        if (v != v) { logf("  %s is not a number: 0 is used", name); v = 0; }
+        if (v > hi) { logf("  %s is limited to %g", name, hi); v = hi; }
+    };
+    Pass1Options& po = so.po;
+    lim("--c-radius", po.c_radius_px, 1024);
+    lim("--b-radius", po.b_radius_px, 1024);
+    lim("--radius-px", po.radius_px, 128);
+    lim("--power", po.power, 64);
+    lim("--depth-fm-px", po.depth_fm_px, 128);
+    lim("--vol-agg-px", po.vol_agg_px, 1024);
+    lim("--flat-blur", po.flat_blur_px, 2048);
+    lim("--flat-reach", po.flat_reach_px, 1024);
+    lim("--refine-fm-px", so.refine_fm_px, 128);
+    lim("--soft-px", so.soft_px, 64);
+    lim("--dark-reach", so.dark_reach_px, 1024);
+    lim("--end-vote", so.end_vote_px, 1024);
+    so.refine_r = std::clamp(so.refine_r, 0, 1000);
+    so.streams = std::clamp(so.streams, 1, 16);
+    po.opt.streams_per_gpu = std::clamp(po.opt.streams_per_gpu, 1, 16);
+    po.opt.readers = std::clamp(po.opt.readers, 1, 256);
+}
+
+static bool parse_stack_option_raw(const std::string& a, const std::string& v, StackOptions& so);
+
 // parses the options shared by `stack` and `run`; returns false on an unknown option
 bool parse_stack_option(const std::string& a, const std::string& v, StackOptions& so) {
+    if (!parse_stack_option_raw(a, v, so)) return false;
+    limit_stack_options(so);
+    return true;
+}
+
+static bool parse_stack_option_raw(const std::string& a, const std::string& v, StackOptions& so) {
     Grid& g = so.po.g;
     if (a == "--scale") g.scale = atof(v.c_str());
     else if (a == "--interp") {   // the warp's resampling filter (FINDINGS 39)
@@ -993,6 +1028,7 @@ static void trim_pools() {
 // needs ~5 GB beside the state; another process may hold part of the card), the render is repeated at 1/4
 // instead of failing (FINDINGS 32).
 int run_stack(StackOptions& so) {
+    limit_stack_options(so);   // options set directly (the GUI, a job built in code) pass the same limits as parsed ones
     int rc;
     try {
         rc = run_stack_once(so);
@@ -1848,6 +1884,9 @@ static void apply_row_fixes(StackOptions& so, const AlignOut& A) {
 }
 
 int run_align(AlignOptions& ao, AlignOut& A) {
+    ao.readers = std::clamp(ao.readers, 1, 256);
+    ao.pair_threads = std::clamp(ao.pair_threads, 1, 64);
+    ao.rs_bands = std::clamp(ao.rs_bands, 0, 64);   // row bands of the rolling-shutter probe: 100000 took two minutes
     const fs::path& dir = ao.dir;
     const std::string &out = ao.out, &prefix = ao.prefix, &ref_rule = ao.ref_rule, &pairs_sel = ao.pairs_sel;
     const double align_scale = ao.align_scale;
@@ -2131,7 +2170,8 @@ int run_align(AlignOptions& ao, AlignOut& A) {
 }
 
 std::string report_json(const AlignOptions& ao, const AlignOut& A) {
-    const int N = (int)A.paths.size(), W = A.W, H = A.H;
+    // an alignment that failed early (no GPU, say) has its paths but no transforms: then no per-frame rows
+    const int N = (int)std::min(A.paths.size(), A.T.size()), W = A.W, H = A.H;
     const int* rect = A.rect;
     std::string s;
     char b[1024];

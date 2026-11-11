@@ -71,7 +71,7 @@ void Worker::start(const JobOptions& jo_in, int liveDown, bool quiet) {
     jo->cache = jo->stack.cache_frames ? &cache_ : nullptr;   // with the cache off the resident frames are left alone, just not used
     launch(jo, data, liveDown, quiet, [](JobOptions& j, JobResultData& d, Hooks& hooks) {
         int rc = run_job(j, d.align, hooks);
-        d.reportJson = QString::fromStdString(report_json(j.align, d.align));
+        if (rc == 0) d.reportJson = QString::fromStdString(report_json(j.align, d.align));   // a failed job has no alignment to report
         d.outDir = QString::fromStdString(j.stack.out.empty() ? j.out : j.stack.out);
         return rc;
     });

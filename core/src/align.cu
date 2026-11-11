@@ -583,8 +583,10 @@ PairResult align_pair(const AlignPyramid& pi, const AlignPyramid& pj, int i, int
 
 std::vector<std::pair<int, int>> make_pairs(int n, const std::vector<int>& baselines) {
     std::vector<std::pair<int, int>> out;
-    for (int d : baselines)
+    for (int d : baselines) {
+        if (d < 1) continue;   // a baseline is a distance in frames: 0 or a negative value would pair a frame with itself or with none
         for (int i = 0; i + d < n; ++i) out.push_back({i, i + d});
+    }
     std::sort(out.begin(), out.end());
     return out;
 }
