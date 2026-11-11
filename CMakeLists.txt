@@ -25,6 +25,11 @@ find_package(CUDAToolkit REQUIRED)
 if(MSVC)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:preprocessor>)
   add_compile_options($<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>)
+  # Control Flow Guard: indirect calls are checked against the valid targets (no measurable cost on a full render,
+  # outputs byte-identical)
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/guard:cf>)
+  add_compile_options($<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/guard:cf>)
+  add_link_options(/guard:cf)
 endif()
 
 # Camera raw and DNG frames (on hold, off by default: written but never built or tested, FINDINGS Open items):
