@@ -508,16 +508,10 @@ void CompareWindow::startNextLoad() {
     e.loading = true;
     TiffInfo info = tiff_probe(e.path.toStdWString());
     if (info.ok() && info.samples >= 3) { loader_.start({e.path}, 1 << 20, {loading_}); return; }
-    // not an uncompressed RGB TIFF: Qt reads it (JPEG, PNG, other TIFFs via the plugin), with its own colour space
-    QImageReader rd(e.path);
-    rd.setAutoTransform(true);
-    QImage img = rd.read();
-    if (!img.isNull()) {
-        if (img.colorSpace().isValid()) img.convertToColorSpace(QColorSpace::SRgb);
-        img = img.convertToFormat(QImage::Format_RGB32);
-    } else {
-        statusBar()->showMessage(QString("Could not read %1: %2").arg(e.name, rd.errorString()), 8000);
-    }
+    // not a frame the engine reads as RGB (a PNG, a grey image): Windows decodes it, not a decoder shipped with the program
+    QString why;
+    QImage img = readImageViaWindows(e.path, &why);
+    if (img.isNull()) statusBar()->showMessage(QString("Could not read %1: %2").arg(e.name, why), 8000);
     int idx = loading_;
     loading_ = -1;
     onLoaded(idx, img);

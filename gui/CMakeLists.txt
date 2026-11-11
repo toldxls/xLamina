@@ -11,7 +11,8 @@ qt_add_executable(xlamina WIN32
     updater.cpp updater.h
     hwmon.cpp hwmon.h
     liveplayer.cpp liveplayer.h
-    xlamina.rc)
+    xlamina.rc
+    ${CMAKE_SOURCE_DIR}/cli/utf8.manifest)
 # the window / taskbar icon, from the PNG sizes (PNG needs no image plugin)
 qt_add_resources(xlamina "icons" PREFIX "/" BASE "icon" FILES
     icon/xlamina-16.png icon/xlamina-24.png icon/xlamina-32.png icon/xlamina-48.png

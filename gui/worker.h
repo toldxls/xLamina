@@ -15,6 +15,10 @@
 #include "stackcore/frame_cache.h"
 #include "stackcore/pipeline.h"
 
+// An image file that is not a frame (a comparison image: PNG, a grey TIFF, ...) as 8-bit RGB, decoded by Windows
+// (stackcore::decode_rgb8). A null image, with the reason in err, when Windows cannot read it.
+QImage readImageViaWindows(const QString& path, QString* err = nullptr);
+
 // A live-view image as the engine hands it over: float RGB, interleaved, [0, 1] (FloatImage, liveplayer.h). The
 // 8-bit conversion happens off the engine's threads, and the buffers come from a small pool handed back after
 // converting (a fresh 10 MB vector per frame cost ~3 ms of page faults on the GPU's worker thread, FINDINGS 30).

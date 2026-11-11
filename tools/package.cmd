@@ -21,7 +21,7 @@ rem LibRaw (raw and DNG frames), when the build has it
 if exist build\cli\raw.dll copy /y build\cli\raw.dll dist\%NAME%\ >nul
 if exist build\gui\xLamina.exe (
   copy /y build\gui\xLamina.exe dist\%NAME%\ >nul
-  rem only the image plugin the app reads through (JPEG; PNG is built in): no SVG, GIF or ICO decoders, no touch plugin
+  rem only the JPEG plugin, which Save as writes through (image files are read by the engine or by Windows, never by Qt)
   "%QT_DIR%\bin\windeployqt.exe" --release --no-translations --no-opengl-sw --no-system-d3d-compiler --compiler-runtime --exclude-plugins qsvg,qsvgicon,qgif,qico,qtuiotouchplugin "dist\%NAME%\xLamina.exe" >nul
   if errorlevel 1 ( echo windeployqt failed & exit /b 2 )
 )

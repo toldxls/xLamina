@@ -116,6 +116,7 @@ TiffInfo jpeg_probe(const std::filesystem::path& path, File& f, TiffInfo t) {
         pos += 2 + len;
     }
     if (t.width == 0 || t.height == 0) { t.error = "JPEG: no frame header"; return t; }
+    if ((uint64_t)t.width * t.height > (1ull << 30)) { t.error = "image too large (over 1024 megapixels)"; return t; }
     std::sort(icc_parts.begin(), icc_parts.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     for (auto& [seq, bytes] : icc_parts) t.icc.insert(t.icc.end(), bytes.begin(), bytes.end());
     t.jpeg = true;
@@ -177,6 +178,31 @@ bool jpeg_thumbnail(const std::filesystem::path& path, int max_w, std::vector<ui
         FAILED(conv->Initialize(sc.p, GUID_WICPixelFormat24bppRGB, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom))) return false;
     rgb.resize((size_t)w * h * 3);
     return SUCCEEDED(conv->CopyPixels(nullptr, (UINT)w * 3, (UINT)rgb.size(), rgb.data()));
+}
+
+bool decode_rgb8(const std::filesystem::path& path, std::vector<uint8_t>& rgb, int& w, int& h, std::string* err) {
+    std::string e;
+    auto fail = [&](const char* why) { if (err) *err = e.empty() ? why : e; return false; };
+    ComScope com;
+    ComPtr<IWICImagingFactory> fac;
+    ComPtr<IWICBitmapFrameDecode> frame;
+    if (!wic_open(path, fac, frame, e)) return fail("cannot read the file");
+    UINT fw = 0, fh = 0;
+    if (FAILED(frame->GetSize(&fw, &fh)) || fw == 0 || fh == 0) return fail("no image");
+    if ((uint64_t)fw * fh > (1ull << 30)) return fail("image too large (over 1024 megapixels)");
+    ComPtr<IWICFormatConverter> conv;
+    if (FAILED(fac->CreateFormatConverter(&conv.p)) ||
+        FAILED(conv->Initialize(frame.p, GUID_WICPixelFormat24bppRGB, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom)))
+        return fail("cannot convert to RGB");
+    const size_t stride = (size_t)fw * 3;
+    try { rgb.resize(stride * fh); } catch (const std::exception&) { return fail("not enough memory for the image"); }
+    const UINT band = (UINT)std::max<size_t>(1, ((size_t)256 << 20) / stride);   // CopyPixels takes the size as a UINT
+    for (UINT y = 0; y < fh; y += band) {
+        WICRect rc{0, (INT)y, (INT)fw, (INT)std::min<UINT>(band, fh - y)};
+        if (FAILED(conv->CopyPixels(&rc, (UINT)stride, (UINT)(stride * rc.Height), rgb.data() + (size_t)y * stride))) return fail("decode failed");
+    }
+    w = (int)fw; h = (int)fh;
+    return true;
 }
 
 bool fast_thumbnail(const std::filesystem::path& path, const TiffInfo& info, int max_w, std::vector<uint8_t>& rgb, int& w, int& h) {
@@ -346,6 +372,9 @@ TiffInfo tiff_probe(const std::filesystem::path& path) {
     if (!t.width || !t.height || !t.samples) { t.error = "missing size tags"; return t; }
     // a side past 2^20 px is no camera frame, and keeps pixel_bytes() (and every int width / height) from wrapping
     if (t.width > (1u << 20) || t.height > (1u << 20)) { t.error = "image too large"; return t; }
+    // and no more than 2^30 pixels: the kernels index pixels with 32-bit integers (a frame that size would not fit
+    // a GPU anyway: 12 GB as float RGB)
+    if ((uint64_t)t.width * t.height > (1ull << 30)) { t.error = "image too large (over 1024 megapixels)"; return t; }
     if (t.samples != 1 && t.samples != 3 && t.samples != 4) { t.error = "unsupported sample count " + std::to_string(t.samples); return t; }
     if (t.bits == 0) t.bits = 8;
     if (t.bits != 8 && t.bits != 16) { t.error = "unsupported bits " + std::to_string(t.bits); return t; }

@@ -75,6 +75,11 @@ TiffRead tiff_read_pixels(const std::filesystem::path& path, const TiffInfo& inf
 bool fast_thumbnail(const std::filesystem::path& path, const TiffInfo& info, int max_w, std::vector<uint8_t>& rgb, int& w, int& h);
 bool jpeg_thumbnail(const std::filesystem::path& path, int max_w, std::vector<uint8_t>& rgb, int& w, int& h);
 
+// Any image Windows itself decodes (PNG, JPEG, TIFF, BMP, ...), as 8-bit RGB, through Windows Imaging Component:
+// the reader for files that are not frames (a comparison image), so that no file a user picks is parsed by a
+// decoder shipped with the program. At most 2^30 pixels. false, with the reason in err, when it cannot be read.
+bool decode_rgb8(const std::filesystem::path& path, std::vector<uint8_t>& rgb, int& w, int& h, std::string* err = nullptr);
+
 // The file types a stack folder is searched for, by extension (lower or upper case): TIFF, JPEG, raw / DNG.
 bool is_frame_file(const std::filesystem::path& path);
 bool is_raw_file(const std::filesystem::path& path);

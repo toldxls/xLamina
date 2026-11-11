@@ -61,6 +61,21 @@ void Worker::recycle(FloatImage img) {
     if (pool_.size() < 8) pool_.push_back(std::move(img));
 }
 
+QImage readImageViaWindows(const QString& path, QString* err) {
+    std::vector<uint8_t> rgb;
+    int w = 0, h = 0;
+    std::string why;
+    if (!stackcore::decode_rgb8(path.toStdWString(), rgb, w, h, &why)) { if (err) *err = QString::fromStdString(why); return {}; }
+    QImage img(w, h, QImage::Format_RGB32);
+    if (img.isNull()) { if (err) *err = "not enough memory for the image"; return {}; }
+    for (int y = 0; y < h; ++y) {
+        QRgb* out = reinterpret_cast<QRgb*>(img.scanLine(y));
+        const uint8_t* p = rgb.data() + (size_t)y * w * 3;
+        for (int x = 0; x < w; ++x, p += 3) out[x] = qRgb(p[0], p[1], p[2]);
+    }
+    return img;
+}
+
 void Worker::start(const JobOptions& jo_in, int liveDown, bool quiet) {
     if (running_) return;
     running_ = true;

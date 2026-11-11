@@ -435,6 +435,19 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
     std::vector<int> ks;
     if (frames_sel.empty()) for (int k = 0; k < (int)paths.size(); ++k) ks.push_back(k);
     else ks = frames_sel;
+    // the list and the selection are checked before anything is indexed or handed to a kernel: a list can be
+    // written by hand, and a transform that is not a number or far out of range has no meaning as an alignment
+    if (ks.empty()) { logf("no frames to stack\n"); return 1; }
+    if (T.size() != paths.size()) { logf("the frame list has %zu paths and %zu transforms\n", paths.size(), T.size()); return 1; }
+    for (int k : ks)
+        if (k < 0 || k >= (int)paths.size()) { logf("frame %d is not in the list (it has %zu frames)\n", k, paths.size()); return 1; }
+    for (size_t k = 0; k < T.size(); ++k) {
+        const double s = std::hypot(T[k].zr, T[k].zi);
+        if (!std::isfinite(s) || !std::isfinite(T[k].tx) || !std::isfinite(T[k].ty) || s < 0.01 || s > 100 || std::abs(T[k].tx) > 1e6 || std::abs(T[k].ty) > 1e6) {
+            logf("frame %zu (%s): its transform is not a usable alignment (scale %g, shift %g, %g)\n", k, paths[k].filename().string().c_str(), s, T[k].tx, T[k].ty);
+            return 1;
+        }
+    }
     std::vector<fs::path> run_paths;
     for (int k : ks) run_paths.push_back(paths[k]);
 
@@ -442,6 +455,12 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
     if (!t0.ok()) { logf("%s: %s\n", paths[ks[0]].string().c_str(), t0.error.c_str()); return 1; }
     g.W = (int)t0.width;
     g.H = (int)t0.height;
+    if (g.W < 16 || g.H < 16) { logf("the frames are %d x %d px: at least 16 x 16 is needed\n", g.W, g.H); return 1; }
+    // the output rectangle lies inside the frame and is at least 16 px each way (the kernels index it unchecked)
+    if (g.x0 < 0 || g.y0 < 0 || g.x1 >= g.W || g.y1 >= g.H || g.x1 - g.x0 + 1 < 16 || g.y1 - g.y0 + 1 < 16) {
+        logf("the output rectangle %d,%d,%d,%d does not fit the %d x %d frame (or is under 16 px)\n", g.x0, g.y0, g.x1, g.y1, g.W, g.H);
+        return 1;
+    }
     int ow = g.out_w(), oh = g.out_h();
     FoldParams fp;
     fp.levels = n_levels(ow, oh);
@@ -1967,6 +1986,7 @@ int run_align(AlignOptions& ao, AlignOut& A) {
     TiffInfo t0 = tiff_probe(paths[0]);
     if (!t0.ok()) { logf("%s: %s\n", paths[0].string().c_str(), t0.error.c_str()); return 1; }
     const int W = (int)t0.width, H = (int)t0.height;
+    if (W < 64 || H < 64) { logf("the frames are %d x %d px: alignment needs at least 64 x 64\n", W, H); return 1; }
     const int w = std::max(16, (int)std::nearbyint(W * align_scale)), h = std::max(16, (int)std::nearbyint(H * align_scale));
     const double fx = (double)w / W, fy = (double)h / H;
     auto t_all = std::chrono::steady_clock::now();

@@ -99,6 +99,17 @@ void Updater::check() {
             }
         }
         if (rel.version.isEmpty()) { emit failed("The release feed names no version."); return; }
+        // what the feed says is used in a file name, opened in the browser and downloaded: each is held to the one
+        // shape a release of this project has (a rehearsal feed, XLAMINA_UPDATE_FEED, may also name a local zip)
+        static const QRegularExpression versionShape("^\\d{1,4}(\\.\\d{1,4}){0,3}$");
+        if (!versionShape.match(rel.version).hasMatch()) { emit failed("The release feed names an unusable version."); return; }
+        const QString home = "https://github.com/toldxls/xLamina/";
+        if (!rel.page.startsWith(home)) rel.page = home + "releases";
+        const bool rehearsal = !qEnvironmentVariable("XLAMINA_UPDATE_FEED").isEmpty();
+        if (!rel.url.isEmpty() && !rel.url.startsWith(home + "releases/download/") && !(rehearsal && rel.url.startsWith("file:///"))) {
+            emit failed("The release's download address is not on this project's GitHub page; nothing was downloaded.");
+            return;
+        }
         if (compareVersions(rel.version, XLAMINA_VERSION) <= 0) { emit upToDate(rel.version); return; }
         if (rel.url.isEmpty()) { emit failed(QString("xLamina %1 is out, but its release has no Windows zip yet.").arg(rel.version)); return; }
         emit available(rel);

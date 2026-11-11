@@ -1165,12 +1165,9 @@ void MainWindow::addComparison() {
         compareLoader_.start({fn}, 1 << 20);
         return;
     }
-    QImageReader rd(fn);
-    rd.setAutoTransform(true);
-    QImage img = rd.read();
-    if (img.isNull()) { QMessageBox::warning(this, "xLamina", QString("Could not read %1:\n%2").arg(fn, rd.errorString())); return; }
-    if (img.colorSpace().isValid()) img.convertToColorSpace(QColorSpace::SRgb);
-    img = img.convertToFormat(QImage::Format_RGB32);
+    QString why;
+    QImage img = readImageViaWindows(fn, &why);   // decoded by Windows, not by a decoder shipped with the program
+    if (img.isNull()) { QMessageBox::warning(this, "xLamina", QString("Could not read %1:\n%2").arg(fn, why)); return; }
     compare_[name] = img;
     rebuildTabs();
     tabs_->setCurrentIndex(tabs_->count() - 1);
@@ -2211,7 +2208,7 @@ void MainWindow::dropEvent(QDropEvent* e) {
         if (result_ && (ext == "tif" || ext == "tiff" || ext == "jpg" || ext == "jpeg" || ext == "png")) {
             TiffInfo info = tiff_probe(p.toStdWString());
             if (info.ok() && info.samples >= 3) { pendingCompare_ = fi.fileName(); compareLoader_.start({p}, 1 << 20); }
-            else { QImage img(p); if (!img.isNull()) { compare_[fi.fileName()] = img.convertToFormat(QImage::Format_RGB32); rebuildTabs(); } }
+            else { QImage img = readImageViaWindows(p); if (!img.isNull()) { compare_[fi.fileName()] = img; rebuildTabs(); } }
             break;
         }
         openFolder(fi.absolutePath());
