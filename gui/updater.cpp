@@ -12,6 +12,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QProcess>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QTemporaryFile>
 #include <QUrl>
@@ -168,7 +169,15 @@ QString Updater::install(const QString& zip) {
         QString err = QString::fromLocal8Bit(p.readAllStandardError()).trimmed();
         return "Unpacking the zip failed" + (err.isEmpty() ? QString(" (is " + QDir::toNativeSeparators(tar) + " missing?).") : ": " + err);
     }
-    if (!QFileInfo::exists(staging.filePath("xLamina.exe"))) return "The zip holds no xLamina.exe.";
+    // the program's files at the top of the zip, or inside the one folder the zip holds (a zip that unpacks into its
+    // own folder cannot scatter the program among a user's files)
+    QDir unpacked = staging;
+    if (!QFileInfo::exists(staging.filePath("xLamina.exe"))) {
+        const QStringList dirs = staging.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        const QStringList files = staging.entryList(QDir::Files);
+        if (dirs.size() == 1 && files.isEmpty() && QFileInfo::exists(staging.filePath(dirs[0] + "/xLamina.exe"))) staging = QDir(staging.filePath(dirs[0]));
+        else return "The zip holds no xLamina.exe.";
+    }
 
     // the swap: every file of the new version replaces the old one. A file in use is renamed aside first
     // (Windows lets a running exe and its mapped DLLs be renamed, never overwritten). Any failure puts the
@@ -204,14 +213,25 @@ QString Updater::install(const QString& zip) {
         }
         done.last().copied = true;
     }
-    staging.removeRecursively();
+    unpacked.removeRecursively();
     QFile::remove(zip);
     return {};
 }
 
 void Updater::removeLeftovers() {
+    // Only what install() renamed aside: a program file (exe, dll, ico, md, LICENSE) with ".old" or ".old2".."old9"
+    // at the very end of its name, whose replacement sits beside it. The folder may hold the user's own files (a
+    // zip unpacked straight into Downloads): "notes.old.txt" or "backup.old" there are none of our business.
+    static const QRegularExpression ours("^(.+\\.(exe|dll|ico|md)|LICENSE)\\.old[2-9]?$", QRegularExpression::CaseInsensitiveOption);
     QDirIterator it(appDir(), {QString("*") + kAside + "*"}, QDir::Files, QDirIterator::Subdirectories);
-    while (it.hasNext()) QFile::remove(it.next());   // the old exe may still be exiting: the caller tries again later
+    while (it.hasNext()) {
+        QString f = it.next();
+        QString name = QFileInfo(f).fileName();
+        if (!ours.match(name).hasMatch()) continue;
+        QString replaced = f.left(f.lastIndexOf(kAside, -1, Qt::CaseInsensitive));
+        if (!QFileInfo::exists(replaced)) continue;
+        QFile::remove(f);   // the old exe may still be exiting: the caller tries again later
+    }
 }
 
 bool Updater::restart(const QStringList& args) {
