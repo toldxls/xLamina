@@ -68,7 +68,7 @@ struct HwMonitor::Nvml {
     PFN_pcie pcie = nullptr;   // KB/s over a 20 ms window per call: sampled off the GUI thread
     std::vector<nvmlDevice_t> dev;
     Nvml(const QList<GpuInfo>& gpus) {
-        lib = LoadLibraryA("nvml.dll");
+        lib = LoadLibraryExA("nvml.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);   // the driver's copy only, never one beside a stack's frames
         if (!lib) return;
         init = (PFN_noArg)GetProcAddress(lib, "nvmlInit_v2");
         shutdown = (PFN_noArg)GetProcAddress(lib, "nvmlShutdown");

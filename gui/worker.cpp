@@ -245,7 +245,7 @@ void ThumbLoader::start(const QStringList& files, int width, const QList<int>& i
                 for (;;) {
                     int i = next++;
                     if (i >= files.size() || stop_.load() || generation_.load() != gen) break;
-                    one(i, buf);
+                    try { one(i, buf); } catch (const std::exception&) {}   // a file whose header asks for more memory than there is: no thumbnail, not a crash
                 }
             });
         for (auto& t : pool) t.join();

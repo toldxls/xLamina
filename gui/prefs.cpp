@@ -26,7 +26,7 @@ struct Nvml {
     PFN_nvmlByBus byBus = nullptr;
     PFN_nvmlUint curGen = nullptr, curWidth = nullptr, maxGen = nullptr, maxWidth = nullptr;
     Nvml() {
-        lib = LoadLibraryA("nvml.dll");
+        lib = LoadLibraryExA("nvml.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);   // the driver's copy only
         if (!lib) return;
         init = (PFN_nvmlNoArg)GetProcAddress(lib, "nvmlInit_v2");
         shutdown = (PFN_nvmlNoArg)GetProcAddress(lib, "nvmlShutdown");

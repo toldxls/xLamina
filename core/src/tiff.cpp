@@ -254,11 +254,15 @@ TiffInfo tiff_probe(const std::filesystem::path& path) {
     auto values = [&](const uint8_t* e, uint16_t type, uint64_t count, std::vector<uint64_t>& out) {
         size_t ts = Parser::type_size(type);
         if (!ts) return false;
+        // the header is not trusted: no empty value (the callers read v[0]), and no more values than the file holds
+        // (a count of 2^61 would wrap ts * count, a count of 2^32 would allocate 32 GB before the read fails)
+        if (count == 0 || count > t.file_size / ts) return false;
         size_t total = ts * count, inl = P.big ? 8 : 4;
         const uint8_t* src = e + (P.big ? 12 : 8);
         std::vector<uint8_t> buf;
         if (total > inl) {
             uint64_t off = P.num(src, (int)inl);
+            if (off > t.file_size || total > t.file_size - off) return false;
             buf.resize(total);
             if (f.read_at(off, buf.data(), total) < total) return false;
             src = buf.data();
@@ -339,7 +343,10 @@ TiffInfo tiff_probe(const std::filesystem::path& path) {
     }
     t.datetime = !exif_date.empty() ? exif_date : tiff_date;
     if (!exif_date.empty() && !exif_subsec.empty()) t.datetime += "." + exif_subsec;
-    if (!t.width || !t.height || !t.samples) { t.error = "missing size tags"; return t; }    if (t.samples != 1 && t.samples != 3 && t.samples != 4) { t.error = "unsupported sample count " + std::to_string(t.samples); return t; }
+    if (!t.width || !t.height || !t.samples) { t.error = "missing size tags"; return t; }
+    // a side past 2^20 px is no camera frame, and keeps pixel_bytes() (and every int width / height) from wrapping
+    if (t.width > (1u << 20) || t.height > (1u << 20)) { t.error = "image too large"; return t; }
+    if (t.samples != 1 && t.samples != 3 && t.samples != 4) { t.error = "unsupported sample count " + std::to_string(t.samples); return t; }
     if (t.bits == 0) t.bits = 8;
     if (t.bits != 8 && t.bits != 16) { t.error = "unsupported bits " + std::to_string(t.bits); return t; }
     if (t.sample_format != 1) { t.error = "unsupported sample format"; return t; }
@@ -364,7 +371,12 @@ TiffInfo tiff_probe(const std::filesystem::path& path) {
     if (t.strip_offsets.empty() || t.strip_offsets.size() != t.strip_bytes.size()) { t.error = "bad strips"; return t; }
     t.data_offset = t.strip_offsets[0];
     t.contiguous = true;
+    const uint64_t want_bytes = t.pixel_bytes();
     for (size_t i = 0; i < t.strip_offsets.size(); ++i) {
+        // every strip inside the file and inside the image: the sum cannot wrap, and no strip is larger than the
+        // buffer the reader sizes from pixel_bytes()
+        if (t.strip_bytes[i] > want_bytes - t.data_bytes) { t.error = "strip bytes do not match the image size"; return t; }
+        if (t.strip_offsets[i] > t.file_size || t.strip_bytes[i] > t.file_size - t.strip_offsets[i]) { t.error = "truncated file"; return t; }
         t.data_bytes += t.strip_bytes[i];
         if (i && t.strip_offsets[i - 1] + t.strip_bytes[i - 1] != t.strip_offsets[i]) t.contiguous = false;
     }
@@ -405,6 +417,7 @@ TiffRead tiff_read_pixels(const std::filesystem::path& path, const TiffInfo& inf
     size_t pos = 0;
     for (size_t i = 0; i < info.strip_offsets.size(); ++i) {
         size_t nb = (size_t)info.strip_bytes[i];
+        if (nb > cap - pos) { r.error = "strip larger than the buffer"; return r; }   // tiff_probe checks this too
         if (f.read_at(info.strip_offsets[i], dst + pos, nb) < nb) { r.error = "short read"; return r; }
         pos += nb;
     }
