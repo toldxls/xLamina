@@ -25,6 +25,9 @@ namespace stackcore {
 
 // Log line sink (default: stdout). Installed once per process.
 using LogFn = std::function<void(const std::string&)>;
+// Why this PC cannot render, in words for the user, or an empty string when it can: no NVIDIA GPU or driver, or
+// a GPU (of `devs`, or of all when that is empty) older than the architecture the kernels are compiled for.
+std::string gpu_problem(const std::vector<int>& devs = {});
 void set_log(LogFn fn);
 void logf(const char* fmt, ...);
 

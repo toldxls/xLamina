@@ -120,6 +120,17 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         updateManual_ = false;
     });
     if (appSettings().value("updates/auto", true).toBool()) QTimer::singleShot(2500, this, [this] { if (!updater_.busy()) updater_.check(); });
+    // a PC that cannot render is told so at the start, not at the first Render (not modal: unattended runs go on)
+    QTimer::singleShot(400, this, [this] {
+        QSettings s = appSettings();
+        const QList<int> sel = PerfSettings::load(s).gpus;   // the GPUs ticked in Preferences > Performance (none = all)
+        QString gp = QString::fromStdString(stackcore::gpu_problem(std::vector<int>(sel.begin(), sel.end())));
+        if (gp.isEmpty()) return;
+        onLog(gp);
+        QMessageBox* box = new QMessageBox(QMessageBox::Warning, "xLamina", gp + "\n\nFrames can still be opened and compared, but not rendered.", QMessageBox::Ok, this);
+        box->setAttribute(Qt::WA_DeleteOnClose);
+        box->show();
+    });
     connect(&thumbs_, &ThumbLoader::thumbnail, this, &MainWindow::onThumbnail);
     connect(&frameLoader_, &ThumbLoader::thumbnail, this, &MainWindow::onFullFrame);
     connect(&compareLoader_, &ThumbLoader::thumbnail, this, &MainWindow::onComparison);
@@ -1324,6 +1335,12 @@ void MainWindow::render() {
     if (bench_ && bench_->running()) { statusBar()->showMessage("The benchmark is running; stop it first.", 4000); return; }
     JobOptions jo;
     if (!buildJob(jo, true)) return;
+    // no NVIDIA GPU, or one too old: said here in words (a batch goes on and notes the failure per folder instead)
+    if (QString gp = QString::fromStdString(stackcore::gpu_problem(jo.align.devs)); !gp.isEmpty() && !batchRunning_) {
+        setStage("Cannot render: no usable NVIDIA GPU.");
+        QMessageBox::warning(this, "xLamina", gp);
+        return;
+    }
     if (!jo.stack.cache_frames) worker_.releaseCache();
     thumbs_.stop();   // resumed in onFinished
     cache_.clear();

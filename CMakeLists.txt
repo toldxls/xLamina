@@ -9,9 +9,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-# Ampere (3060 Ti / 3070 / 3080 Ti). Add 89 / 120 + PTX when other cards appear (docs/DESIGN.md).
+# Compute capability 7.5 (GTX 16 / RTX 20 series) and newer: native code for 7.5 plus PTX, which the driver compiles
+# for later cards.
 if(NOT CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 86)
+  set(CMAKE_CUDA_ARCHITECTURES 75)
 endif()
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)

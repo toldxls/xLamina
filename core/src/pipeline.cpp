@@ -71,6 +71,36 @@ void logf(const char* fmt, ...) {
     else { fputs(s.c_str(), stdout); fputc('\n', stdout); fflush(stdout); }
 }
 
+std::string gpu_problem(const std::vector<int>& devs) {
+#ifndef XLAMINA_MIN_CUDA_ARCH
+#define XLAMINA_MIN_CUDA_ARCH 75
+#endif
+    const int need = XLAMINA_MIN_CUDA_ARCH;   // 75 = compute capability 7.5
+    const char* cards = need <= 75 ? "GeForce GTX 16 / RTX 20 series or newer" : need <= 86 ? "GeForce RTX 30 series or newer"
+                      : need <= 89 ? "GeForce RTX 40 series or newer" : "GeForce RTX 50 series or newer";
+    int n = 0;
+    cudaError_t e = cudaGetDeviceCount(&n);
+    if (e != cudaSuccess || n == 0) {
+        cudaGetLastError();   // cleared: the next CUDA call's check must not report this one again
+        std::string why = e == cudaErrorInsufficientDriver ? "The NVIDIA driver on this PC is too old; install the current one."
+                                                           : "No usable NVIDIA GPU was found on this PC.";
+        return std::string("xLamina needs an NVIDIA GPU (") + cards + ") with a current NVIDIA driver. " + why;
+    }
+    std::vector<int> ds = devs;
+    if (ds.empty()) for (int i = 0; i < n; ++i) ds.push_back(i);
+    for (int d : ds) {
+        if (d < 0 || d >= n) return "GPU " + std::to_string(d) + " does not exist on this PC (it has " + std::to_string(n) + "): choose the GPUs again (Preferences > Performance, or --gpus).";
+        cudaDeviceProp p{};
+        if (cudaGetDeviceProperties(&p, d) != cudaSuccess) { cudaGetLastError(); continue; }
+        if (p.major * 10 + p.minor < need) {
+            std::string s = std::string("xLamina needs an NVIDIA GPU (") + cards + "). GPU " + std::to_string(d) + " (" + p.name + ") is too old for it.";
+            if (n > 1) s += " Untick it in Preferences > Performance to render on the other GPU.";
+            return s;
+        }
+    }
+    return {};
+}
+
 static std::vector<int> parse_list(const std::string& s) {
     std::vector<int> v;
     size_t i = 0;
@@ -431,6 +461,7 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
     const int K = (int)paths.size();
     P.g = g; P.fp = fp; P.vp = vp;
 
+    if (std::string gp = gpu_problem(opt.devices); !gp.empty()) { logf("%s", gp.c_str()); return 1; }
     int ndev = 0;
     CK(cudaGetDeviceCount(&ndev));
     std::vector<int> devs = opt.devices;
@@ -1929,6 +1960,7 @@ int run_align(AlignOptions& ao, AlignOut& A) {
     }
     const int N = (int)paths.size();
     if (N < 2) { logf("need >= 2 frames, found %d\n", N); return 1; }
+    if (std::string gp = gpu_problem(devs); !gp.empty()) { logf("%s", gp.c_str()); return 1; }
     int ndev = 0;
     CK(cudaGetDeviceCount(&ndev));
     if (devs.empty()) for (int i = 0; i < ndev; ++i) devs.push_back(i);
