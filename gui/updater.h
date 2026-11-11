@@ -18,6 +18,7 @@ struct ReleaseInfo {
     QString page;      // the release's web page
     QString url;       // the win64 zip
     qint64 size = 0;   // the zip's size in bytes, 0 = unknown
+    QString sha256;    // the zip's SHA-256 as the release feed states it (lower-case hex); the download must match it
     bool valid() const { return !version.isEmpty() && !url.isEmpty(); }
 };
 

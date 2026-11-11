@@ -41,3 +41,5 @@ copy /y gui\icon\xlamina.ico dist\%NAME%\ >nul
 if exist dist\%NAME%.zip del dist\%NAME%.zip
 powershell -NoProfile -Command "Compress-Archive -Path 'dist\%NAME%\*' -DestinationPath 'dist\%NAME%.zip'"
 echo dist\%NAME%.zip
+rem the zip's SHA-256, for the release notes (GitHub states the same digest for the uploaded asset; the updater checks it)
+certutil -hashfile dist\%NAME%.zip SHA256 | findstr /v ":"

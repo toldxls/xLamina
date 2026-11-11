@@ -1,6 +1,7 @@
 #include "updater.h"
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -15,6 +16,7 @@
 #include <QTemporaryFile>
 #include <QUrl>
 #include <algorithm>
+#include <memory>
 
 #include "version.h"
 
@@ -90,6 +92,8 @@ void Updater::check() {
             if (name.startsWith("xLamina-") && name.endsWith("-win64.zip")) {
                 rel.url = ao.value("browser_download_url").toString();
                 rel.size = (qint64)ao.value("size").toDouble();
+                QString digest = ao.value("digest").toString();   // "sha256:<64 hex digits>", computed by GitHub at upload
+                if (digest.startsWith("sha256:") && digest.size() == 7 + 64) rel.sha256 = digest.mid(7).toLower();
                 break;
             }
         }
@@ -102,6 +106,8 @@ void Updater::check() {
 
 void Updater::download(const ReleaseInfo& rel) {
     if (reply_) return;
+    // nothing is installed that cannot be checked against the digest the release states
+    if (rel.sha256.isEmpty()) { emit failed("The release states no SHA-256 for its zip, so the download cannot be verified. Download it from the release page instead."); return; }
     QString path = QDir::temp().filePath(QString("xLamina-%1-win64.zip").arg(rel.version));
     QSaveFile* file = new QSaveFile(path, this);   // lands under its name only when complete
     if (!file->open(QIODevice::WriteOnly)) {
@@ -111,9 +117,12 @@ void Updater::download(const ReleaseInfo& rel) {
     }
     QNetworkReply* r = net_.get(request(QUrl(rel.url)));
     reply_ = r;
-    connect(r, &QNetworkReply::readyRead, this, [r, file] { file->write(r->readAll()); });
+    // hashed as it arrives: the bytes that are checked are the bytes that are written
+    auto hash = std::make_shared<QCryptographicHash>(QCryptographicHash::Sha256);
+    auto take = [r, file, hash] { QByteArray b = r->readAll(); hash->addData(b); file->write(b); };
+    connect(r, &QNetworkReply::readyRead, this, take);
     connect(r, &QNetworkReply::downloadProgress, this, &Updater::downloadProgress);
-    connect(r, &QNetworkReply::finished, this, [this, r, file, path, size = rel.size] {
+    connect(r, &QNetworkReply::finished, this, [this, r, file, path, take, hash, size = rel.size, want = rel.sha256] {
         if (reply_ == r) reply_ = nullptr;
         r->deleteLater();
         if (r->error() != QNetworkReply::NoError) {
@@ -122,7 +131,13 @@ void Updater::download(const ReleaseInfo& rel) {
             emit failed(r->error() == QNetworkReply::OperationCanceledError ? QString("The download was cancelled.") : "The download failed: " + r->errorString());
             return;
         }
-        file->write(r->readAll());
+        take();
+        if (QString::fromLatin1(hash->result().toHex()) != want) {
+            file->cancelWriting();   // never lands under its name
+            delete file;
+            emit failed("The download does not match the SHA-256 the release states. Nothing was installed.");
+            return;
+        }
         qint64 got = file->size();
         bool ok = file->commit();
         delete file;
