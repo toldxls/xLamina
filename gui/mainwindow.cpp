@@ -1977,8 +1977,7 @@ void MainWindow::preferences() {
     sf->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
     auto ro = [](const QString& t) {
         QLabel* lb = new QLabel(t);
-        lb->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        lb->setWordWrap(true);
+        lb->setTextInteractionFlags(Qt::TextSelectableByMouse);   // no word wrap: a wrapping label in a form row gets one line's height and clips the rest
         return lb;
     };
     sf->addRow("xLamina", ro(XLAMINA_VERSION));
