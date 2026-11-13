@@ -4,7 +4,9 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <set>
+#include <thread>
 
 namespace stackcore {
 
@@ -23,7 +25,9 @@ FrameCache::~FrameCache() { clear(); }
 void FrameCache::clear() {
     std::lock_guard<std::mutex> lk(m_);
     for (auto& [k, e] : entries_) cudaFreeHost(e.buf);
+    for (auto& s : spare_) cudaFreeHost(s.first);
     entries_.clear();
+    spare_.clear();
     resident_ = 0;
 }
 
@@ -38,7 +42,7 @@ void FrameCache::prepare(const std::vector<fs::path>& paths, size_t budget_bytes
             file_identity(fs::path(it->first), sz, mt);
             stale = sz != it->second.file_size || mt != it->second.mtime;
         }
-        if (stale) { cudaFreeHost(it->second.buf); resident_ -= it->second.cap; it = entries_.erase(it); }
+        if (stale) { spare_.push_back({it->second.buf, it->second.cap}); resident_ -= it->second.cap; it = entries_.erase(it); }
         else ++it;
     }
     if (budget_bytes > 0) { budget_ = budget_bytes; return; }
@@ -51,6 +55,45 @@ void FrameCache::prepare(const std::vector<fs::path>& paths, size_t budget_bytes
     size_t by_free = ms.ullAvailPhys > reserve ? (size_t)ms.ullAvailPhys - reserve + resident_ : resident_;
     size_t by_total = (size_t)(ms.ullTotalPhys * 0.6);
     budget_ = std::min(by_free, by_total);
+}
+
+void FrameCache::prepin(const std::vector<fs::path>& paths, size_t cap) {
+    size_t want = 0;
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        // spares of another size are no use to this stack: their memory goes back
+        size_t have = 0;
+        for (size_t i = 0; i < spare_.size();) {
+            if (spare_[i].second == cap) { ++have; ++i; }
+            else { cudaFreeHost(spare_[i].first); spare_[i] = spare_.back(); spare_.pop_back(); }
+        }
+        std::set<std::wstring> seen;
+        size_t missing = 0;
+        for (auto& p : paths) if (!entries_.count(p.native()) && seen.insert(p.native()).second) ++missing;
+        const size_t room = budget_ > resident_ ? (budget_ - resident_) / cap : 0;
+        missing = std::min(missing, room);
+        want = missing > have ? missing - have : 0;
+        while (have > missing) {   // more spares than this stack can use
+            cudaFreeHost(spare_.back().first);
+            spare_.pop_back();
+            --have;
+        }
+    }
+    if (!want) return;
+    std::atomic<size_t> next{0};
+    std::atomic<bool> stop{false};
+    std::vector<std::thread> th;
+    for (int t = 0; t < 16; ++t)
+        th.emplace_back([&] {
+            while (!stop.load() && next++ < want) {
+                void* p = nullptr;
+                if (cudaHostAlloc(&p, cap, cudaHostAllocPortable) != cudaSuccess) { stop = true; break; }
+                std::lock_guard<std::mutex> lk(m_);
+                spare_.push_back({(uint8_t*)p, cap});
+            }
+        });
+    for (auto& t : th) t.join();
+    cudaGetLastError();
 }
 
 const FrameCache::Entry* FrameCache::find(const fs::path& p) {
@@ -73,6 +116,16 @@ uint8_t* FrameCache::reserve(size_t cap) {
         if (resident_ + cap > budget_) return nullptr;
         resident_ += cap;
     }
+    {   // a buffer pinned earlier (prepin, or a frame that left the cache)
+        std::lock_guard<std::mutex> lk(m_);
+        for (size_t i = 0; i < spare_.size(); ++i)
+            if (spare_[i].second == cap) {
+                uint8_t* b = spare_[i].first;
+                spare_[i] = spare_.back();
+                spare_.pop_back();
+                return b;
+            }
+    }
     void* p = nullptr;
     if (cudaHostAlloc(&p, cap, cudaHostAllocPortable) != cudaSuccess) {
         std::lock_guard<std::mutex> lk(m_);
@@ -84,8 +137,8 @@ uint8_t* FrameCache::reserve(size_t cap) {
 }
 
 void FrameCache::unreserve(uint8_t* buf, size_t cap) {
-    cudaFreeHost(buf);
     std::lock_guard<std::mutex> lk(m_);
+    spare_.push_back({buf, cap});
     resident_ -= cap;
 }
 
@@ -96,7 +149,7 @@ const FrameCache::Entry* FrameCache::insert(const fs::path& p, uint8_t* buf, siz
     std::lock_guard<std::mutex> lk(m_);
     auto [it, fresh] = entries_.emplace(p.native(), e);
     if (!fresh) {   // the same path read twice in one pass: keep the first copy
-        cudaFreeHost(buf);
+        spare_.push_back({buf, cap});
         resident_ -= cap;
     }
     return &it->second;

@@ -13,6 +13,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "stackcore/tiff.h"
@@ -38,6 +39,12 @@ public:
     // Keeps the entries for `paths` whose file is unchanged, frees the rest, and sets the byte
     // budget for this job from the machine's free memory (or `budget_bytes` when > 0).
     void prepare(const std::vector<std::filesystem::path>& paths, size_t budget_bytes = 0);
+    // Pins the buffers the frames of `paths` that are not resident will be read into (each of `cap` bytes, as far
+    // as the budget goes), on a few threads. A job calls it before it loads the GPUs: with two cards loaded the
+    // driver has a ceiling of some 73 GiB on all the host memory a process has ever page-locked, freed or not,
+    // and what was pinned before the cards were loaded does not count towards it (FINDINGS 55). For the same
+    // reason a buffer that is no longer needed is kept for the next frame of its size instead of being freed.
+    void prepin(const std::vector<std::filesystem::path>& paths, size_t cap);
     void clear();
 
     const Entry* find(const std::filesystem::path& p);   // nullptr when the frame is not resident
@@ -55,11 +62,13 @@ public:
     size_t bytes() const { return resident_; }
     int count() const { return (int)entries_.size(); }
     size_t budget() const { return budget_; }
+    size_t spare_bytes() { std::lock_guard<std::mutex> lk(m_); size_t b = 0; for (auto& s : spare_) b += s.second; return b; }
 
 private:
     std::map<std::wstring, Entry> entries_;
     std::mutex m_;
-    size_t resident_ = 0;   // bytes pinned: resident entries plus reserved buffers
+    std::vector<std::pair<uint8_t*, size_t>> spare_;   // pinned buffers waiting for a frame (buffer, capacity)
+    size_t resident_ = 0;   // bytes pinned: resident entries plus reserved buffers (the spares are not counted)
     size_t budget_ = 0;
 };
 

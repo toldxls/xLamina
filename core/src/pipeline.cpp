@@ -29,11 +29,14 @@ namespace stackcore {
 
 namespace fs = std::filesystem;
 
+// a failed CUDA call ends the function: 4 when it was out of memory (run_stack answers that with a render in strips or
+// at 1/4 depth resolution), 1 otherwise
 #define CK(x)                                                                                   \
     do {                                                                                        \
         cudaError_t e_ = (x);                                                                   \
         if (e_ != cudaSuccess) {                                                                \
             logf("CUDA error: %s (%s:%d)", cudaGetErrorString(e_), "pipeline.cpp", __LINE__);         \
+            if (e_ == cudaErrorMemoryAllocation) { cudaGetLastError(); return 4; }              \
             return 1;                                                                           \
         }                                                                                       \
     } while (0)
@@ -131,22 +134,34 @@ static int load_frame_to_device(const fs::path& in, TiffInfo& info, float*& d_rg
     size_t bytes = 0;
     if (const FrameCache::Entry* e = cache ? cache->find(in) : nullptr) { src = e->buf + e->offset; bytes = e->bytes; }
     else {
-        CK(cudaHostAlloc((void**)&h, cap, cudaHostAllocPortable));
+        // ordinary memory: a frame pinned and unpinned for every call counted towards the driver's ceiling for
+        // page-locked memory with two GPUs (FINDINGS 55), and one frame's upload does not need it
+        h = (uint8_t*)_aligned_malloc(cap, 4096);
+        if (!h) { logf("out of host memory for a frame (%zu bytes)", cap); return 1; }
         TiffRead rd = tiff_read_pixels(in, info, h, cap);
-        if (!rd.ok()) { logf("read failed: %s", rd.error.c_str()); return 1; }
+        if (!rd.ok()) { logf("read failed: %s", rd.error.c_str()); _aligned_free(h); return 1; }
         src = h + rd.data_offset_in_buf;
         bytes = rd.bytes;
     }
-    uint8_t* d_src;
+    uint8_t* d_src = nullptr;
+    d_rgb = nullptr;
     size_t npx = (size_t)info.width * info.height;
+    // whatever fails, the upload buffer and the pinned copy go, and a failed load leaves no float image behind
+    struct Tidy { uint8_t*& d_src; uint8_t*& h; float*& d_rgb; bool ok = false;
+                  ~Tidy() { cudaFree(d_src); if (h) _aligned_free(h); if (!ok) { cudaFree(d_rgb); d_rgb = nullptr; } } } tidy{d_src, h, d_rgb};
+    size_t fr = 0, tot = 0;
+    CK(cudaMemGetInfo(&fr, &tot));
+    if (fr < bytes + npx * 3 * sizeof(float) + ((size_t)256 << 20)) {   // never past the card's free memory (FINDINGS 55)
+        logf("GPU memory ran out (a %u x %u frame needs %.2f GB, %.2f GB free)", info.width, info.height, (bytes + npx * 12) / 1e9, fr / 1e9);
+        return 4;
+    }
     CK(cudaMalloc(&d_src, bytes));
     CK(cudaMalloc(&d_rgb, npx * 3 * sizeof(float)));
     CK(cudaMemcpy(d_src, src, bytes, cudaMemcpyHostToDevice));
     convert_to_rgb_f32(d_src, info, d_rgb, nullptr, 0);
     CK(cudaGetLastError());
     CK(cudaDeviceSynchronize());
-    CK(cudaFree(d_src));
-    if (h) CK(cudaFreeHost(h));
+    tidy.ok = true;
     return 0;
 }
 // ----------------------------------------------------------------------------- fold (pass 1)
@@ -417,6 +432,30 @@ FrameSharpness frame_sharpness(const std::vector<double>& energy, double cutoff)
 }
 
 
+// the depth volume's grid and radii for an output grid
+static VolumeParams volume_params(const Pass1Options& po, const Grid& g) {
+    VolumeParams vp;
+    double ds = po.depth_fraction / g.scale;   // depth res = fixed fraction of the sensor
+    vp.dw = std::max(16, (int)std::nearbyint(g.out_w() * ds));
+    vp.dh = std::max(16, (int)std::nearbyint(g.out_h() * ds));
+    vp.fm_radius = (float)std::max(0.8, po.depth_fm_px * po.depth_fraction);
+    vp.agg_r = (int)std::nearbyint(po.vol_agg_px * po.depth_fraction);
+    if (po.vol_agg_px * po.depth_fraction < 1.0) vp.agg_r = 0;
+    return vp;
+}
+
+// the share of the output rectangle the first GPU had room for in the last pass 1 (1 = all of it): run_stack sizes
+// the strips from it
+static std::atomic<double> g_slices_fit{1.0};
+
+// FoldState::bytes() for a state not yet allocated
+static size_t fold_state_bytes(int w, int h, int levels, bool with_a) {
+    const std::vector<LevelShape> shapes = pyramid_shapes(w, h, levels);
+    size_t b = (size_t)w * h * ((with_a ? 24 + 8 : 0) + 4 + 2 + 12 + 8 + 4);
+    for (int l = 0; l < levels - 1; ++l) b += (size_t)shapes[l].w * shapes[l].h * (4 + 12 + 2);
+    return b + (size_t)shapes.back().w * shapes.back().h * 24;
+}
+
 int run_pass1(const Pass1Options& po, Pass1& P) {
     Grid g = po.g;
     StreamerOptions opt = po.opt;
@@ -464,19 +503,16 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
     int ow = g.out_w(), oh = g.out_h();
     FoldParams fp;
     fp.levels = n_levels(ow, oh);
+    if (po.levels > 0) {   // a strip of a larger render: the whole frame's depth, as far as the strip's size carries it
+        int most = 2;
+        while ((std::min(ow, oh) >> most) >= 4) ++most;
+        fp.levels = std::clamp(po.levels, 2, most);
+    }
     fp.radius = (float)std::max(0.8, po.radius_px * g.scale);
     fp.power = (float)po.power;
     fp.c_radius = po.c_radius_px > 0 ? (float)(po.c_radius_px * g.scale) : 0.f;
     fp.with_a = po.with_a;
-    VolumeParams vp;
-    {
-        double ds = po.depth_fraction / g.scale;   // depth res = fixed fraction of the sensor
-        vp.dw = std::max(16, (int)std::nearbyint(ow * ds));
-        vp.dh = std::max(16, (int)std::nearbyint(oh * ds));
-        vp.fm_radius = (float)std::max(0.8, po.depth_fm_px * po.depth_fraction);
-        vp.agg_r = (int)std::nearbyint(po.vol_agg_px * po.depth_fraction);
-        if (po.vol_agg_px * po.depth_fraction < 1.0) vp.agg_r = 0;
-    }
+    VolumeParams vp = volume_params(po, g);
     const int K = (int)paths.size();
     P.g = g; P.fp = fp; P.vp = vp;
 
@@ -487,15 +523,88 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
     if (devs.empty()) for (int i = 0; i < ndev; ++i) devs.push_back(i);
     P.devs = devs;
     std::vector<FoldDev> ctx(ndev);
+    // However this pass ends (finished, a CUDA error, an exception out of a kernel wrapper, a cancel), the cards get
+    // back everything it allocated: the render that follows a pass that ran out of memory (in strips, or at 1/4)
+    // needs that memory, and found the cards still full before
+    struct Release {
+        std::vector<FoldDev>& ctx; std::vector<int>& devs; const bool volume;
+        ~Release() {
+            for (auto& D : ctx) {
+                if (D.dev < 0) continue;
+                cudaSetDevice(D.dev);
+                // a driver that has run out of page-locked memory answers every call with "out of memory" and never
+                // finishes what is queued: nothing can be freed then, and a synchronize would not return (FINDINGS 54)
+                size_t fr_ = 0, tot_ = 0;
+                if (cudaMemGetInfo(&fr_, &tot_) != cudaSuccess) { D.dev = -1; continue; }
+                if (D.fold_s) cudaStreamSynchronize(D.fold_s);
+                for (auto& S : D.slots) {
+                    cudaFree(S.d_rgb); cudaFree(S.d_scratch); cudaFree(S.d_warp); S.sc.free();
+                    if (volume) S.vsc.free();
+                    if (S.ready) cudaEventDestroy(S.ready);
+                    if (S.done) cudaEventDestroy(S.done);
+                    S.fp.free();
+                }
+                D.slots.clear();
+                for (auto& p : D.fm16) if (p) { cudaFree(p); p = nullptr; }
+                for (auto& p : D.lum16) if (p) { cudaFree(p); p = nullptr; }
+                D.bp.free();
+                D.st.free();
+                D.rc.free();
+                cudaFree(D.d_energy);
+                D.d_energy = nullptr;
+                if (D.fold_s) cudaStreamDestroy(D.fold_s);
+                D.fold_s = nullptr;
+                D.dev = -1;
+            }
+            cudaGetLastError();
+            if (!devs.empty()) cudaSetDevice(devs[0]);
+        }
+    } release{ctx, devs, volume};
     size_t npx_full = (size_t)g.W * g.H, npx_out = (size_t)ow * oh;
     opt.streams_by_device.clear();
     auto t_setup = std::chrono::steady_clock::now();
     std::vector<int> dropped;   // cards that cannot hold the volume slices beside their state (the 3070 at 1/2 resolution)
     std::vector<int> caps;      // per kept card: the most frames it may take (0 = any number)
+    long long room_total = 0;   // the frames whose volume slices the kept cards hold between them
     for (int d : devs) {
         auto& D = ctx[d];
         D.dev = d;
         CK(cudaSetDevice(d));
+        // slots per GPU from the memory left after the state: each needs the frame buffers,
+        // the measure scratch and the streamer's raw upload buffer, plus a working margin
+        FoldScratch probe;
+        probe.w = ow; probe.h = oh; probe.levels = fp.levels; probe.shapes = pyramid_shapes(ow, oh, fp.levels);
+        // what a slot holds whatever the output rectangle (the frame as read and as float RGB), and what follows it
+        const size_t slot_fixed = npx_full * 12 + (g.scale != 1.0 ? (size_t)g.work_w() * g.work_h() * 12 : 0) + t0.pixel_bytes() + 2 * kReadAlign;
+        size_t slot_bytes = npx_full * 12 + (g.scale != 1.0 ? (size_t)g.work_w() * g.work_h() * 12 : 0) + npx_out * 12 + probe.bytes();
+        if (hooks.frame) slot_bytes += AsyncPreview::view_bytes(hooks, ow, oh);
+        size_t per_slot = slot_bytes + t0.pixel_bytes() + 2 * kReadAlign;
+        const size_t slice = volume ? (size_t)vp.dw * vp.dh * 4 : 0;
+        size_t fr, tot;
+        CK(cudaMemGetInfo(&fr, &tot));
+        // Nothing is allocated that the card does not have: past its free memory the Windows driver hands out
+        // system memory instead of failing, and with tens of GB of frames page-locked that ended with every CUDA
+        // call refused for the rest of the process (FINDINGS 54, 55). The state and one slot are the least a card
+        // needs; the share of the rectangle that would fit (the state, the slot's output-sized part and the slices
+        // all scale with its area) tells run_stack how many strips to cut
+        const size_t state_bytes = fold_state_bytes(ow, oh, fp.levels, fp.with_a);
+        {
+            const double room = (double)fr - (double)(512u << 20) - (double)slot_fixed;
+            const double area = (double)state_bytes + (double)(per_slot - slot_fixed) + (double)slice * K;
+            const bool sole = d == devs[0] || devs.size() - dropped.size() == 1;
+            if (sole && area > 0) g_slices_fit = std::clamp(room / area, 0.02, 1.0);
+            if ((double)fr < (double)state_bytes + (double)per_slot + (double)(512u << 20)) {
+                if (sole) {
+                    logf("GPU %d: %.2f GB free, short of the %.2f GB for the %d x %d fold state and one frame slot\n", d, fr / 1e9,
+                         (state_bytes + per_slot) / 1e9, ow, oh);
+                    return 4;
+                }
+                logf("GPU %d: left out of this job, not enough memory for the fold state and one frame slot (%.2f GB free)\n", d, fr / 1e9);
+                D.dev = -1;
+                dropped.push_back(d);
+                continue;
+            }
+        }
         CK(cudaStreamCreateWithFlags(&D.fold_s, cudaStreamNonBlocking));
         D.st.alloc(d, ow, oh, fp.levels, fp.with_a);
         D.rc.upload(po, g);
@@ -503,31 +612,33 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         D.lum16.assign(K, nullptr);
         CK(cudaMalloc(&D.d_energy, (size_t)K * sizeof(double)));
         CK(cudaMemset(D.d_energy, 0, (size_t)K * sizeof(double)));
-        // slots per GPU from the memory left after the state: each needs the frame buffers,
-        // the measure scratch and the streamer's raw upload buffer, plus a working margin
-        FoldScratch probe;
-        probe.w = ow; probe.h = oh; probe.levels = fp.levels; probe.shapes = pyramid_shapes(ow, oh, fp.levels);
-        size_t slot_bytes = npx_full * 12 + (g.scale != 1.0 ? (size_t)g.work_w() * g.work_h() * 12 : 0) + npx_out * 12 + probe.bytes();
-        if (hooks.frame) slot_bytes += AsyncPreview::view_bytes(hooks, ow, oh);
-        size_t per_slot = slot_bytes + t0.pixel_bytes() + 2 * kReadAlign;
-        size_t fr, tot;
         CK(cudaMemGetInfo(&fr, &tot));
         // the depth-volume slices stay on the GPU until the aggregation (4 bytes per depth pixel per frame). A
         // card keeps as many slots as leave room for every frame's slice. Failing that, the first card runs on
         // one slot regardless (the depth stage needs it), and another card takes a capped share of the frames
         // (what its slice room allows beside one slot) or, if that is under a quarter of the stack, sits the
         // job out rather than run out of memory mid-pass (the 3070 at 1/2 resolution; FINDINGS 32)
-        const size_t slice = volume ? (size_t)vp.dw * vp.dh * 4 : 0;
         const size_t avail = fr > (512u << 20) ? fr - (512u << 20) : 0;
-        int S = 0, cap = 0;
+        int S = 0, cap = 0, holds = K;   // holds: the frames whose slices this card has room for
         for (int s = opt.streams_per_gpu; s >= 1 && S == 0; --s)
             if (avail >= (size_t)s * per_slot + slice * K) S = s;
         if (S == 0) {
             size_t room = avail > per_slot ? avail - per_slot : 0;
             int frames_fit = slice ? (int)std::min<size_t>((size_t)K, room / slice) : K;
+            holds = frames_fit;
             if (d == devs[0] || devs.size() - dropped.size() == 1) {
                 S = 1;
-                if (frames_fit < K) logf("GPU %d: short of memory for the volume slices (%.2f GB free): %d of %d frames fit\n", d, fr / 1e9, frames_fit, K);
+                if (frames_fit < K) {
+                    logf("GPU %d: short of memory for the volume slices (%.2f GB free): %d of %d frames fit\n", d, fr / 1e9, frames_fit, K);
+                    // One GPU holds every slice, so this pass would run out of memory part-way: stop before the slots
+                    // are allocated and the frames read, and let the caller render in strips. With a second GPU the
+                    // slices are shared and the pass fits, but the depth stage then puts the whole volume on this
+                    // card: with 92 % of the frames fitting here (241 of 261, 1.0 GB free before the SGM) eight
+                    // renders of eight went through; with 86 % (225 of 261, the same stack with output A, 0.5 GB
+                    // free) renders ended with the driver refusing every call (FINDINGS 54). Under nine tenths the
+                    // render goes to strips as well
+                    if (po.stop_if_short && (devs.size() == 1 || frames_fit < 0.90 * K)) return 4;
+                }
             } else if (frames_fit >= K / 4) {
                 S = 1;
                 cap = frames_fit;
@@ -545,6 +656,7 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
             }
         }
         const int fit = S;
+        room_total += holds;
         opt.streams_by_device.push_back(S);
         caps.push_back(cap);
         D.slots.resize(S);
@@ -571,6 +683,13 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
     }
     opt.devices = devs;   // streams_by_device and the caps are parallel to this list
     opt.max_frames_by_device = caps;
+    if (volume && po.stop_if_short && room_total < K) {
+        // the cards together cannot hold every frame's slice: the pass would run out of memory part-way, so it stops
+        // here, before a frame is read, and the caller renders in strips
+        logf("the GPUs hold the volume slices of %lld of %d frames between them: not in one piece\n", room_total, K);
+        g_slices_fit = room_total / (double)K;
+        return 4;
+    }
 
     auto on_frame = [&](const DeviceFrame& f) {
         auto& D = ctx[f.dev];
@@ -615,6 +734,9 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
     opt.cancel = hooks.cancel;
     StreamerStats st = stream_frames(run_paths, opt, on_frame);
     for (auto& e : st.errors) logf("  error: %s\n", e.c_str());
+    // a card ran out of memory part-way: the pass is not used (the caller renders again in strips or at 1/4), and
+    // the streams are left as they are, since after the driver's page-locked ceiling they never finish
+    for (auto& e : st.errors) if (strstr(e.c_str(), "out of memory")) return 4;
     for (int d : devs) {
         CK(cudaSetDevice(d));
         CK(cudaStreamSynchronize(ctx[d].fold_s));
@@ -701,9 +823,12 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         PinnedVec<uint16_t>& lum_all = P.lum_all;
         PinnedVec<float>& V_all = P.V_all;
         const bool keep_fm = po.host_state;
-        if (keep_fm) fm_all.resize(nd * K);
-        lum_all.resize(nd * K);
-        V_all.resize(nd * K);
+        // ordinary memory, not page-locked: with the frames resident (50 GB for 261 16-bit frames) another 11 GB of
+        // pinned volume took the two-GPU job past what the driver can map for the second card, after which every
+        // CUDA call in the process fails; the copies are no slower for it (FINDINGS 54)
+        if (keep_fm) fm_all.resize(nd * K, false);
+        lum_all.resize(nd * K, false);
+        V_all.resize(nd * K, false);
         std::vector<char> filled(K, 0);   // a frame no GPU saw (probe failed) leaves its plane to be zeroed below
         int done = 0;
         for (int d : devs) {
@@ -758,6 +883,7 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
                 gaussian_blur(d_Vb, d_flat, d_T2, vp.dw, vp.dh, gr2, s);
                 snap(d_flat);
                 float lo = percentile(d_flat, d_T2, nd, 20.0, s), hi = percentile(d_flat, d_T2, nd, 90.0, s);
+                if (po.flat_lo >= 0 && po.flat_hi > po.flat_lo) { lo = po.flat_lo; hi = po.flat_hi; }   // the whole frame's, for a strip
                 flatness(d_flat, lo, std::max(0.5f * (hi - lo), 1e-6f), d_flat, nd, s);
                 snap(d_flat);
                 if (dbg_buf) {
@@ -815,25 +941,58 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         P.slices = done;
     }
 
-    for (int d : devs) {
-        auto& D = ctx[d];
-        CK(cudaSetDevice(d));
-        for (auto& S : D.slots) {
-            cudaFree(S.d_rgb); cudaFree(S.d_scratch); cudaFree(S.d_warp); S.sc.free();
-            if (volume) S.vsc.free();
-            cudaEventDestroy(S.ready); cudaEventDestroy(S.done);
-            S.fp.free();
-        }
-        D.bp.free();
-        D.st.free();
-        D.rc.free();
-        cudaStreamDestroy(D.fold_s);
-    }
-    if (st.errors.empty()) return 0;
+    if (st.errors.empty()) return 0;   // (`release` frees the cards' buffers on every way out)
     // a GPU that ran out of memory for the depth slices (the most likely place at 1/2 resolution): tell run_stack
     // to render again at 1/4 instead of failing the job
     for (auto& e : st.errors) if (strstr(e.c_str(), "out of memory")) return 4;
     return 1;
+}
+
+// The flat mask's two texture thresholds from a merged fold state on the current device: the guide and the chain of
+// run_pass1's volume stage (guide blurred, |Laplacian|, spread over the reach, the 20th and 90th percentiles), without
+// the volume. The strips take them from a fold of the whole frame.
+static int flat_limits(const FoldState& st, const Pass1Options& po, const VolumeParams& vp, int ow, int oh, cudaStream_t s, float& lo, float& hi) {
+    const size_t npx_out = (size_t)ow * oh, nd = (size_t)vp.dw * vp.dh;
+    struct DevFree { std::vector<void*> p; ~DevFree() { for (void* q : p) cudaFree(q); } } dfree;
+    auto dev = [&](size_t bytes, float*& d) -> cudaError_t {
+        size_t fr = 0, tot = 0;   // not past the card's free memory (FINDINGS 55)
+        if (cudaMemGetInfo(&fr, &tot) == cudaSuccess && fr < bytes + ((size_t)256 << 20)) return cudaErrorMemoryAllocation;
+        cudaError_t e = cudaMalloc(&d, bytes);
+        if (e == cudaSuccess) dfree.p.push_back(d);
+        return e;
+    };
+    float *d_base, *d_coll, *d_t1, *d_t2, *d_guide, *d_ga, *d_flat, *d_lap, *d_tmp;
+    CK_MEM(dev((size_t)st.shapes.back().w * st.shapes.back().h * 3 * sizeof(float), d_base));
+    CK_MEM(dev(npx_out * 3 * sizeof(float), d_coll));
+    CK_MEM(dev(npx_out * 3 * sizeof(float), d_t1));
+    CK_MEM(dev(npx_out * 3 * sizeof(float), d_t2));
+    CK_MEM(dev(npx_out * sizeof(float), d_guide));
+    CK_MEM(dev(nd * sizeof(float), d_ga));
+    CK_MEM(dev(nd * sizeof(float), d_flat));
+    CK_MEM(dev(nd * sizeof(float), d_lap));
+    CK_MEM(dev(nd * sizeof(float), d_tmp));
+    std::vector<const float*> d_coef(st.c_coef.begin(), st.c_coef.end());
+    fold_base_f32(st, d_base, s);
+    collapse_pyramid(d_coef, d_base, st.shapes, d_coll, d_t1, d_t2, s);
+    luma(d_coll, d_guide, npx_out, s);
+    clip01(d_guide, npx_out, s);
+    AreaResizer rz;
+    rz.build(ow, oh, vp.dw, vp.dh);
+    rz.run(d_guide, d_ga, 1, s);
+    DevGaussian gr1, gr2;   // both alive until the stream has run (FINDINGS 38)
+    gr1.build(std::max(1.0, po.flat_reach_px * po.depth_fraction / 4));
+    gr2.build(std::max(1.0, po.flat_reach_px * po.depth_fraction));
+    gaussian_blur(d_ga, d_flat, d_tmp, vp.dw, vp.dh, gr1, s);
+    laplacian3_abs(d_flat, d_lap, vp.dw, vp.dh, s);
+    gaussian_blur(d_lap, d_flat, d_tmp, vp.dw, vp.dh, gr2, s);
+    lo = percentile(d_flat, d_tmp, nd, 20.0, s);
+    hi = percentile(d_flat, d_tmp, nd, 90.0, s);
+    cudaError_t e = cudaStreamSynchronize(s);
+    rz.free();
+    gr1.free();
+    gr2.free();
+    CK(e);
+    return 0;
 }
 
 // ----------------------------------------------------------------------------- stack: the whole pipeline
@@ -957,6 +1116,9 @@ static void limit_stack_options(StackOptions& so) {
     lim("--soft-px", so.soft_px, 64);
     lim("--dark-reach", so.dark_reach_px, 1024);
     lim("--end-vote", so.end_vote_px, 1024);
+    lim("--strip-overlap", so.strip_overlap_px, 4096);
+    if (so.strip_overlap_px < 64) so.strip_overlap_px = 64;
+    so.strips = std::clamp(so.strips, 0, 16);
     so.refine_r = std::clamp(so.refine_r, 0, 1000);
     so.streams = std::clamp(so.streams, 1, 16);
     po.opt.streams_per_gpu = std::clamp(po.opt.streams_per_gpu, 1, 16);
@@ -1011,6 +1173,8 @@ static bool parse_stack_option_raw(const std::string& a, const std::string& v, S
     }
     else if (a == "--flat-end-soft") so.flat_end_soft = atof(v.c_str());
     else if (a == "--flat-blend") so.flat_blend = atof(v.c_str());   // frames (FINDINGS 41)
+    else if (a == "--strips") so.strips = atoi(v.c_str());
+    else if (a == "--strip-overlap") so.strip_overlap_px = atof(v.c_str());
     else if (a == "--b-reference") {   // the 0.5.x B, bit-identical: the 1/4 volume with the priors and no 0.6.x additions
         so.po.depth_fraction = 0.25; so.dark_prior = 1.0; so.dark_reach_px = 0; so.end_vote_px = 0; so.po.flat_blur_px = 0; so.sgm_scale = false;
         so.conf_noise_gamma = 0; so.sgm_end_frames = false;   // 0.6.11's noise-adaptive ramp and 0.6.10's end-frame argmin off too
@@ -1052,7 +1216,9 @@ static void downsample_preview(const std::vector<float>& img, int w, int h, int 
         }
 }
 
-static int run_stack_once(StackOptions& so);
+struct NoiseEstimate;
+static int run_stack_once(StackOptions& so, NoiseEstimate* noise_cache);
+static int run_stack_strips(StackOptions& so, int n);
 // the frames' noise, measured once per stack (and once per sweep): the finalize's pyramid MADs and the depth
 // volume's focus-measure floor (FINDINGS 38)
 struct NoiseEstimate {
@@ -1061,6 +1227,33 @@ struct NoiseEstimate {
 };
 static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std::chrono::steady_clock::time_point t_all,
                            NoiseEstimate* noise_cache);
+static int measure_noise(const StackOptions& so, const Pass1& P, cudaStream_t s, NoiseEstimate& ne);
+
+// A job's frame cache made ready before the GPUs are loaded: stale frames out, the budget set and, for a stack
+// that is large for two GPUs, the buffers its frames will be read into pinned now. With two cards loaded the driver
+// has a ceiling of some 73 GiB on all the host memory the process has ever page-locked, freed or not; past it every
+// CUDA call fails for the rest of the process. What is pinned before the cards are loaded does not count (FINDINGS
+// 55). A stack under 48 GiB pins as it reads, as it always did (pinning 50 GB up front costs 10 s that the reading
+// otherwise hides); the 261 16-bit frames of 6960 x 4640 are 47 GiB.
+static void ready_cache(FrameCache* cache, const std::vector<fs::path>& paths, const std::vector<int>& devices) {
+    if (!cache) return;
+    cache->prepare(paths);
+    if (paths.empty()) return;
+    int n = (int)devices.size();
+    if (n == 0 && cudaGetDeviceCount(&n) != cudaSuccess) { cudaGetLastError(); return; }
+    if (n < 2) return;
+    TiffInfo t0 = tiff_probe(paths[0]);
+    if (!t0.ok()) return;
+    const size_t cap = tiff_buffer_capacity(t0.pixel_bytes());
+    if ((double)cap * (double)paths.size() > 48.0 * 1073741824.0) {
+        auto t0p = std::chrono::steady_clock::now();
+        const size_t before = cache->spare_bytes();
+        cache->prepin(paths, cap);
+        const size_t got = cache->spare_bytes() - std::min(before, cache->spare_bytes());
+        if (got) logf("frames: %.1f GB of buffers page-locked before the GPUs are loaded, %.1f s\n", got / 1e9,
+                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0p).count());
+    }
+}
 
 // Returns the GPUs' pooled memory (cudaMallocAsync keeps freed blocks for the process): another xLamina or
 // stackcli on the same cards would otherwise find them short between renders.
@@ -1077,29 +1270,378 @@ static void trim_pools() {
 // The fusion, with a fallback: when the GPU memory runs short for the depth volume (the 1/2-resolution default
 // needs ~5 GB beside the state; another process may hold part of the card), the render is repeated at 1/4
 // instead of failing (FINDINGS 32).
-int run_stack(StackOptions& so) {
-    limit_stack_options(so);   // options set directly (the GUI, a job built in code) pass the same limits as parsed ones
-    int rc;
+// one attempt at the fusion; running out of GPU memory comes back as 4, whichever way it surfaced
+static int try_stack(StackOptions& so, int strips) {
     try {
-        rc = run_stack_once(so);
+        return strips >= 2 ? run_stack_strips(so, strips) : run_stack_once(so, nullptr);
     } catch (const std::exception& e) {
         if (!strstr(e.what(), "memory")) throw;
         logf("%s", e.what());
-        rc = 4;
+        return 4;
     }
+}
+
+// False when the first GPU cannot give 1 MB after a failed attempt has freed everything: the state the driver is left
+// in once page-locked host memory ran out (FINDINGS 54). No further attempt can work in this process then.
+static bool cuda_usable(const StackOptions& so) {
+    const auto& dv = so.po.opt.devices;
+    void* p = nullptr;
+    size_t fr = 0, tot = 0;
+    cudaError_t e = cudaSetDevice(dv.empty() ? 0 : dv[0]);
+    if (e == cudaSuccess) e = cudaMemGetInfo(&fr, &tot);
+    // a card that answers but is full (another program holds it) is not this state: the next attempt may still fit
+    if (e == cudaSuccess && fr >= ((size_t)2 << 20)) e = cudaMalloc(&p, (size_t)1 << 20);
+    if (p) cudaFree(p);
+    cudaGetLastError();
+    return e == cudaSuccess;
+}
+
+int run_stack(StackOptions& so) {
+    limit_stack_options(so);   // options set directly (the GUI, a job built in code) pass the same limits as parsed ones
+    int rc;
+    auto dead = [&]() {   // after an attempt that ran out of memory: is there anything left to try with?
+        trim_pools();
+        if (cuda_usable(so)) return false;
+        logf("the GPU driver gives no memory back to this process any more (out of page-locked memory): close xLamina, open it again and render once more");
+        return true;
+    };
+    if (so.strips >= 2) {
+        rc = try_stack(so, so.strips);
+        if (rc == 5) return 2;   // the strip count asked for does not fit the rectangle: an option error, said in the log
+    } else {
+        g_slices_fit = 1.0;
+        rc = try_stack(so, 1);
+        if (rc == 4 && dead()) return 1;
+        if (rc == 4 && so.strips == 0 && !so.hooks.cancelled()) {
+            // strips before a coarser volume: the first count from the share of the volume that fitted, then one more
+            // strip per attempt while the memory still runs short
+            const Grid& g = so.po.g;
+            const double L = std::max(g.x1 - g.x0, g.y1 - g.y0) + 1.0, ov = so.strip_overlap_px;
+            const double room = 0.9 * g_slices_fit.load() * L;   // the longest strip that should fit
+            int n = room > ov + 1 ? (int)std::ceil((L - ov) / (room - ov)) : 2;
+            for (n = std::clamp(n, 2, 16); n <= 16 && rc == 4 && !so.hooks.cancelled(); ++n) {
+                logf("GPU memory ran short for the whole frame: rendering it in %d strips", n);
+                trim_pools();
+                rc = try_stack(so, n);
+                if (rc == 4 && dead()) return 1;
+            }
+            if (rc == 5) rc = 4;   // no strip count fits the rectangle: on to the coarser volume
+        }
+    }
+    if (rc == 4 && dead()) return 1;
     if (rc == 4 && so.po.depth_fraction > 0.25) {
         logf("GPU memory ran short at depth resolution %g: rendering again at 1/4", so.po.depth_fraction);
         trim_pools();
         so.po.depth_fraction = 0.25;
-        rc = run_stack_once(so);
+        rc = try_stack(so, so.strips >= 2 ? so.strips : 1);
     }
     trim_pools();
     return rc;
 }
 
-static int run_stack_once(StackOptions& so) {
+// The fusion in strips (StackOptions::strips): the output rectangle cut along its longer side into n overlapping
+// strips, each a whole run_stack_once of its own rectangle, then feathered together and written as one render.
+// What depends on the whole frame is shared: the noise estimate (the confidence ramp and C's gate follow it, and
+// a strip's own estimate differs by several percent from its neighbour's) and the pyramid depth.
+static int run_stack_strips(StackOptions& so, int n) {
+    auto t_all = std::chrono::steady_clock::now();
+    auto since = [](std::chrono::steady_clock::time_point t) { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count(); };
+    const Hooks hooks = so.hooks;
+    Pass1Options& po = so.po;
+    // The rectangle's sides become multiples of 4 sensor px (up to 3 px off the right and the bottom). The depth
+    // grid is 1/2 or 1/4 of the output grid, rounded: for an odd side the ratio is not whole (6585 px to 3292 is
+    // 2.0003), the depth grid slides against the output grid across the frame, and a strip, cut at even px, has
+    // another grid than the whole frame. With odd sides the confidence was the same as the unstripped render's in
+    // 45 % of the pixels, with even sides in 96 % (FINDINGS 55).
+    {
+        const int cut_x = (po.g.x1 - po.g.x0 + 1) % 4, cut_y = (po.g.y1 - po.g.y0 + 1) % 4;
+        if (cut_x || cut_y) {
+            po.g.x1 -= cut_x;
+            po.g.y1 -= cut_y;
+            logf("strips: the rectangle is trimmed by %d x %d px to sides that are multiples of 4", cut_x, cut_y);
+        }
+    }
+    const Grid g = po.g;
+    const int ow = g.out_w(), oh = g.out_h();
+    const bool along_x = g.x1 - g.x0 >= g.y1 - g.y0;
+    const int L = (along_x ? g.x1 - g.x0 : g.y1 - g.y0) + 1;   // sensor px along the cut side
+    // strip rectangles: even starts and lengths, so a strip's pixels are the whole frame's at either scale
+    // a strip starts on the coarsest pyramid level's grid of the whole frame (and so on the depth volume's): its
+    // pyramid then holds the whole frame's samples, and C away from the strip's edges is the unstripped C exactly.
+    // The starts are rounded down to that grid, so the overlap is at least two of its steps
+    const int full_levels = n_levels(ow, oh);
+    const int step = (int)std::lround((1 << (full_levels - 1)) / g.scale);
+    int ov = std::max(((int)so.strip_overlap_px + 1) & ~1, 2 * step);
+    int len = ((L + (n - 1) * ov + n - 1) / n + 1) & ~1;
+    if (len < 2 * ov + 64 || len >= L) {
+        logf("strips: %d strips with %d px of overlap do not fit %d px", n, ov, L);
+        return 5;   // not a count this rectangle can take: run_stack stops adding strips, or reports the option
+    }
+    std::vector<int> a(n), b(n);
+    for (int i = 0; i < n; ++i) {
+        a[i] = (int)((double)i * (L - len) / (n - 1)) / step * step;
+        b[i] = i == n - 1 ? L - 1 : a[i] + len - 1;
+    }
+    // the starts were rounded down to the grid, which can leave an overlap short of the one asked for (392 px of 512
+    // with 256 px steps): a strip then runs on to the full overlap with the next
+    for (int i = 0; i + 1 < n; ++i) b[i] = std::max(b[i], std::min(L - 1, a[i + 1] + ov - 1));
+    for (int i = 0; i + 1 < n; ++i)
+        if (b[i] - a[i + 1] + 1 < ov / 2) { logf("strips: %d strips of %d px leave too little overlap on the %d px grid", n, len, step); return 5; }
+
+    // the frames: listed once, resident once for every strip
+    std::vector<fs::path> paths = po.paths;
+    std::vector<Similarity> T = po.T;
+    if (paths.empty() && !read_list(po.list, paths, T)) return 1;
+    if (paths.empty() || T.size() != paths.size()) { logf("no frames to stack\n"); return 1; }
+    std::unique_ptr<FrameCache> own_cache;
+    struct Unlink { FrameCache*& p; bool mine; ~Unlink() { if (mine) p = nullptr; } } unlink{po.opt.cache, false};
+    if (so.cache_frames && !po.opt.cache) { own_cache = std::make_unique<FrameCache>(); po.opt.cache = own_cache.get(); unlink.mine = true; }
+    if (so.cache_frames && po.opt.cache) ready_cache(po.opt.cache, paths, po.opt.devices);
+    const int K = (int)paths.size();
+    const int levels = n_levels(ow, oh);
+
+    // the whole frame's noise, as an unstripped render measures it; failing that the first strip's serves them all
+    NoiseEstimate ne;
+    try {
+        if (std::string gp = gpu_problem(po.opt.devices); !gp.empty()) { logf("%s", gp.c_str()); return 1; }
+        TiffInfo t0 = tiff_probe(paths[0]);
+        if (!t0.ok()) { logf("%s: %s\n", paths[0].string().c_str(), t0.error.c_str()); return 1; }
+        Pass1 P;
+        P.g = g; P.g.W = (int)t0.width; P.g.H = (int)t0.height;
+        P.paths = paths; P.T = T;
+        P.fp.levels = levels;
+        P.vp = volume_params(po, P.g);
+        CK(cudaSetDevice(po.opt.devices.empty() ? 0 : po.opt.devices[0]));
+        cudaStream_t s;
+        CK(cudaStreamCreate(&s));
+        struct Close { cudaStream_t s; ~Close() { cudaStreamDestroy(s); } } close{s};
+        if (hooks.progress) hooks.progress("noise floor of the whole frame", 0.0);
+        if (measure_noise(so, P, s, ne)) {   // no room, or a frame that cannot be read (the first strip will say which)
+            cudaGetLastError();
+            logf("strips: the noise could not be measured on the whole frame; the first strip's estimate is used");
+            ne = NoiseEstimate{};
+        }
+    } catch (const std::exception& e) {
+        if (!strstr(e.what(), "memory")) throw;
+        logf("strips: no room to measure the noise on the whole frame; the first strip's estimate is used");
+        ne = NoiseEstimate{};
+    }
+    if (hooks.cancelled()) return 3;
+    trim_pools();
+
+    // the flat mask's thresholds are ranks over the rectangle (the flattest fifth, the 90th percentile of texture), so
+    // a strip's own would follow its content: one fold of the whole frame, without the volume, gives the frame's
+    float flat_lo = -1.f, flat_hi = -1.f;
+    if (po.flat_blur_px > 0) {
+        // When the whole frame's fold does not fit either (a 13920 x 9280 frame's state alone is 7 GB), it is folded
+        // at half size: the guide is reduced to the depth grid anyway, and the thresholds from the half-size fold
+        // were 2.4 % and 1.1 % under the full-size ones on the 261-frame stack, where strips ranking their own
+        // differed by a fifth (FINDINGS 55)
+        int r = 4;
+        for (double sc : {g.scale, 0.5}) {
+            if (r == 0 || (sc == 0.5 && g.scale != 1.0)) break;
+            r = 4;
+            try {
+                Pass1Options pp = po;
+                pp.paths = paths; pp.T = T;
+                pp.g.scale = sc;
+                pp.volume = false; pp.with_a = false; pp.host_state = false; pp.stop_if_short = false; pp.levels = 0;
+                pp.hooks = hooks;
+                Pass1 P;
+                struct FreeState { FoldState& s; ~FreeState() { s.free(); } } free_state{P.dst};
+                r = run_pass1(pp, P);
+                if (r == 0 && !hooks.cancelled()) {
+                    if (hooks.progress) hooks.progress("flat regions of the whole frame", 0.0);
+                    cudaStream_t s = nullptr;
+                    struct Close { cudaStream_t& s; ~Close() { if (s) cudaStreamDestroy(s); } } close{s};
+                    if (cudaSetDevice(P.devs[0]) != cudaSuccess || cudaStreamCreate(&s) != cudaSuccess) r = 1;
+                    else r = flat_limits(P.dst, po, volume_params(po, P.g), P.g.out_w(), P.g.out_h(), s, flat_lo, flat_hi);
+                }
+            } catch (const std::exception& e) {
+                if (!strstr(e.what(), "memory")) throw;
+                r = 4;
+            }
+            if (hooks.cancelled()) return 3;
+            cudaGetLastError();
+            trim_pools();
+            if (r == 0 && sc != g.scale) logf("strips: the whole frame folded at half size for the flat regions' thresholds");
+        }
+        if (r != 0) {
+            flat_lo = flat_hi = -1.f;
+            logf("strips: the whole frame could not be folded for the flat regions' thresholds; every strip ranks its own");
+        }
+    }
+    logf("strips: %d %s strips of %d px with %d px of overlap (%d px %s); %d pyramid levels; flat thresholds %.4g .. %.4g", n,
+         along_x ? "vertical" : "horizontal", len, ov, L, along_x ? "wide" : "high", levels, flat_lo, flat_hi);
+
+    // the feather: strip i's weight rises across the middle third of its overlap with strip i - 1 and falls across
+    // the middle third of its overlap with strip i + 1 (output px along the cut side)
+    const int No = along_x ? ow : oh;
+    std::vector<int> off(n), ext(n);
+    auto rise = [&](int i, int t) -> float {   // the weight strip i has gained over strip i - 1 at output position t
+        if (i <= 0) return 1.f;
+        if (i >= n) return 0.f;
+        double s0 = off[i], e0 = off[i - 1] + ext[i - 1], c = 0.5 * (s0 + e0), f = std::max(1.0, (e0 - s0) / 6);
+        return (float)std::clamp((t + 0.5 - (c - f)) / (2 * f), 0.0, 1.0);
+    };
+
+    std::vector<std::string> names;
+    std::vector<std::vector<float>> acc;
+    std::vector<float> depth((size_t)ow * oh, 0.f), conf((size_t)ow * oh, 0.f), noise_mad;
+    std::vector<double> energy(K, 0.0);
+    std::vector<uint8_t> icc;
+    double area = 0;
+    StackOptions::Result sum;   // the stages' seconds over the strips
+    for (int i = 0; i < n; ++i) {
+        if (hooks.cancelled()) return 3;
+        StackOptions ss = so;
+        ss.po.paths = paths; ss.po.T = T;
+        ss.po.levels = levels;
+        ss.po.flat_lo = flat_lo; ss.po.flat_hi = flat_hi;
+        (along_x ? ss.po.g.x0 : ss.po.g.y0) = (along_x ? g.x0 : g.y0) + a[i];
+        (along_x ? ss.po.g.x1 : ss.po.g.y1) = (along_x ? g.x0 : g.y0) + b[i];
+        ss.out.clear();
+        ss.note.clear();
+        StackOptions::Result res;
+        ss.result = &res;
+        // a strip's previews and frame views are on its own grid: the front end gets the stage names and, after
+        // each strip, the render so far
+        ss.hooks.preview = nullptr;
+        ss.hooks.frame = nullptr;
+        ss.hooks.view_window = nullptr;
+        if (hooks.progress) {
+            std::string pre = "strip " + std::to_string(i + 1) + " of " + std::to_string(n) + ": ";
+            ss.hooks.progress = [pre, hooks](const std::string& stage, double f) { hooks.progress(stage == "done" ? pre + "done" : pre + stage, stage == "done" ? 0.0 : f); };
+        }
+        logf("strip %d of %d: %s %d..%d", i + 1, n, along_x ? "x" : "y", (along_x ? g.x0 : g.y0) + a[i], (along_x ? g.x0 : g.y0) + b[i]);
+        if (int r = run_stack_once(ss, &ne)) return r;
+        if (hooks.cancelled()) return 3;
+        trim_pools();
+
+        off[i] = (int)std::lround(a[i] * g.scale);
+        ext[i] = along_x ? res.w : res.h;
+        if (off[i] + ext[i] > No || (along_x ? res.h != oh : res.w != ow)) { logf("strips: strip %d is %d x %d at %d, outside the %d x %d render", i + 1, res.w, res.h, off[i], ow, oh); return 1; }
+        if (i == 0) {
+            names = res.names;
+            acc.resize(names.size());
+            for (auto& im : acc) im.assign((size_t)ow * oh * 3, 0.f);
+            noise_mad = res.noise_mad;
+            icc = res.icc;
+        } else if (res.names != names) { logf("strips: strip %d returned other outputs than the first", i + 1); return 1; }
+        // strip i's finished weights need strip i + 1's start, which its rectangle already gives
+        if (i + 1 < n) { off[i + 1] = (int)std::lround(a[i + 1] * g.scale); }
+        std::vector<float> w(ext[i]);
+        for (int t = 0; t < ext[i]; ++t) {
+            float up = rise(i, off[i] + t);
+            float down = 1.f;
+            if (i + 1 < n) {   // the fall towards strip i + 1, from the rectangles (strip i + 1 is not rendered yet)
+                double s0 = off[i + 1], e0 = off[i] + ext[i], c = 0.5 * (s0 + e0), f = std::max(1.0, (e0 - s0) / 6);
+                down = 1.f - (float)std::clamp((off[i] + t + 0.5 - (c - f)) / (2 * f), 0.0, 1.0);
+            }
+            w[t] = up * down;
+        }
+        const int sw = res.w, sh = res.h;
+        auto add = [&](const std::vector<float>& src, std::vector<float>& dst, int ch) {
+            std::vector<std::thread> th;
+            const int nt = 8;
+            for (int q = 0; q < nt; ++q)
+                th.emplace_back([&, q] {
+                    for (int y = sh * q / nt; y < sh * (q + 1) / nt; ++y) {
+                        const float* sp = src.data() + (size_t)y * sw * ch;
+                        float* dp = dst.data() + ((size_t)(along_x ? y : y + off[i]) * ow + (along_x ? off[i] : 0)) * ch;
+                        const float wy = along_x ? 0.f : w[y];
+                        for (int x = 0; x < sw; ++x) {
+                            const float wt = along_x ? w[x] : wy;
+                            if (wt <= 0.f) continue;
+                            for (int c = 0; c < ch; ++c) dp[(size_t)x * ch + c] += wt * sp[(size_t)x * ch + c];
+                        }
+                    }
+                });
+            for (auto& t : th) t.join();
+        };
+        for (size_t j = 0; j < names.size(); ++j) add(res.images[j], acc[j], 3);
+        if (res.depth.size() == (size_t)sw * sh) add(res.depth, depth, 1);
+        if (res.conf.size() == (size_t)sw * sh) add(res.conf, conf, 1);
+        for (int k = 0; k < K && k < (int)res.frame_energy.size(); ++k) energy[k] += res.frame_energy[k] * (double)sw * sh;
+        area += (double)sw * sh;
+        sum.pass1_seconds += res.pass1_seconds; sum.depth_seconds += res.depth_seconds; sum.refine_seconds += res.refine_seconds;
+        sum.compose_seconds += res.compose_seconds; sum.finalize_seconds += res.finalize_seconds;
+        sum.frames_per_second += res.frames_per_second / n;
+        if (hooks.preview) {   // the render so far
+            size_t jb = std::find(names.begin(), names.end(), "B") - names.begin();
+            if (jb >= names.size()) jb = 0;
+            if (!names.empty()) { std::vector<float> small; int pw, ph; downsample_preview(acc[jb], ow, oh, hooks.preview_down, small, pw, ph); hooks.preview(names[jb], small.data(), pw, ph); }
+        }
+    }
+    for (double& e : energy) e /= std::max(area, 1.0);
+    if (hooks.preview)
+        for (size_t j = 0; j < names.size(); ++j) { std::vector<float> small; int pw, ph; downsample_preview(acc[j], ow, oh, hooks.preview_down, small, pw, ph); hooks.preview(names[j], small.data(), pw, ph); }
+
+    FrameSharpness sharp = frame_sharpness(energy, so.soft_cutoff);
+    if (sharp.threshold > 0) {
+        std::string soft;
+        for (int k = 0; k < K; ++k)
+            if (sharp.soft[k]) { char bf[64]; snprintf(bf, sizeof bf, " %s (%.2f)", paths[k].filename().string().c_str(), sharp.ratio[k]); soft += bf; }
+        logf("sharpness: %d soft frame%s (focus energy under %.2f of the neighbours')%s%s", sharp.n_soft, sharp.n_soft == 1 ? "" : "s",
+             sharp.threshold, soft.empty() ? "" : ":", soft.c_str());
+    }
+
+    // ---- write, as one render
+    auto t5 = std::chrono::steady_clock::now();
+    if (!so.out.empty()) {
+        fs::create_directories(so.out);
+        fs::path od(so.out);
+        std::vector<std::thread> writers;
+        std::atomic<int> failed{0};
+        for (size_t j = 0; j < names.size(); ++j)
+            writers.emplace_back([&, j] {
+                if (!write_tiff_rgb16((od / (names[j] + ".tif")).string(), acc[j], ow, oh, icc)) { logf("cannot write %s\n", names[j].c_str()); ++failed; }
+            });
+        for (auto& t : writers) t.join();
+        if (so.diagnostics) {   // the stitched maps; the smoothed depth and the flat mask exist per strip only
+            write_raw(od / "depth.f32", depth.data(), depth.size());
+            write_raw(od / "conf.f32", conf.data(), conf.size());
+        }
+        FILE* mf = fopen((od / "stack.txt").string().c_str(), "w");
+        if (mf) {
+            fprintf(mf, "w %d\nh %d\nframes %d\nlevels %d\nscale %g\nrect %d %d %d %d\nnoise_mad", ow, oh, K, levels, g.scale, g.x0, g.y0, g.x1, g.y1);
+            for (float v : noise_mad) fprintf(mf, " %.9g", v);
+            fprintf(mf, "\nlevel_shapes");
+            for (auto& sh : pyramid_shapes(ow, oh, levels)) fprintf(mf, " %d %d", sh.w, sh.h);
+            fprintf(mf, "\nframe_energy");
+            for (double v : energy) fprintf(mf, " %.9g", v);
+            fprintf(mf, "\nsoft_threshold %.9g\nsoft", sharp.threshold);
+            for (int k = 0; k < K; ++k) if (sharp.soft[k]) fprintf(mf, " %d", k);
+            fprintf(mf, "\noutputs");
+            for (auto& nme : names) fprintf(mf, " %s", nme.c_str());
+            fprintf(mf, "\nstrips %d %s overlap %d\n", n, along_x ? "x" : "y", ov);
+            if (!so.note.empty()) fprintf(mf, "options %s\n", so.note.c_str());
+            fclose(mf);
+        }
+        if (failed) return 1;
+        logf("wrote %zu outputs (%dx%d) in %.2f s -> %s", names.size(), ow, oh, since(t5), so.out.c_str());
+    }
+    if (so.result) {
+        auto& R = *so.result;
+        R = sum;
+        R.w = ow; R.h = oh;
+        R.names = names;
+        R.images = std::move(acc);
+        R.depth = std::move(depth); R.conf = std::move(conf);
+        R.noise_mad = noise_mad; R.icc = icc;
+        R.frame_energy = energy;
+        R.write_seconds = since(t5);
+        R.seconds = since(t_all);
+    }
+    logf("fusion total %.2f s in %d strips", since(t_all), n);
+    if (hooks.progress) hooks.progress("done", 1.0);
+    return 0;
+}
+
+static int run_stack_once(StackOptions& so, NoiseEstimate* noise_cache) {
     Pass1Options& po = so.po;
     po.volume = true;
+    po.stop_if_short = so.strips != 1;
     po.hooks = so.hooks;
     const Hooks& hooks = so.hooks;
     const std::string& out = so.out;
@@ -1119,7 +1661,7 @@ static int run_stack_once(StackOptions& so) {
         std::vector<fs::path> paths = po.paths;
         std::vector<Similarity> T;
         if (paths.empty() && !po.list.empty()) read_list(po.list, paths, T);
-        po.opt.cache->prepare(paths);
+        ready_cache(po.opt.cache, paths, po.opt.devices);
         if (own_cache) logf("frames resident in host memory: %d of %zu, budget %.1f GB\n", po.opt.cache->count(), paths.size(), po.opt.cache->budget() / 1e9);
     }
 
@@ -1136,7 +1678,7 @@ static int run_stack_once(StackOptions& so) {
         so.result->frames_per_second = P.st.seconds > 0 ? P.st.frames / P.st.seconds : 0;
     }
 
-    return fuse_from_pass1(so, P, true, t_all, nullptr);
+    return fuse_from_pass1(so, P, true, t_all, noise_cache);
 }
 
 // The fusion from a finished pass 1: the depth map, the refinement, the composition, the finalize and the
@@ -1151,26 +1693,37 @@ static int measure_noise(const StackOptions& so, const Pass1& P, cudaStream_t s,
     const size_t no = (size_t)ow * oh;
     int mid = std::max(0, K / 2 - 1);
     float* d_pair[2] = {nullptr, nullptr};
+    float *d_rgb = nullptr, *d_scr = nullptr;
+    VolumeScratch sc;
+    bool sc_on = false;
+    struct Tidy { float** pair; float*& d_rgb; float*& d_scr; VolumeScratch& sc; bool& sc_on;   // on every way out
+                  ~Tidy() { cudaFree(pair[0]); cudaFree(pair[1]); cudaFree(d_rgb); cudaFree(d_scr); if (sc_on) sc.free(); } } tidy{d_pair, d_rgb, d_scr, sc, sc_on};
+    {   // the two warped frames, one frame as read beside them, and the pyramids of the difference: not past the
+        // card's free memory (FINDINGS 55)
+        size_t fr = 0, tot = 0;
+        CK(cudaMemGetInfo(&fr, &tot));
+        const size_t need = (size_t)P.g.W * P.g.H * 16 + (P.g.scale != 1.0 ? (size_t)P.g.work_w() * P.g.work_h() * 12 : 0) + no * 60 + ((size_t)512 << 20);
+        if (fr < need) { logf("GPU memory ran out (the noise of a %d x %d rectangle needs %.2f GB, %.2f GB free)", ow, oh, need / 1e9, fr / 1e9); return 4; }
+    }
     for (int j = 0; j < 2; ++j) {
         TiffInfo info;
-        float* d_rgb = nullptr;
-        if (int r = load_frame_to_device(P.paths[std::min(K - 1, mid + j)], info, d_rgb, so.po.opt.cache)) { cudaFree(d_pair[0]); return r; }
-        float* d_scr = nullptr;
-        if (P.g.scale != 1.0) CK(cudaMalloc(&d_scr, (size_t)P.g.work_w() * P.g.work_h() * 3 * sizeof(float)));
+        if (int r = load_frame_to_device(P.paths[std::min(K - 1, mid + j)], info, d_rgb, so.po.opt.cache)) return r;
+        if (P.g.scale != 1.0 && !d_scr) CK(cudaMalloc(&d_scr, (size_t)P.g.work_w() * P.g.work_h() * 3 * sizeof(float)));
         CK(cudaMalloc(&d_pair[j], no * 3 * sizeof(float)));
         load_aligned(d_rgb, P.g, P.T[std::min(K - 1, mid + j)], d_scr, d_pair[j], false, s);
         CK(cudaStreamSynchronize(s));
-        cudaFree(d_rgb); cudaFree(d_scr);
+        cudaFree(d_rgb);
+        d_rgb = nullptr;
     }
+    cudaFree(d_scr);
+    d_scr = nullptr;
     ne.mad = noise_from_pair(d_pair[0], d_pair[1], ow, oh, P.fp.levels, s);
     if (P.vp.dw > 0 && P.vp.dh > 0) {
-        VolumeScratch sc;
         sc.alloc(ow, oh, P.vp);
+        sc_on = true;
         ne.depth_floor = depth_noise_floor(d_pair[0], d_pair[1], P.vp, sc, s);
         CK(cudaStreamSynchronize(s));
-        sc.free();
     }
-    cudaFree(d_pair[0]); cudaFree(d_pair[1]);
     return 0;
 }
 
@@ -1201,6 +1754,8 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
         if (int r = measure_noise(so, P, s, ne)) { cudaStreamDestroy(s); return r; }
         if (noise_cache) *noise_cache = ne;
     }
+    // an estimate from another grid (the whole frame's, for a strip): one value per pyramid level of this one
+    if (!ne.mad.empty() && (int)ne.mad.size() != P.fp.levels - 1) ne.mad.resize(P.fp.levels - 1, ne.mad.back());
     DepthResult R;
     float* d_guide = nullptr;
     {
@@ -1598,7 +2153,7 @@ int run_sweep(const StackOptions& base, const std::vector<SweepVariant>& variant
         std::vector<fs::path> paths = base.po.paths;
         std::vector<Similarity> T;
         if (paths.empty() && !base.po.list.empty()) read_list(base.po.list, paths, T);
-        cache->prepare(paths);
+        ready_cache(cache, paths, base.po.opt.devices);
     }
 
     struct Done { std::string name, dir, note; int group; int rc; double seconds; double change; };   // change: % of pixels whose B luma differs > 2 % from the reference variant
@@ -2004,7 +2559,7 @@ int run_align(AlignOptions& ao, AlignOut& A) {
         opt.cancel = hooks.cancel;
         opt.cache = ao.cache;
         if (ao.cache) {
-            ao.cache->prepare(paths);
+            ready_cache(ao.cache, paths, devs);
             logf("frames resident in host memory: %d of %d, budget %.1f GB\n", ao.cache->count(), N, ao.cache->budget() / 1e9);
         }
         // the stage's name tells the front end whether this pass reads the disk or only converts resident frames

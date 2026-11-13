@@ -60,4 +60,9 @@ struct StreamerStats {
 StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, const StreamerOptions& opt,
                             const FrameFn& on_frame);
 
+// The ring of page-locked read buffers is kept from one pass to the next and from job to job: with two GPUs
+// loaded the driver counts everything a process has ever pinned against a ceiling, freed or not (FINDINGS 55),
+// so nothing calls this in a render. It frees the ring for a caller that is done with the GPUs.
+void release_stream_ring();
+
 }  // namespace stackcore

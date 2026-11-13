@@ -4,7 +4,9 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -53,7 +55,48 @@ struct Queue {
     }
 };
 
+// the ring kept between passes (see release_stream_ring in the header); never destroyed by the C++ runtime at exit,
+// when the CUDA runtime may already be gone
+std::mutex g_ring_m;
+std::unique_ptr<PinnedPool>& g_ring = *new std::unique_ptr<PinnedPool>;
+
+std::unique_ptr<PinnedPool> take_ring(size_t bytes, int count) {
+    {
+        std::lock_guard<std::mutex> lk(g_ring_m);
+        if (g_ring && g_ring->bytes() == bytes && g_ring->idle()) {
+            g_ring->grow(count);
+            return std::move(g_ring);
+        }
+        g_ring.reset();
+    }
+    return std::make_unique<PinnedPool>(bytes, count);
+}
+
+// Waits for an upload like cudaEventSynchronize (spinning, as the runtime does by default), but gives up when the
+// pass has failed elsewhere or nothing has come back for two minutes: after the driver has run out of page-locked
+// memory an upload already queued never completes, and a plain synchronize spun on it for ever (FINDINGS 54)
+void wait_upload(cudaEvent_t ev, const std::atomic<bool>& failed) {
+    std::chrono::steady_clock::time_point t0;
+    for (unsigned spins = 0;; ++spins) {
+        cudaError_t e = cudaEventQuery(ev);
+        if (e == cudaSuccess) return;
+        if (e != cudaErrorNotReady) throw std::runtime_error(std::string("cudaEventQuery: ") + cudaGetErrorString(e));
+        if (failed.load()) throw std::runtime_error("the pass failed on another thread");
+        if ((spins & 4095) == 4095) {
+            auto now = std::chrono::steady_clock::now();
+            if (spins == 4095) t0 = now;
+            else if (now - t0 > std::chrono::seconds(120)) throw std::runtime_error("the GPU did not finish an upload in two minutes");
+        }
+        std::this_thread::yield();
+    }
+}
+
 }  // namespace
+
+void release_stream_ring() {
+    std::lock_guard<std::mutex> lk(g_ring_m);
+    g_ring.reset();
+}
 
 StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, const StreamerOptions& opt,
                             const FrameFn& on_frame) {
@@ -92,8 +135,10 @@ StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, con
     const int R = std::max(1, opt.readers);
     const int P = opt.pool > 0 ? opt.pool : R + 2 * S_sum;
     const size_t cap = tiff_buffer_capacity(max_px);
-    PinnedPool pool(cap, P);
+    std::unique_ptr<PinnedPool> ring = take_ring(cap, P);
+    PinnedPool& pool = *ring;
     st.frames_per_device.assign(devs.size(), 0);
+    std::atomic<bool> failed{false};   // a worker or a reader has ended with an error: nobody waits on the GPU any more
 
     Queue q;
     std::atomic<int> next{0};
@@ -107,7 +152,7 @@ StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, con
         readers.emplace_back([&] {
           try {
             for (;;) {
-                if ((opt.cancel && opt.cancel->load()) || readers_failed.load()) break;
+                if ((opt.cancel && opt.cancel->load()) || readers_failed.load() || failed.load()) break;
                 int k = next++;
                 if (k >= N) break;
                 if (!infos[k].ok()) continue;
@@ -146,6 +191,7 @@ StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, con
             std::lock_guard<std::mutex> lk(stat_m);
             st.errors.push_back(std::string("reader: ") + e.what());
             readers_failed = true;
+            failed = true;
           }
         });
 
@@ -173,7 +219,7 @@ StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, con
                 while ((cap <= 0 || n < cap) && q.pop(r)) {   // a capped card leaves the rest to the others
                     int j = n++ % S;
                     if (n > S) {                    // the upload from S frames ago must be done (S frames in flight)
-                        CK(cudaEventSynchronize(uploaded[j]));
+                        wait_upload(uploaded[j], failed);
                         if (pending[j]) pool.release(pending[j]);
                         pending[j] = nullptr;
                     }
@@ -187,7 +233,10 @@ StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, con
                     ++st.frames_per_device[di];
                 }
                 for (int j = 0; j < S; ++j) {
-                    CK(cudaStreamSynchronize(streams[j]));
+                    if (n > j) {   // the stream's last upload and the frame's kernels behind it
+                        CK(cudaEventRecord(uploaded[j], streams[j]));
+                        wait_upload(uploaded[j], failed);
+                    }
                     if (pending[j]) pool.release(pending[j]);
                     CK(cudaFree(dbuf[j]));
                     CK(cudaEventDestroy(uploaded[j]));
@@ -195,6 +244,9 @@ StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, con
                 }
             } catch (const std::exception& e) {
                 worker_errors[di] = e.what();
+                // out of memory is not survivable for the pass (the caller renders again with less); another kind of
+                // failure leaves the other cards to finish the frames
+                if (strstr(e.what(), "memory")) failed = true;
                 // other GPUs take over this one's frames; only the last worker standing
                 // has to drain the queue so readers never block on a full pool
                 if (--live_workers == 0) {
@@ -216,6 +268,11 @@ StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, con
     for (size_t di = 0; di < devs.size(); ++di) {
         st.frames += st.frames_per_device[di];
         if (!worker_errors[di].empty()) st.errors.push_back("device " + std::to_string(devs[di]) + ": " + worker_errors[di]);
+    }
+    // a clean pass hands its ring to the next one; after an error buffers may still be out, so it is freed instead
+    if (!failed.load() && ring->idle()) {
+        std::lock_guard<std::mutex> lk(g_ring_m);
+        g_ring = std::move(ring);
     }
     return st;
 }

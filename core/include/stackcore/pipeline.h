@@ -75,6 +75,10 @@ struct Pass1Options {
     StreamerOptions opt;
     bool volume = false;
     bool with_a = true;                           // accumulate A (off when A is not an output)
+    int levels = 0;                               // pyramid levels; 0 = from the output size (a strip takes the whole frame's)
+    // a single-GPU pass whose volume slices cannot all fit returns 4 before it allocates its slots, instead of
+    // running out of memory part-way (run_stack sets it when it may answer with strips)
+    bool stop_if_short = false;
     bool host_state = false;                      // also download the merged state into Pass1::merged (the fold command)
     // the depth volume's resolution as a fraction of the sensor: 1/2 since 0.6.1 (FINDINGS 32: the doubled plate
     // edges of 1/4 are gone at 1:1); --depth-fraction 0.25 gives the 0.5.x reference B
@@ -86,6 +90,9 @@ struct Pass1Options {
     // 0.6.22 (FINDINGS 44: a fifth less ring energy in the background, detail untouched; preferred at 1:1)
     double flat_blur_px = 256.0, flat_reach_px = 24.0;
     double flat_min = 0.0;                        // DepthParams::flat_min (least-structure data term in flat regions); 0 = off
+    // the flat mask's two texture thresholds, given instead of ranked over this rectangle (flat_hi > flat_lo >= 0): a
+    // strip takes the whole frame's, or its mask would follow its own content
+    float flat_lo = -1.f, flat_hi = -1.f;
     // per-row corrections (FINDINGS 51), K x H at full resolution, applied inside every warp of the frame (RowCorr);
     // empty = none. row_gain flattens the frame's brightness banding; rs_dx / rs_dy are the frame's rolling-shutter
     // displacement per sensor row (full-res px), added to the sample position
@@ -102,26 +109,41 @@ public:
     ~PinnedVec() { clear(); }
     PinnedVec(const PinnedVec&) = delete;
     PinnedVec& operator=(const PinnedVec&) = delete;
-    PinnedVec(PinnedVec&& o) noexcept : p_(o.p_), n_(o.n_) { o.p_ = nullptr; o.n_ = 0; }
+    PinnedVec(PinnedVec&& o) noexcept : p_(o.p_), n_(o.n_), pinned_(o.pinned_) { o.p_ = nullptr; o.n_ = 0; }
     PinnedVec& operator=(PinnedVec&& o) noexcept {
-        if (this != &o) { clear(); p_ = o.p_; n_ = o.n_; o.p_ = nullptr; o.n_ = 0; }
+        if (this != &o) { clear(); p_ = o.p_; n_ = o.n_; pinned_ = o.pinned_; o.p_ = nullptr; o.n_ = 0; }
         return *this;
     }
-    void resize(size_t n) {   // NOT zeroed (a memset of 1.8 GB costs 0.15 s); the caller fills every element
+    // NOT zeroed (a memset of 1.8 GB costs 0.15 s); the caller fills every element. pinned = false takes ordinary
+    // memory instead: the copies are then staged by the driver (slower), and nothing is added to the page-locked
+    // total, which has a ceiling of its own when two GPUs are in use (FINDINGS 54)
+    void resize(size_t n, bool pinned = true) {
         clear();
         if (!n) return;
-        if (cudaHostAlloc((void**)&p_, n * sizeof(T), cudaHostAllocPortable) != cudaSuccess) throw std::bad_alloc();
+        if (pinned) {
+            if (cudaHostAlloc((void**)&p_, n * sizeof(T), cudaHostAllocPortable) != cudaSuccess) throw std::bad_alloc();
+        } else {
+            p_ = (T*)std::malloc(n * sizeof(T));
+            if (!p_) throw std::bad_alloc();
+        }
+        pinned_ = pinned;
         n_ = n;
     }
-    void clear() { if (p_) cudaFreeHost(p_); p_ = nullptr; n_ = 0; }
+    void clear() {
+        if (p_) { if (pinned_) cudaFreeHost(p_); else std::free(p_); }
+        p_ = nullptr;
+        n_ = 0;
+    }
     // unpinning 1.8 GB takes ~0.2 s: hand the buffer to a thread that frees it off the critical path
     void release_async() {
         if (!p_) return;
         T* p = p_;
+        const bool pinned = pinned_;
         p_ = nullptr;
         n_ = 0;
-        std::thread([p] { cudaFreeHost(p); }).detach();
+        std::thread([p, pinned] { if (pinned) cudaFreeHost(p); else std::free(p); }).detach();
     }
+    bool pinned() const { return pinned_; }
     T* data() { return p_; }
     const T* data() const { return p_; }
     size_t size() const { return n_; }
@@ -130,6 +152,7 @@ public:
 private:
     T* p_ = nullptr;
     size_t n_ = 0;
+    bool pinned_ = true;
 };
 
 struct Pass1 {
@@ -222,6 +245,13 @@ struct StackOptions {
     // the 0.6.17 composition). 16 from 0.6.18 (8 already removes the rings, 16 and 32 look alike and nearer Helicon);
     // 32 since 0.6.22, with flat_blur_px 256 (FINDINGS 44)
     double flat_blend = 32;
+    // strips, for stacks whose depth volume does not fit the GPUs: the output rectangle is cut along its longer side
+    // into overlapping strips, each rendered on its own at the full depth resolution (one pass 1 + fusion per strip,
+    // with the whole frame's noise estimate and pyramid depth), and the outputs are feathered together across the
+    // middle third of each overlap. 0 = only when the memory runs short (before the fall back to the 1/4 volume),
+    // 1 = never, N >= 2 = always N strips. strip_overlap_px: the overlap of neighbouring strips in sensor px
+    int strips = 0;
+    double strip_overlap_px = 512;
     std::vector<std::string> outputs;  // which images to write / keep; empty = all
     bool cache_frames = true;          // keep the frames pinned in host memory between the passes (--cache 0: read every pass from disk)
     bool write_outputs = true;         // false: compute everything (and fill `result`) but write no TIFFs (the GUI's benchmark)

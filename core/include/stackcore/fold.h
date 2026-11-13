@@ -141,6 +141,7 @@ private:
     int dst_, src_;
     size_t chunk_;
     uint8_t* pin_[2] = {nullptr, nullptr};
+    bool shared_ = false;   // the chunks are the process's pair (kept), not this copier's own
     cudaStream_t ss_ = nullptr, ds_ = nullptr;
     cudaEvent_t ev_[2] = {nullptr, nullptr};
 };

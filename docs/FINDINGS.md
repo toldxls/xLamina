@@ -2280,6 +2280,198 @@ the resident runs):
   computed in float and written as 16-bit either way. Tone work belongs before
   the export or on the stacked result.
 
+## 53. Strips: a render whose depth volume does not fit the GPUs (2026-11-12)
+
+The 1/2-resolution volume keeps 4 bytes per depth pixel per frame on a GPU through pass 1. With 261 frames of
+6585 x 4376 the RTX 3070 alone (5.9 GB free) has room for 112 of them; the render then ran out of memory part-way
+through pass 1, and the retry at 1/4 failed as well, because the failed pass left its buffers allocated.
+
+`StackOptions::strips` (`--strips N`, `--strip-overlap 512`): the output rectangle is cut along its longer side into
+N overlapping strips, each a whole pass 1 + fusion of its own rectangle at the full depth resolution, and the
+outputs are feathered together across the middle third of each overlap. 0 (the default) uses strips only when the
+memory runs short, before the fall back to the 1/4 volume: the count comes from the share of the volume that
+fitted, plus one per attempt that still runs short. On a single GPU pass 1 now returns "out of memory" before it
+allocates its slots when the card cannot hold every slice. With two GPUs the slices are shared between the cards,
+and the pass is left to run when the first card holds at least nine tenths of them and the cards hold all of them
+between them; otherwise it stops the same way (54). A pass 1 that fails now frees what it allocated, so the
+attempt after it starts on clean cards. `--strips 1` never uses strips: on the 3080 Ti alone the retry at 1/4 now
+works (it failed in 1.0.5); on the 3070 alone the 1/4 render still runs out of memory in a later pass.
+
+What has to be shared between the strips:
+- **The noise estimate.** The focus measure's floor sets the confidence ramp (§38), and it differs with the
+  rectangle: 0.0293, 0.0298 and 0.0318 on three strips of this stack, 0.0368 on a crop around one crystal, 0.0301
+  on the whole frame. A crop's ramp of 0.34..0.49 kept faint detail inside a crystal that the whole frame's
+  0.42..0.60 smoothed away, so strips with their own estimates would not be one render. The whole frame's estimate
+  is measured once and given to every strip.
+- **The pyramid.** Every strip takes the whole frame's level count, and starts on the coarsest level's grid
+  (128 px for 8 levels). With both, C from two strips is bit-identical to the unstripped C of the same rectangle
+  (2601 x 1801 test); with starts off that grid, 1 to 3 % of C's pixels differed by more than 0.5 % in the strip
+  that did not start at the origin.
+
+- **The flat mask's thresholds.** They are ranks over the rectangle (the flattest fifth of the texture measure, its
+  90th percentile, §34), so a strip's mask followed its own content: the top half of a 1801 x 4376 rectangle
+  rendered alone had a mean mask of 0.41 against 0.49 for the same area in the whole render, 39 % of its mask
+  pixels off by more than 0.1, and 95 % of the B pixels that differed by more than 2 % lay in flat or partly flat
+  regions. A strip render now folds the whole frame once without the volume (which fits where the volume does
+  not), takes the two thresholds from that guide, and gives them to every strip (`Pass1Options::flat_lo/hi`).
+
+Strips against the unstripped render of the same rectangle, RTX 3070, B's pixels differing by more than 2 %:
+
+| rectangle | cut | before the shared thresholds | with them | largest difference |
+|---|---|---|---|---|
+| 2601 x 1801 | 2 vertical | 0.46 % | 0.002 % | 0.037 |
+| 1801 x 4376 | 2 horizontal | 1.11 % | 0.000 % | 0.023 |
+| 2601 x 1801 at scale 0.5 | 2 vertical | 0.36 % | 0.000 % | 0.005 |
+| 2601 x 1801, odd origin | 2 vertical | 0.45 % | 0.000 % | 0.022 |
+
+A, B0 and C are bit-identical in all four; the other outputs follow B. What remains in B is SGM, which is not
+local. Two strip renders of the same rectangle are bit-identical in all twelve outputs. The whole frame on the 3070
+alone: 3 strips, 60 s (55 s before the extra fold); through `run` on the 8-bit folder: 4 strips, 52 s.
+
+**The whole frame, 2 strips against the unstripped render (both GPUs, 6585 x 4376).** A and B0 are bit-identical. C
+is identical except in the feather (97.3 % of all pixels identical, the largest difference 0.011): with 8 levels
+the coarsest level's edge effect reaches into the middle third of a 512 px overlap. B differs by more than 2 % in
+0.075 % of the pixels (largest 0.09), more than the rectangles above, and not at the seam: the depth map differs
+by more than 2 frames in 10.6 % of the pixels, 20 % of the flatter half of the image and 0.18 % of the most
+textured tenth. These are the defocused background and the smooth insides of the crystal groups, where the focus
+evidence is weak and the depth comes from what propagates across the rectangle (the SGM's paths, the fill of the
+flat regions); a strip sees only its part. Two strips against three differ the same way (2.4 % of the depth).
+At 1:1 the three tiles with the most differing pixels show the same picture in both renders, and nothing is
+visible along the seam (mean horizontal gradient in the feather 34.6e-4, 34.8e-4 in the unstripped render).
+Ruled out as the cause: the SGM's band layout. Given the whole frame's 7 bands instead of its own 3, a strip's
+depth and B did not change in the fourth digit of any of these numbers (the change was taken out again).
+
+In the GUI (3070 alone, 261 frames): 4 strips, 94 s; the status line reads "Strip 2 of 4: Fine-focused 87 of 261
+frames", the left pane shows the render so far after each strip, and the bar runs once per strip. Cancel during
+strip 2 returned in 1.5 s with the card's memory free, and the render started after it completed.
+
+Not done: the sweep does not use strips; the smoothed depth and the flat mask are not written for a strip render;
+the GUI has no control for the strip count (it gets the automatic mode, and its status line names the strip).
+
+## 54. Page-locked memory has a ceiling with two GPUs, and past it the driver fails every call (2026-11-12)
+
+Found while testing strips on both cards (RTX 3080 Ti 12 GB + RTX 3070 8 GB, 192 GB of RAM, Windows 11, CUDA
+13.5). The 261 16-bit frames with all twelve outputs failed with "out of memory" while the 3080 Ti reported
+3.9 GB free and a 29 MB allocation was refused; 1.0.5 fails the same way. From that moment every CUDA call in the
+process returned "out of memory" (`cudaMemGetInfo`, `cudaStreamCreate`, a 1 MB `cudaMalloc`), whatever was freed,
+and an upload already queued never completed: `cudaEventSynchronize` on it spun for ever, which is the one
+render that sat for nine minutes at 1 % GPU load.
+
+A program that only allocates (two contexts, `cudaHostAlloc` in 1 GB pieces) reproduces it:
+
+| the 3070 holds | the 3080 Ti holds | page-locked before the failure |
+|---|---|---|
+| nothing, or up to 1.9 GB | 0 .. 10.5 GB | none up to 150 GB |
+| 2.15 GB or more (`cudaMalloc` or the stream-ordered pool, written or not) | 0 .. 8 GB | 77 .. 79 GB (73 GiB) |
+| context on the 3080 Ti only, holding 10.5 GB | | none up to 150 GB |
+
+After the failure, freeing a tenth of the pinned memory, or all of it, does not bring the driver back. Memory
+pinned before the 3070 took its 4 GB did not count, and nor did the ceiling return when the 3070 freed its
+memory at 60 GB. Sixty cycles of pinning and freeing 4.3 GB beside 47 GB did not reach it. Inside xLamina the
+ceiling was lower and not one number: the render above died between 54.8 and 62.3 GB pinned (the frames, then
+the 11 GB of volume buffers), a 450-frame stack (87 GB of frames) at 72 .. 74 GB in its first pass with an
+unlimited cache, and at 52 GB in the fifth pass with the cache held to 47 GB. The same 261 frames with four
+outputs pinned 62 GB and rendered every time, so the card's own load matters: with all outputs the 3080 Ti is
+short by a seventh of the volume slices and reaches the SGM with 0.5 GB free. The mechanism is not known.
+
+What changed:
+- **The depth volume's host buffers are ordinary memory** (`PinnedVec::resize(n, false)`), 11 GB less pinned. The
+  volume stage and the upload are no slower (pass 1's volume stage 4.3 s against 4.8 s, the upload 0.68 s both
+  ways), B and C are bit-identical.
+- **A stack whose frames come to more than 48 GiB resident ran on its first GPU alone.** Taken out again the same
+  day: the ceiling is on everything the process has ever pinned, and frames pinned before the cards are loaded do
+  not count (55), so both cards render such a stack.
+- **Two GPUs, first card short of a tenth or more of the volume slices: strips**, before a frame is read, and the
+  same when the cards cannot hold the slices between them. At 92 % (241 of 261 frames, 1.0 GB free before the
+  SGM) eight unstripped renders of eight went through; at 86 % (225 of 261, all outputs) one of nine with the
+  unpinned volume failed, and the render took 30 to 36 s from run to run. In 2 strips it takes 38 s, five of five,
+  bit-identical each time.
+- **Pass 1 frees its buffers however it ends** (a guard in `run_pass1`), and any CUDA call in pipeline.cpp that
+  reports out of memory returns 4, so the next attempt (strips, then 1/4) has the cards to itself.
+- **The streamer no longer waits for ever**: an upload is polled (`cudaEventQuery`), and the wait ends when
+  another worker or a reader has failed with out of memory, or after two minutes. Its ring of read buffers is
+  kept from pass to pass, and for the life of the process (55).
+- **A dead driver is said plainly.** After a failed attempt `run_stack` asks the first card for its memory figures
+  and 1 MB; when that fails the job ends with "close xLamina, open it again and render once more" instead of seven
+  more attempts that cannot work.
+
+After these, on both cards: the four-output render is bit-identical to 1.0.5 and as fast (26 s); all outputs
+render in 2 strips; the 450-frame stack completes. `--strips 1` with all outputs on both cards still takes the
+unstripped path and can still end with the dead driver.
+
+## 55. The ceiling is on memory ever pinned; a 13920 x 9280 stack; the odd-sized depth grid (2026-11-12)
+
+**What the ceiling of 54 counts.** A stack of 220 frames of 13920 x 9280 (8-bit, 85 GB; Camera Raw's 2x
+enlargement of the frames of the 261-frame stack) on both cards, frames read from disk each pass (`--cache 0`, so
+only the 8 GB ring of read buffers pinned at any time), died at the same place every time: the start of the 11th
+pass, while the ring was being pinned again. With one ring kept for all 19 passes the same job finished. So with
+two cards loaded the driver does not credit page-locked memory back when it is freed: the ceiling (about 73 GiB)
+is on everything the process has pinned. The test program of 54 could pin and free 300 GiB because it asked for
+the same size again at once, which the driver's allocator hands back without a new registration. Memory pinned
+before the second card holds anything does not count (54's table, and below).
+
+What follows from it, all in the code now:
+- **A large stack's frame buffers are pinned before the GPUs are loaded** (`FrameCache::prepin`, from
+  `ready_cache`): for two or more GPUs and frames over 48 GiB resident. 85 GB on 16 threads takes 5.2 s. Under
+  that size the frames pin as they are read, as before (pinning 50 GB up front costs the 261-frame render 10 s
+  that the reading otherwise hides).
+- **Nothing is pinned twice.** The frame cache keeps a buffer that leaves it for the next frame of its size
+  (`spare_`); the streamer's ring and the two chunks of the cross-GPU copy are pinned once for the process; the
+  single-frame loader (the noise measurement) reads into ordinary memory.
+- The rule of 54 that sent a large stack to the first GPU is gone.
+
+**Never past a card's free memory.** The first attempt on this stack allocated a 7 GB fold state and an 8 GB frame
+slot on a 12 GB card: Windows hands out system memory instead of failing, and the next CUDA call found the
+driver dead as in 54. `run_pass1` now compares the state and one slot with the free memory before it allocates
+either (`fold_state_bytes`), as do the frame loader, the noise measurement and `flat_limits`, and returns "out of
+memory" instead. From the same figures it works out the share of the rectangle that fits (the state, the
+output-sized part of a slot and the slices all scale with its area), so the first strip count is the right one:
+6 strips here at the first attempt, where counting the slices that fit said 2. The count may go to 16.
+
+**The whole frame's thresholds from a half-size fold.** A 13608 x 9053 fold does not fit even without the volume,
+so the flat mask's thresholds (53) come from a fold at scale 0.5 when the full one fails. On the 261-frame stack
+the half-size thresholds are 2.4 % and 1.1 % under the full-size ones (0.001064 / 0.008361 against 0.001091 /
+0.008451).
+
+**The stack.** `run` on the folder, both cards, B and C: 13608 x 9053 in 6 strips of 2696 px, 170 s (alignment
+35 s, 21 s a strip, passes at 65 frames/s from memory). On the 3080 Ti alone, before the points above: 227 s. The
+mean horizontal gradient in the five feathers is 0.93 to 1.01 of its surroundings in B and C.
+
+**Why strips differed from the unstripped render (53).** The depth grid is the output grid times 1/2, rounded: 6585
+px become 3292, a ratio of 2.0003, so the depth grid slides against the output grid by a pixel across the frame,
+while a strip, cut at even px, has an exact 2. With a rectangle of 6584 px the two renders' confidence is
+identical in 95.9 % of the pixels (45.0 % with 6585), B differs by more than 2 % in 0.004 % (0.075 %), and the
+depth differs by more than 2 frames in 0.02 % of the middle tiles and none of the most textured tenth. A strip
+render now trims its rectangle to sides that are multiples of 4 sensor px (up to 3 px off the right and the
+bottom); the unstripped render is unchanged, odd grid included. A strip also runs on to the full overlap with
+the next one: starts rounded down to the 256 px grid of 9 levels had left 392 px of the 512.
+
+What still differs: the depth of 7.8 % of the pixels, all with no confidence at all (featureless background,
+mean confidence 0.000), by a few frames over whole regions, with no visible change in B. Their depth is the fill
+of the flat regions, which is computed over the rectangle; making it the same would take the fill of the whole
+frame, computed between the strips' volume passes and their depth stages. Not done.
+
+**Is the 2x stack better than the normal one?** Both rendered from the same 220 frames (IMG_6021 to 6240), same
+reference frame; amplitude spectra of 256 px tiles (512 px in the 2x render) of the same areas, lit tiles only,
+ranked by both renders alike, in cycles per normal pixel:
+
+| band | C, sharp tiles: 2x / normal | C, smooth tiles: 2x / normal | B, sharp tiles: 2x / normal |
+|---|---|---|---|
+| 0.05 .. 0.10 | 0.95 | 1.04 | 0.83 |
+| 0.10 .. 0.20 | 0.96 | 1.10 | 1.03 |
+| 0.20 .. 0.30 | 1.09 | 0.99 | 0.67 |
+| 0.30 .. 0.40 | 1.10 | 0.87 | 0.73 |
+| 0.40 .. 0.50 | 1.06 | 0.74 | 0.93 |
+
+C holds 6 to 10 % more contrast at the fine scales the normal grid can show, with less in the smooth tiles there;
+above the normal grid's limit (0.5 to 1.0) the 2x C still has two and a half times its smooth tiles' amplitude.
+Whether that is the specimen or the enlargement's own invention the files cannot say: the enlargement is made
+from one frame at a time. At 1:1 beside the normal render enlarged 2x the detail looks the same, and the smooth
+areas of the 2x render carry a faint worm-like grain. B is softer at 0.2 to 0.4, with the default settings and
+with every pixel setting doubled alike: B's settings are in pixels and were tuned on native frames (with the
+defaults the focus measure's noise floor reads 0.0455 against 0.0304 and the ramp drops to 0.28 .. 0.40; doubled,
+0.0317 and 0.40 .. 0.57, as the normal render). The 2x stack takes 170 s against 31 s.
+
 ## Open items
 
 - **AutoFOV link**: an option that asks autofov.local for the

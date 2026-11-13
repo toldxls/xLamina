@@ -37,6 +37,16 @@ uint8_t* PinnedPool::acquire() {
     return p;
 }
 
+void PinnedPool::grow(int count) {
+    std::lock_guard<std::mutex> lk(m_);
+    if (count > count_) count_ = count;
+}
+
+bool PinnedPool::idle() {
+    std::lock_guard<std::mutex> lk(m_);
+    return allocating_ == 0 && free_.size() == all_.size();
+}
+
 void PinnedPool::release(uint8_t* p) {
     {
         std::lock_guard<std::mutex> lk(m_);

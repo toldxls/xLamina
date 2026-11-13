@@ -157,14 +157,15 @@ void FoldState::alloc(int dev_, int w_, int h_, int levels_, bool with_a) {
     CK(cudaMemset(b_fmsum, 0, n * sizeof(double)));
     for (int l = 0; l < levels - 1; ++l) {
         size_t m = (size_t)shapes[l].w * shapes[l].h;
-        float* s; float* c; int16_t* i;
+        // in the lists before they are allocated, so free() finds them when a later allocation throws
+        c_sal.push_back(nullptr); c_coef.push_back(nullptr); c_idx.push_back(nullptr);
+        float*& s = c_sal.back(); float*& c = c_coef.back(); int16_t*& i = c_idx.back();
         CK(cudaMalloc(&s, m * sizeof(float)));
         k_fill_f32<<<blocks1(m), 256>>>(s, m, -1.f);
         CK(cudaMalloc(&c, m * 3 * sizeof(float)));
         CK(cudaMemset(c, 0, m * 3 * sizeof(float)));
         CK(cudaMalloc(&i, m * sizeof(int16_t)));
         CK(cudaMemset(i, 0, m * sizeof(int16_t)));
-        c_sal.push_back(s); c_coef.push_back(c); c_idx.push_back(i);
     }
     size_t t = (size_t)shapes.back().w * shapes.back().h * 3;
     CK(cudaMalloc(&c_base, t * sizeof(double)));
@@ -428,8 +429,22 @@ void fold_base_f32(const FoldState& st, float* d_out, cudaStream_t s) {
     k_base_f32<<<blocks1(t), 256, 0, s>>>(st.c_base, d_out, t, (double)std::max(st.count, 1));
 }
 
+// The two page-locked chunks are pinned once for the process and handed from one CrossCopier to the next (merges
+// run one at a time): with two GPUs loaded, page-locked memory that is freed is not credited back by the driver,
+// and a pair pinned for every merge counted towards its ceiling (FINDINGS 55).
+static void* g_cross_pin[2] = {nullptr, nullptr};
+static size_t g_cross_bytes = 0;
+static bool g_cross_out = false;
+
 CrossCopier::CrossCopier(int dst_dev, int src_dev, size_t chunk) : dst_(dst_dev), src_(src_dev), chunk_(chunk) {
-    for (int b = 0; b < 2; ++b) CK(cudaHostAlloc((void**)&pin_[b], chunk_, cudaHostAllocPortable));
+    if (!g_cross_out && g_cross_pin[0] && g_cross_bytes == chunk_) {
+        pin_[0] = (decltype(pin_[0]))g_cross_pin[0]; pin_[1] = (decltype(pin_[1]))g_cross_pin[1];
+        g_cross_out = true;
+        shared_ = true;
+    } else {
+        for (int b = 0; b < 2; ++b) CK(cudaHostAlloc((void**)&pin_[b], chunk_, cudaHostAllocPortable));
+        if (!g_cross_pin[0]) { g_cross_pin[0] = pin_[0]; g_cross_pin[1] = pin_[1]; g_cross_bytes = chunk_; g_cross_out = true; shared_ = true; }
+    }
     CK(cudaSetDevice(src_));
     CK(cudaStreamCreateWithFlags(&ss_, cudaStreamNonBlocking));
     CK(cudaSetDevice(dst_));
@@ -439,7 +454,8 @@ CrossCopier::CrossCopier(int dst_dev, int src_dev, size_t chunk) : dst_(dst_dev)
 CrossCopier::~CrossCopier() {
     cudaSetDevice(dst_);
     cudaStreamSynchronize(ds_);
-    for (int b = 0; b < 2; ++b) { cudaEventDestroy(ev_[b]); cudaFreeHost(pin_[b]); }
+    for (int b = 0; b < 2; ++b) { cudaEventDestroy(ev_[b]); if (!shared_) cudaFreeHost(pin_[b]); }
+    if (shared_) g_cross_out = false;
     cudaStreamDestroy(ds_);
     cudaSetDevice(src_);
     cudaStreamDestroy(ss_);

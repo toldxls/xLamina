@@ -19,6 +19,8 @@ public:
 
     uint8_t* acquire();          // blocks until a buffer is free
     void release(uint8_t* p);
+    void grow(int count);        // a later pass with more streams: the ring may pin up to `count` buffers
+    bool idle();                 // every buffer handed out has come back
     size_t bytes() const { return bytes_; }
     int count() const { return count_; }
 

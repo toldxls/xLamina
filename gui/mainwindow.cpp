@@ -1388,6 +1388,12 @@ void MainWindow::onProgress(QString stage, double fraction) {
     progress_->setValue((int)std::lround(std::clamp(fraction, 0.0, 1.0) * 1000));
     // the frame count comes from here, not from the live view: the view is throttled and skips frames, so its
     // last frame index stalled short of the total ("194 of 200"). Every progress call is delivered.
+    // a render in strips names its stages "strip 2 of 3: pass 1: fold": the strip goes in front of the status
+    QString strip;
+    if (stage.startsWith("strip ")) {
+        const int c = stage.indexOf(": ");
+        if (c > 0) { strip = "Strip" + stage.mid(5, c - 3); stage = stage.mid(c + 2); }
+    }
     if (stage.startsWith("reading") || stage.startsWith("frames from") || stage.startsWith("pass")) {
         const int total = jobItems_.size();
         const int n = (int)std::lround(std::clamp(fraction, 0.0, 1.0) * total);
@@ -1400,6 +1406,7 @@ void MainWindow::onProgress(QString stage, double fraction) {
         progressStatus_[0] = progressStatus_[0].toUpper();
         if (fraction > 0.0 && fraction < 1.0) progressStatus_ += QString(" — %1 %").arg((int)std::lround(fraction * 100));
     }
+    if (!strip.isEmpty()) progressStatus_ = strip + progressStatus_;
     statusBar()->showMessage(progressStatus_);
 }
 

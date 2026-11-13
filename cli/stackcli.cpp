@@ -64,6 +64,8 @@ static int usage() {
             "               Several DIRs are rendered one after the other (a batch): each into its own DIR_stacker, or --out\\<folder name>\n"
             "               Cx: CBn with the finer level's support in place of the dominance test (against the glow of defocused highlights)\n"
             "               --smoothing S: C takes detail weaker than S x the noise from B (0 = raw selection, 2 ~ Helicon's 1, 3 = Cn)\n"
+            "               --strips N: render the frame as N overlapping strips, feathered together, for stacks whose depth volume does not\n"
+            "                             fit the GPUs (0 = only when the memory runs short, the default; 1 = never); --strip-overlap 512 (sensor px)\n"
             "               --soft-cutoff 0.9: a frame is reported soft when its focus energy is under this share of its neighbours' (stack.txt, log)\n"
             "               --rs-bands 8 (0 = off) / --band-cycles 3,12: the rolling-shutter probe (FINDINGS 51): each frame's displacement per\n"
             "               row band against its neighbours, and the LED flicker in its row brightness (cycles per frame height); report.json\n"
