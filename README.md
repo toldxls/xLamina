@@ -27,6 +27,12 @@ Smoothing (C) sets how much of C's weak detail is taken from B: 0 is the raw sel
 Cn. Three more outputs sit under Tools > Developer outputs: A (focus-weighted average), B0 (B's
 raw depth, unsmoothed) and CB (CBn without the noise rule).
 
+With View > Developer controls on, the depth map is a tab beside the outputs and an entry in the
+two-up viewer: the frame each pixel of B comes from, drawn in a palette (Grey, Viridis, Inferno,
+Magma, Turbo) over a chosen range of frames, optionally in bands that repeat every few frames.
+Brightness and contrast spread a few frames' difference over more colours, the frame under the
+cursor is named beside it, and the two-up viewer can lay the map over another image.
+
 ## Hardware
 
 64-bit Windows and an NVIDIA GPU (Ampere or newer); a second GPU shares the work. A 200-frame
