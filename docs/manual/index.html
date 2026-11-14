@@ -81,16 +81,16 @@ li.aside { list-style:none; color:var(--dim); }
 <h2>Quick start</h2>
 <p>xLamina stacks a folder of focus-bracketed frames into one image that is sharp throughout. It needs 64-bit Windows 10 or 11 and an NVIDIA graphics card (GeForce GTX 16 / RTX 20 series or newer) with a current driver.</p>
 <ol>
-  <li><b>Open the folder</b> that holds the frames: <b>Open folder</b> in the toolbar (<kbd>Ctrl+O</kbd>), or drop the folder onto the window.</li>
-  <li class="aside">To stack only some of a folder's files: <b>File &gt; Open files…</b> (<kbd>Ctrl+Shift+F</kbd>) and select them, or drop those files onto the window.</li>
+  <li><b>Open the frames</b>: <b>Open</b> in the toolbar (<kbd>Ctrl+O</kbd>) and browse to the photos. Select <b>one</b> photo to open its whole folder, or drop the folder onto the window.</li>
+  <li class="aside">To stack only some of a folder's files: select <b>several</b> in the same window (Shift or Ctrl + click), or drop those files onto the window. <b>File &gt; Open a whole folder…</b> (<kbd>Ctrl+Shift+O</kbd>) chooses a folder by its name instead.</li>
   <li><b>Tick the outputs</b> you want in the Render panel. <b>B</b> and <b>C</b> are ticked by default.</li>
   <li>Press <b>Render</b> (<kbd>F5</kbd>). The viewer splits in two while it works and shows the stack being built.</li>
   <li><b>Look at the results</b>: the tabs under the viewer switch between the outputs. Wheel to zoom, drag to pan.</li>
   <li><b>Save as…</b> (<kbd>Ctrl+S</kbd>) writes the image on screen. Every output is also written to <code>&lt;folder&gt;_stacker</code> beside the frames.</li>
 </ol>
-<figure class="shot" data-img="main" data-cursor="Render" data-marks="Open folder;Render;panel Frames;view;tab B;group Outputs;group Settings;Compare;Save as;panel Geometry report">
+<figure class="shot" data-img="main" data-cursor="Render" data-marks="Open;Render;panel Frames;view;tab B;group Outputs;group Settings;Compare;Save as;panel Geometry report">
   <ol class="legend">
-    <li><b>Open folder</b>: choose the folder of frames.</li>
+    <li><b>Open</b>: browse to the photos; one selected opens its folder, several are the stack.</li>
     <li><b>Render</b>: align and stack the ticked frames. The cursor in the picture is on it.</li>
     <li><b>Frames</b>: the stack, in order. Untick a frame to leave it out.</li>
     <li><b>Viewer</b>: the image on show, named in its top-left corner.</li>
@@ -134,7 +134,7 @@ li.aside { list-style:none; color:var(--dim); }
   </ol>
   <figcaption>The list after a render. The second and third lines appear once a render has measured the frames.</figcaption>
 </figure>
-<p>The list is the stack order. Click a frame to see it at full resolution. A stack opened with <b>File &gt; Open files…</b> lists only the files that were chosen.</p>
+<p>The list is the stack order. Click a frame to see it at full resolution. A stack opened from several selected files lists only those files.</p>
 <table>
   <tr><th>Colour</th><th>Meaning</th><th>What to do</th></tr>
   <tr><td>Red</td><td>The shift from the previous frame is an outlier: the stage or the specimen moved.</td><td>Render &gt; Drop shifted frames, then Render again.</td></tr>
@@ -518,8 +518,8 @@ li.aside { list-style:none; color:var(--dim); }
 <h2>Keyboard and mouse</h2>
 <table>
   <tr><th>Main window</th><th></th></tr>
-  <tr><td><kbd>Ctrl+O</kbd></td><td>Open folder</td></tr>
-  <tr><td><kbd>Ctrl+Shift+F</kbd></td><td>Open files (a stack of the files you select)</td></tr>
+  <tr><td><kbd>Ctrl+O</kbd></td><td>Open (one photo selected: its folder; several: those)</td></tr>
+  <tr><td><kbd>Ctrl+Shift+O</kbd></td><td>Open a whole folder, chosen by its name</td></tr>
   <tr><td><kbd>F5</kbd> or <kbd>Ctrl+R</kbd></td><td>Render</td></tr>
   <tr><td><kbd>Esc</kbd></td><td>Cancel the render</td></tr>
   <tr><td><kbd>Ctrl+S</kbd></td><td>Save as…</td></tr>

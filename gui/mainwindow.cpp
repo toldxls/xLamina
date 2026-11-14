@@ -205,14 +205,13 @@ QImage MainWindow::forDisplay(QImage img) const {
 
 void MainWindow::buildMenus() {
     QMenu* file = menuBar()->addMenu("&File");
-    QAction* open = file->addAction("&Open folder…", QKeySequence::Open, this, &MainWindow::chooseFolder);
-    open->setStatusTip("Open a folder of TIFF or JPEG frames (or drop one onto the window).");
-    QAction* openF = file->addAction("Open f&iles…", QKeySequence("Ctrl+Shift+F"), this, [this] {
-        const QStringList fns = QFileDialog::getOpenFileNames(this, "The frames of the stack (select several)", folder_.isEmpty() ? recent_.value(0) : folder_,
-                                                              "Frames (*.tif *.tiff *.jpg *.jpeg);;All files (*)");
-        if (!fns.isEmpty()) openFiles(fns);
+    QAction* open = file->addAction("&Open…", QKeySequence::Open, this, &MainWindow::chooseFolder);
+    open->setStatusTip("Browse to the photos: select one to open its whole folder, or several to stack only those (or drop them onto the window).");
+    QAction* openF = file->addAction("Open a whole &folder…", QKeySequence("Ctrl+Shift+O"), this, [this] {
+        const QString d = QFileDialog::getExistingDirectory(this, "Folder with the stack's frames (its photos are not listed here)", folder_.isEmpty() ? recent_.value(0) : folder_);
+        if (!d.isEmpty()) openFolder(d);
     });
-    openF->setStatusTip("Stack only the files you select, not everything in their folder (or drop the files onto the window).");
+    openF->setStatusTip("Choose a folder by its name; every photo in it is opened. This window lists folders only.");
     recentMenu_ = file->addMenu("Open &recent");
     batchAct_ = file->addAction("&Batch render…", QKeySequence("Ctrl+Shift+B"), this, &MainWindow::batch);
     batchAct_->setStatusTip("Queue several folders and render them one after the other with the current settings.");
@@ -359,7 +358,7 @@ void MainWindow::buildUi() {
     tb->setObjectName("toolbar");
     tb->setMovable(false);
     tb->setToolButtonStyle(Qt::ToolButtonTextOnly);
-    tb->addAction("Open folder…", this, &MainWindow::chooseFolder);
+    tb->addAction("Open…", this, &MainWindow::chooseFolder)->setToolTip("Browse to the photos (Ctrl+O): select one to open its whole folder,\nor several to stack only those.");
     tb->addSeparator();
     renderBtn_ = new QPushButton("Render");
     renderBtn_->setDefault(true);
@@ -1198,9 +1197,12 @@ void MainWindow::openFiles(const QStringList& paths) {
                                                       .arg(elsewhere.size()).arg(elsewhere.size() == 1 ? " was" : "s were", elsewhere.mid(0, 3).join(", "), elsewhere.size() > 3 ? ", …" : ""));
 }
 
+// Open…: a window that lists the photos (a folder picker lists folders only, so a folder full of photos looked
+// empty and none could be chosen). One photo selected opens its whole folder; several are the stack.
 void MainWindow::chooseFolder() {
-    QString d = QFileDialog::getExistingDirectory(this, "Folder with the stack's frames", folder_.isEmpty() ? recent_.value(0) : folder_);
-    if (!d.isEmpty()) openFolder(d);
+    const QStringList fns = QFileDialog::getOpenFileNames(this, "Open a stack: select one photo to open its whole folder, or several to stack only those",
+                                                          folder_.isEmpty() ? recent_.value(0) : folder_, "Frames (*.tif *.tiff *.jpg *.jpeg);;All files (*)");
+    if (!fns.isEmpty()) openFiles(fns);
 }
 
 void MainWindow::openFolder(const QString& dir, const QStringList& only) {
