@@ -78,11 +78,14 @@ void ImageView::setLiveWindow(const QImage& img, const QRect& win, const QSize& 
     }
 }
 
-void ImageView::setOverlay(const QImage& argb) {
+void ImageView::setOverlay(const QImage& argb, double opacity) {
     if (argb.isNull()) { overlay_->setVisible(false); overlay_->setPixmap(QPixmap()); return; }
     overlay_->setPixmap(QPixmap::fromImage(argb));
+    overlay_->setOpacity(opacity);
     overlay_->setVisible(true);
 }
+
+void ImageView::setOverlayOpacity(double opacity) { overlay_->setOpacity(opacity); }
 
 // A new image keeps the user's zoom and position (as fractions of the image, so
 // images of different sizes - a raw frame, a warped one, a full-resolution one -

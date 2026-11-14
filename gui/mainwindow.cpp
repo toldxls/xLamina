@@ -32,6 +32,7 @@
 #include <QTextBrowser>
 #include <QToolBar>
 #include <QToolButton>
+#include <QToolTip>
 #include <tuple>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -231,7 +232,7 @@ void MainWindow::buildMenus() {
     view->addSeparator();
     devAct_ = view->addAction("&Developer controls");
     devAct_->setCheckable(true);
-    devAct_->setStatusTip("Show the Advanced depth / composition group, the C and B radii, and the outputs beyond B and C.");
+    devAct_->setStatusTip("Show the Advanced depth / composition group, the C and B radii, the outputs beyond B and C, and the depth map as a tab.");
     connect(devAct_, &QAction::toggled, this, &MainWindow::setDeveloper);
     // the panels (filled in buildUi, after the docks exist)
     view->addSeparator()->setObjectName("panels");
@@ -375,8 +376,20 @@ void MainWindow::buildUi() {
     cl->addWidget(progRow);
     setStage("Open a folder of TIFF frames, choose the outputs, press Render.");
     cl->addWidget(tabs_);
+    // the depth map's colours, under the tabs while the depth tab is on show (developer controls)
+    depthBar_ = new DepthBar(false);
+    depthBar_->hide();
+    cl->addWidget(depthBar_);
+    connect(depthBar_, &DepthBar::changed, this, [this] { setDepthStyle(depthBar_->style(), false); });
+    connect(depthBar_, &DepthBar::fitRequested, this, [this] {
+        if (!hasDepth()) return;
+        DepthStyle st = depthStyle_;
+        depthRange(result_->result.depth.data(), result_->result.depth.size(), (int)result_->align.paths.size(), st.lo, st.hi);
+        setDepthStyle(st, false);
+    });
     setCentralWidget(centre);
     connect(tabs_, &QTabBar::currentChanged, this, &MainWindow::showOutput);
+    connect(view_, &ImageView::hovered, this, &MainWindow::depthHover);
     connect(view_, &ImageView::zoomChanged, this, [this](double z) { status_->setText(QString("%1 %").arg(z * 100, 0, 'f', 0)); });
 
     // ---- left: frames
@@ -743,6 +756,8 @@ void MainWindow::loadSettings() {
     restoreGeometry(s.value("ui/geometry").toByteArray());
     restoreState(s.value("ui/state").toByteArray());
     theme_ = s.value("ui/theme", "dark").toString();
+    depthStyle_ = DepthStyle::load(s);
+    depthBar_->setStyle(depthStyle_);
     setDeveloper(s.value("ui/developer", false).toBool());
     for (QMenu* m : menuBar()->findChildren<QMenu*>())
         if (m->title() == "&Theme")
@@ -793,6 +808,7 @@ void MainWindow::saveSettings() {
     s.setValue("ui/state", saveState());
     s.setValue("ui/theme", theme_);
     s.setValue("ui/developer", developer_);
+    depthStyle_.save(s);
     s.setValue("recent", recent_);
     s.beginGroup("render");
     for (const char* n : kOutputs) s.setValue(QString("out_%1").arg(n), outputs_[n]->isChecked());
@@ -873,6 +889,47 @@ void MainWindow::setDeveloper(bool on) {
     if (mainForm_) { mainForm_->setRowVisible(cradius_, on); mainForm_->setRowVisible(bradius_, on); }
     for (int i = 2; i < kNumOutputs; ++i) if (!isMenuOutput(i)) outputs_[kOutputs[i]]->setVisible(on);   // A, B0 stay hidden boxes
     if (devOutMenu_) devOutMenu_->menuAction()->setVisible(on);
+    if (tabs_ && result_) {   // the depth tab comes and goes with the controls
+        const bool onDepth = current_ == "depth";
+        rebuildTabs();
+        if (onDepth && !on) showOutput(tabs_->currentIndex());
+    }
+    if (twoUp_ && !on) twoUp_->setDepth(nullptr, depthStyle_);
+}
+
+bool MainWindow::hasDepth() const {
+    return result_ && result_->rc == 0 && result_->result.w > 0 &&
+           result_->result.depth.size() == (size_t)result_->result.w * result_->result.h;
+}
+
+// the colours changed, here or in the two-up viewer: the tab's image is redrawn and the other window follows
+void MainWindow::setDepthStyle(const DepthStyle& st, bool fromTwoUp) {
+    DepthStyle s = st;
+    s.overlay = 0;   // the overlay is the viewer's own
+    const bool samePicture = s.sameImage(depthStyle_);
+    depthStyle_ = s;
+    depthBar_->setStyle(depthStyle_);
+    if (!samePicture) {
+        cache_.remove("depth");
+        if (current_ == "depth") showOutput(tabs_->currentIndex());
+    }
+    if (twoUp_ && !fromTwoUp) twoUp_->setDepthStyle(depthStyle_);
+}
+
+// the frame the depth map chose under the cursor: in the status bar for every output of the render, and in a
+// popup beside the cursor on the depth tab
+void MainWindow::depthHover(int x, int y) {
+    if (!developer_ || !hasDepth() || worker_.running() || current_.isEmpty() || current_ == "frame" || compare_.contains(current_)) return;
+    const auto& R = result_->result;
+    if (view_->image().size() != QSize(R.w, R.h)) return;
+    if (x < 0 || y < 0 || x >= R.w || y >= R.h) { QToolTip::hideText(); return; }
+    const int radius = std::clamp((int)std::lround(8.0 / std::max(view_->zoom(), 1e-3)), 1, 64);   // about 8 screen pixels
+    const QString text = depthFrameText(R.depth.data(), R.w, R.h, result_->align.paths, x, y, radius);
+    statusBar()->showMessage(QString("%1 — x %2, y %3: %4").arg(current_).arg(x).arg(y).arg(QString(text).replace('\n', "; ")));
+    if (depthStyle_.popup && current_ == "depth") {   // the one-pixel rectangle makes the popup follow every move
+        const QPoint at = QCursor::pos() + QPoint(14, 10);
+        QToolTip::showText(at, text, view_, QRect(view_->mapFromGlobal(at), QSize(1, 1)));
+    }
 }
 
 std::vector<std::string> MainWindow::selectedOutputs() const {
@@ -1120,6 +1177,7 @@ void MainWindow::onLiveView(int k, QImage image, QRect win, QSize full) {
     if (logViews) onLog(QString("view: frame %1 at %2 ms, %3x%4 of %5x%6 at (%7,%8)").arg(k).arg(elapsed_.elapsed()).arg(image.width()).arg(image.height()).arg(full.width()).arg(full.height()).arg(win.x()).arg(win.y()));
     k = liveItem_->data(Qt::UserRole).toInt();   // the folder's frame
     current_ = "frame";
+    depthBar_->hide();
     if (full.isValid() && win.isValid() && (win.size() != full || image.size() != full)) view_->setLiveWindow(image, win, full);
     else view_->setImage(image, true);
     // the count is the progress signal's (progressStatus_); the view only says which frame is on screen
@@ -1144,6 +1202,7 @@ void MainWindow::showFrame(int listRow) {
 void MainWindow::onFullFrame(int index, QImage image) {
     if (index != 0 || pendingFrame_ < 0 || pendingFrame_ >= frames_.size() || worker_.running()) return;
     current_ = "frame";
+    depthBar_->hide();
     view_->setImage(forDisplay(image), true);
     view_->setLabel(QFileInfo(frames_[pendingFrame_]).fileName());
     statusBar()->showMessage(QString("%1 — %2 x %3 (full resolution)").arg(QFileInfo(frames_[pendingFrame_]).fileName()).arg(image.width()).arg(image.height()));
@@ -1176,7 +1235,10 @@ void MainWindow::addComparison() {
 
 // the two-up viewer, fed with whatever this window holds: the last render's outputs and the comparison images
 void MainWindow::twoUp() {
-    if (!twoUp_) twoUp_ = new CompareWindow(this);
+    if (!twoUp_) {
+        twoUp_ = new CompareWindow(this);
+        connect(twoUp_, &CompareWindow::depthStyleChanged, this, [this](DepthStyle st) { setDepthStyle(st, true); });
+    }
     if (result_ && result_->rc == 0) {
         for (const auto& n : result_->result.names) {   // the written TIFF, when there is one, gives retouching its 16-bit data
             QString name = QString::fromStdString(n), tif = QDir(result_->outDir).filePath(name + ".tif");
@@ -1184,6 +1246,7 @@ void MainWindow::twoUp() {
         }
     }
     for (auto it = compare_.begin(); it != compare_.end(); ++it) twoUp_->addImage(it.key(), it.value(), "comparison image");
+    twoUp_->setDepth(developer_ && hasDepth() ? result_ : nullptr, depthStyle_);   // the depth map, with the developer controls
     twoUp_->show();
     twoUp_->raise();
     twoUp_->activateWindow();
@@ -1252,7 +1315,10 @@ void MainWindow::rebuildTabs() {
     while (tabs_->count()) tabs_->removeTab(0);
     if (result_ && result_->rc == 0) {
         for (const auto& n : result_->result.names) tabs_->addTab(QString::fromStdString(n));
-        // (the depth map is no longer a tab or a viewer entry; outputImage("depth") still renders it)
+        if (developer_ && hasDepth()) {   // the depth map, with the developer controls
+            int t = tabs_->addTab("depth");
+            tabs_->setTabToolTip(t, "The depth map: the frame each pixel of B comes from, in the colours chosen under the tabs.");
+        }
     }
     for (auto it = compare_.begin(); it != compare_.end(); ++it) {
         int t = tabs_->addTab(it.key());
@@ -1426,6 +1492,7 @@ void MainWindow::onPreview(QString name, QImage image) {
         return;
     }
     current_ = name;
+    depthBar_->hide();
     view_->setImage(image, true);
     view_->setLabel(name + "  (preview)");
     statusBar()->showMessage(QString("Preview: %1").arg(name));
@@ -1699,6 +1766,10 @@ void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
     setStage(QString("Done in %1 s (alignment %2 s, fusion %3 s).").arg(data->seconds, 0, 'f', 1).arg(data->align.seconds, 0, 'f', 1).arg(data->result.seconds, 0, 'f', 1));
     progress_->setValue(0);   // the bar empties when the work is done; its text says so
     setStatusGeometry(*data);
+    depthStyle_.lo = 0;   // the range belongs to a stack: the new one starts on all of its frames
+    depthStyle_.hi = -1;
+    depthBar_->setFrames((int)data->align.paths.size());
+    depthBar_->setStyle(depthStyle_);
     rebuildTabs();
     tabs_->setCurrentIndex(0);
     showOutput(0);
@@ -1863,10 +1934,7 @@ QImage MainWindow::outputImage(const QString& name) {
     const auto& R = result_->result;
     QImage img;
     if (name == "depth") {
-        int K = (int)result_->align.paths.size();
-        std::vector<float> rgb((size_t)R.w * R.h * 3);
-        for (size_t i = 0; i < (size_t)R.w * R.h; ++i) { float v = R.depth[i] / (float)std::max(K - 1, 1); rgb[i * 3] = rgb[i * 3 + 1] = rgb[i * 3 + 2] = v; }
-        img = toQImage(rgb.data(), R.w, R.h);
+        if (hasDepth()) img = depthImage(R.depth.data(), R.w, R.h, (int)result_->align.paths.size(), depthStyle_);
     } else {
         for (size_t i = 0; i < R.names.size(); ++i)
             if (QString::fromStdString(R.names[i]) == name) { img = forDisplay(toQImage(R.images[i].data(), R.w, R.h)); break; }
@@ -1881,6 +1949,7 @@ void MainWindow::showOutput(int tab) {
     QImage img = outputImage(name);
     if (img.isNull()) return;
     current_ = name;
+    depthBar_->setVisible(name == "depth" && !compare_.contains(name));
     view_->setImage(img, true);   // the zoomed area carries over from the live view / the other outputs
     view_->setLabel(compare_.contains(name) ? name + "  (comparison)" : name);
     statusBar()->showMessage(QString("%1 — %2 x %3%4").arg(name).arg(img.width()).arg(img.height()).arg(compare_.contains(name) ? " (comparison image)" : ""));
@@ -2134,7 +2203,7 @@ void MainWindow::preferences() {
     QPushButton* chk = new QPushButton("Check now…");
     connect(chk, &QPushButton::clicked, this, &MainWindow::checkForUpdates);
     gf->addRow("", chk);
-    QCheckBox* dev = new QCheckBox("Developer controls: the Advanced group, the C and B radii, the outputs beyond B and C");
+    QCheckBox* dev = new QCheckBox("Developer controls: the Advanced group, the C and B radii, the outputs beyond B and C, the depth map");
     dev->setChecked(devAct_->isChecked());
     connect(dev, &QCheckBox::toggled, devAct_, &QAction::setChecked);
     connect(devAct_, &QAction::toggled, dev, &QCheckBox::setChecked);

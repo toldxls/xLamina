@@ -29,6 +29,7 @@
 
 #include "benchmark.h"
 #include "compare.h"
+#include "depthview.h"
 #include "imageview.h"
 #include "prefs.h"
 #include "sweepdialog.h"
@@ -123,6 +124,13 @@ private:
     void rebuildTabs();
     QImage outputImage(const QString& name);
     QImage forDisplay(QImage img) const;   // the frames' colour space -> sRGB
+    // the depth map as a tab (developer controls): its colours (the bar under the tabs, shared with the two-up
+    // viewer) and the frame under the cursor
+    bool hasDepth() const;
+    void setDepthStyle(const DepthStyle& st, bool fromTwoUp);
+    void depthHover(int x, int y);
+    DepthStyle depthStyle_;
+    DepthBar* depthBar_ = nullptr;
 
     QString folder_;
     QStringList frames_;

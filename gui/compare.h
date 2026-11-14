@@ -14,10 +14,13 @@
 #include <QMainWindow>
 #include <QSplitter>
 #include <QTableWidget>
+#include <QToolBar>
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
+#include "depthview.h"
 #include "imageview.h"
 #include "worker.h"
 
@@ -32,6 +35,13 @@ public:
     void openSweep(const QString& dir);                                                 // dir/sweep.json
     void select(int pane, const QString& name);
     void setRetouch(bool on);   // retouching on or off, as the R toolbar button (the main window's Retouch button)
+    // the render's depth map (developer controls): a "depth" entry drawn in `st`, the Depth toolbar, the frame under
+    // the cursor in the status bar and the overlay. null = no depth map (the toolbar hides)
+    void setDepth(std::shared_ptr<JobResultData> r, const DepthStyle& st);
+    void setDepthStyle(const DepthStyle& st);   // from the main window's controls: no signal back
+
+signals:
+    void depthStyleChanged(DepthStyle st);      // the Depth toolbar changed it
 
 protected:
     void keyPressEvent(QKeyEvent* e) override;
@@ -64,6 +74,15 @@ private:
     void openImageDialog();
     void openSweepDialog();
     void updateOverlay();        // the difference highlight over both panes, when it is on and both images are loaded
+    // ---- the depth map
+    void recolourDepth();        // the "depth" entry redrawn in depthStyle_
+    bool depthOverlay();         // the map over the panes that show another image of its size; false when it is off
+    void depthHover(int pane, int x, int y);
+    std::shared_ptr<JobResultData> depth_;
+    DepthStyle depthStyle_;
+    DepthBar* depthBar_ = nullptr;
+    QToolBar* depthTb_ = nullptr;
+    bool depthOv_[2] = {false, false};   // the pane's overlay pixmap is the current depth image
 
     // ---- retouch
     struct Stroke { QRect r; std::vector<uint8_t> mask; };   // the mask before the stroke, inside r

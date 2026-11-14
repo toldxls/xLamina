@@ -19,6 +19,7 @@
 #include <QSettings>
 #include <QStatusBar>
 #include <QToolBar>
+#include <QToolTip>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -127,6 +128,30 @@ CompareWindow::CompareWindow(QWidget* parent) : QMainWindow(parent) {
     brushSize_->setEnabled(false);
     brushHard_->setEnabled(false);
 
+    // ---- the depth map's colours (a row of its own, shown when the render's depth map is in the list)
+    addToolBarBreak();
+    depthTb_ = addToolBar("Depth");
+    depthTb_->setMovable(false);
+    depthBar_ = new DepthBar(true);
+    depthTb_->addWidget(depthBar_);
+    depthTb_->hide();
+    connect(depthBar_, &DepthBar::changed, this, [this] {
+        const DepthStyle st = depthBar_->style();
+        const bool samePicture = st.sameImage(depthStyle_);
+        depthStyle_ = st;
+        if (!samePicture) recolourDepth();
+        else updateOverlay();
+        emit depthStyleChanged(depthStyle_);
+    });
+    connect(depthBar_, &DepthBar::fitRequested, this, [this] {
+        if (!depth_) return;
+        const auto& R = depth_->result;
+        depthRange(R.depth.data(), R.depth.size(), (int)depth_->align.paths.size(), depthStyle_.lo, depthStyle_.hi);
+        depthBar_->setStyle(depthStyle_);
+        recolourDepth();
+        emit depthStyleChanged(depthStyle_);
+    });
+
     // the list of images: name, change vs base, and the sweep options (or where it came from)
     list_ = new QTableWidget(0, 3);
     list_->setHorizontalHeaderLabels({"Image", "Change", "Options"});
@@ -172,6 +197,7 @@ CompareWindow::CompareWindow(QWidget* parent) : QMainWindow(parent) {
             if (syncing_ || (view_[b]->image().isNull() && !rt_.on)) return;
             syncing_ = true; view_[b]->syncFrom(view_[a]); syncing_ = false;
         });
+        connect(view_[a], &ImageView::hovered, this, [this, a](int x, int y) { depthHover(a, x, y); });
     }
     // the brush paints on the left pane
     connect(view_[0], &ImageView::strokeBegin, this, [this](QPointF p) {
@@ -410,6 +436,8 @@ void CompareWindow::refresh(int pane) {
 // |luma(left) - luma(right)| as an orange tint: transparent up to the chosen level, opaque at four times it.
 // Both panes get the same overlay, so the highlight sits on the pixels in question whichever image is under it.
 void CompareWindow::updateOverlay() {
+    if (!diffAct_->isChecked() && depthOverlay()) { overlayFor_[0] = overlayFor_[1] = -1; return; }
+    depthOv_[0] = depthOv_[1] = false;   // from here on the overlays are the difference's, or none
     if (!diffAct_->isChecked() || sel_[0] < 0 || sel_[1] < 0 || entries_[sel_[0]].image.isNull() || entries_[sel_[1]].image.isNull()) {
         view_[0]->setOverlay(QImage());
         view_[1]->setOverlay(QImage());
@@ -452,6 +480,72 @@ void CompareWindow::updateOverlay() {
     overlayFor_[1] = sel_[1];
     statusBar()->showMessage(QString("Difference: %1 % of pixels differ by more than %2 % (%3 vs %4)")
                                  .arg(100.0 * hits / ((double)w * h), 0, 'f', 2).arg(pct).arg(entries_[sel_[0]].name, entries_[sel_[1]].name));
+}
+
+// ----------------------------------------------------------------------------- the depth map
+
+void CompareWindow::setDepth(std::shared_ptr<JobResultData> r, const DepthStyle& st) {
+    if (r && (r->rc != 0 || r->result.depth.size() != (size_t)r->result.w * r->result.h || r->result.depth.empty())) r.reset();
+    const bool same = r && r == depth_ && st.sameImage(depthStyle_) && indexOf("depth") >= 0;
+    depth_ = r;
+    const int keep = depthStyle_.overlay;   // the overlay belongs to this window
+    depthStyle_ = st;
+    depthStyle_.overlay = keep;
+    depthTb_->setVisible(depth_ != nullptr);
+    if (!depth_) { updateOverlay(); return; }
+    depthBar_->setFrames((int)depth_->align.paths.size());
+    depthBar_->setStyle(depthStyle_);
+    if (!same) recolourDepth();
+}
+
+void CompareWindow::setDepthStyle(const DepthStyle& st) {
+    if (!depth_) return;
+    const int keep = depthStyle_.overlay;
+    DepthStyle s = st;
+    s.overlay = keep;
+    if (s == depthStyle_) return;
+    const bool samePicture = s.sameImage(depthStyle_);
+    depthStyle_ = s;
+    depthBar_->setStyle(depthStyle_);
+    if (!samePicture) recolourDepth();
+}
+
+// the entry of that name is replaced (addEntry), and the panes showing it are refreshed
+void CompareWindow::recolourDepth() {
+    if (!depth_) return;
+    const auto& R = depth_->result;
+    depthOv_[0] = depthOv_[1] = false;
+    addImage("depth", depthImage(R.depth.data(), R.w, R.h, (int)depth_->align.paths.size(), depthStyle_), "this render's depth map");
+    updateOverlay();
+}
+
+bool CompareWindow::depthOverlay() {
+    const int di = depth_ && depthStyle_.overlay > 0 && !rt_.on ? indexOf("depth") : -1;
+    if (di < 0 || entries_[di].image.isNull()) return false;
+    const QImage& map = entries_[di].image;
+    const double op = depthStyle_.overlay / 100.0;
+    for (int p = 0; p < 2; ++p) {
+        const bool want = sel_[p] >= 0 && sel_[p] != di && entries_[sel_[p]].image.size() == map.size();
+        if (!want) { view_[p]->setOverlay(QImage()); depthOv_[p] = false; }
+        else if (depthOv_[p]) view_[p]->setOverlayOpacity(op);
+        else { view_[p]->setOverlay(map, op); depthOv_[p] = true; }
+    }
+    return true;
+}
+
+// the frame the depth map chose under the cursor, for any image on the render's pixel grid
+void CompareWindow::depthHover(int pane, int x, int y) {
+    if (!depth_ || sel_[pane] < 0) return;
+    const auto& R = depth_->result;
+    if (x < 0 || y < 0 || x >= R.w || y >= R.h || entries_[sel_[pane]].image.size() != QSize(R.w, R.h)) { QToolTip::hideText(); return; }
+    // "within" a patch of about 8 screen pixels around the cursor
+    const int radius = std::clamp((int)std::lround(8.0 / std::max(view_[pane]->zoom(), 1e-3)), 1, 64);
+    const QString text = depthFrameText(R.depth.data(), R.w, R.h, depth_->align.paths, x, y, radius);
+    statusBar()->showMessage(QString("x %1, y %2: %3").arg(x).arg(y).arg(QString(text).replace('\n', "; ")));
+    if (depthStyle_.popup && !rt_.on) {   // the one-pixel rectangle makes the popup follow every move
+        const QPoint at = QCursor::pos() + QPoint(14, 10);
+        QToolTip::showText(at, text, view_[pane], QRect(view_[pane]->mapFromGlobal(at), QSize(1, 1)));
+    }
 }
 
 void CompareWindow::flip() {

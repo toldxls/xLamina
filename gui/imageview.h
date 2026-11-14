@@ -31,7 +31,9 @@ public:
     void setLabel(const QString& text);   // the image's name, drawn in the corner so the active output is never in doubt
     void syncFrom(const ImageView* o);    // take o's transform and scroll position (the two-up viewer's shared view)
     bool fitted() const { return fitted_; }
-    void setOverlay(const QImage& argb);  // drawn over the image on the same pixel grid (the difference highlight); null = none
+    // drawn over the image on the same pixel grid (the difference highlight, the depth map); null = none
+    void setOverlay(const QImage& argb, double opacity = 1.0);
+    void setOverlayOpacity(double opacity);
     // retouch: the pane draws `img` (owned by the caller, same size as the image) instead of its pixmap; patch(r)
     // repaints r after the caller changed those pixels. mask (w*h, 0..255) is tinted when shown. null = back to the pixmap
     void setLive(const QImage* img, const std::vector<uint8_t>* mask);
