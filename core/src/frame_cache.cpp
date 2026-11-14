@@ -45,6 +45,13 @@ void FrameCache::prepare(const std::vector<fs::path>& paths, size_t budget_bytes
         if (stale) { spare_.push_back({it->second.buf, it->second.cap}); resident_ -= it->second.cap; it = entries_.erase(it); }
         else ++it;
     }
+    // no more spare buffers are kept than this stack has frames to read: the rest of a larger stack's go back now
+    // (a folder of 85 GB opened before one of 47 GB left 85 GB pinned beside it)
+    {
+        size_t missing = 0;
+        for (auto& k : keep) if (!entries_.count(k)) ++missing;
+        while (spare_.size() > missing) { cudaFreeHost(spare_.back().first); spare_.pop_back(); }
+    }
     if (budget_bytes > 0) { budget_ = budget_bytes; return; }
     // pinned memory is never paged, so stay well inside what is free now and inside a fixed share
     // of the machine, whatever the other programs (or a RAM disk) hold
@@ -125,6 +132,9 @@ uint8_t* FrameCache::reserve(size_t cap) {
                 spare_.pop_back();
                 return b;
             }
+        // none of this size: the spares are another stack's frame size and of no use to this one
+        for (auto& s : spare_) cudaFreeHost(s.first);
+        spare_.clear();
     }
     void* p = nullptr;
     if (cudaHostAlloc(&p, cap, cudaHostAllocPortable) != cudaSuccess) {

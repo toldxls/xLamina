@@ -637,7 +637,10 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
                     // renders of eight went through; with 86 % (225 of 261, the same stack with output A, 0.5 GB
                     // free) renders ended with the driver refusing every call (FINDINGS 54). Under nine tenths the
                     // render goes to strips as well
-                    if (po.stop_if_short && (devs.size() == 1 || frames_fit < 0.90 * K)) return 4;
+                    // (that rule was on from 9b5c54b and is off again: with the GUI's own buffers on the card the
+                    // everyday 261-frame render with seven outputs fell under nine tenths and took twice as long in
+                    // strips, where it had always rendered whole)
+                    if (po.stop_if_short && devs.size() == 1) return 4;
                 }
             } else if (frames_fit >= K / 4) {
                 S = 1;

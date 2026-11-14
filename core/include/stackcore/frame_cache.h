@@ -59,7 +59,7 @@ public:
     const Entry* insert(const std::filesystem::path& p, uint8_t* buf, size_t cap, size_t offset, size_t bytes);
     void unreserve(uint8_t* buf, size_t cap);              // the read failed: give the buffer back
 
-    size_t bytes() const { return resident_; }
+    size_t bytes() { std::lock_guard<std::mutex> lk(m_); size_t b = resident_; for (auto& s : spare_) b += s.second; return b; }   // everything pinned: resident, reserved and spare
     int count() const { return (int)entries_.size(); }
     size_t budget() const { return budget_; }
     size_t spare_bytes() { std::lock_guard<std::mutex> lk(m_); size_t b = 0; for (auto& s : spare_) b += s.second; return b; }
