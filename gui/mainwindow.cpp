@@ -1236,8 +1236,8 @@ void MainWindow::perfToUi(const PerfSettings& p) {
 
 // ----------------------------------------------------------------------------- folders and frames
 
-// Raw files are listed in the file windows too: a folder of them looked empty ("No items match your search") and
-// gave no hint why. What can be done with one is said when it is chosen.
+// Raw files are left out of the file windows unless the second file type is chosen there (beside developed frames
+// they only get in the way of picking); what can be done with one is said when it is chosen.
 static const char* kRawPatterns = "*.cr3 *.cr2 *.crw *.nef *.nrw *.arw *.dng *.raf *.orf *.rw2 *.pef *.srw";
 static bool isRawFile(const QString& path) {
     static const QStringList ext = QString(kRawPatterns).remove("*.").split(' ');
@@ -1266,7 +1266,7 @@ void MainWindow::openFiles(const QStringList& paths) {
 void MainWindow::chooseFolder() {
     const QStringList all = QFileDialog::getOpenFileNames(this, "Open a stack: select one photo to open its whole folder, or several to stack only those",
                                                           folder_.isEmpty() ? recent_.value(0) : folder_,
-                                                          QString("Frames and raw files (*.tif *.tiff *.jpg *.jpeg %1);;Frames only (*.tif *.tiff *.jpg *.jpeg);;All files (*)").arg(kRawPatterns));
+                                                          QString("Frames (*.tif *.tiff *.jpg *.jpeg);;Frames and raw files (*.tif *.tiff *.jpg *.jpeg %1);;All files (*)").arg(kRawPatterns));
     if (all.isEmpty()) return;
     QStringList fns;
     for (const QString& f : all) if (!isRawFile(f)) fns << f;
@@ -1902,7 +1902,7 @@ void MainWindow::chooseDustMap() {
     if (worker_.running()) { statusBar()->showMessage("A render is running; set the dust map when it has finished.", 4000); return; }
     const QString start = !dustPath_.isEmpty() ? QFileInfo(dustPath_).absolutePath() : folder_.isEmpty() ? recent_.value(0) : folder_;
     const QString fn = QFileDialog::getOpenFileName(this, "Dust map: a photograph of an evenly lit white background", start,
-                                                    QString("Images and raw files (*.tif *.tiff *.jpg *.jpeg *.png %1);;All files (*)").arg(kRawPatterns));
+                                                    QString("Images (*.tif *.tiff *.jpg *.jpeg *.png);;Images and raw files (*.tif *.tiff *.jpg *.jpeg *.png %1);;All files (*)").arg(kRawPatterns));
     if (fn.isEmpty()) return;
     // a raw file is the whole sensor; frames developed from raw are usually cropped a little, and a map of another
     // size cannot be used: said before the choice is made, not at the first render

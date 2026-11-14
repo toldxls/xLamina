@@ -82,7 +82,7 @@ li.aside { list-style:none; color:var(--dim); }
 <p>xLamina stacks a folder of focus-bracketed frames into one image that is sharp throughout. It needs 64-bit Windows 10 or 11 and an NVIDIA graphics card (GeForce GTX 16 / RTX 20 series or newer) with a current driver.</p>
 <ol>
   <li><b>Open the frames</b>: <b>Open</b> in the toolbar (<kbd>Ctrl+O</kbd>) and browse to the photos. Select <b>one</b> photo to open its whole folder, or drop the folder onto the window.</li>
-  <li class="aside">To stack only some of a folder's files: select <b>several</b> in the same window (Shift or Ctrl + click), or drop those files onto the window. <b>File &gt; Open a whole folder…</b> (<kbd>Ctrl+Shift+O</kbd>) chooses a folder by its name instead. Raw files are listed too, so that a folder of them does not look empty, but they cannot be stacked: develop them to TIFF or JPEG first.</li>
+  <li class="aside">To stack only some of a folder's files: select <b>several</b> in the same window (Shift or Ctrl + click), or drop those files onto the window. <b>File &gt; Open a whole folder…</b> (<kbd>Ctrl+Shift+O</kbd>) chooses a folder by its name instead. Raw files are not listed, so the developed frames are easy to pick; a folder that holds only raw files therefore looks empty. They cannot be stacked: develop them to TIFF or JPEG first.</li>
   <li><b>Tick the outputs</b> you want in the Render panel. <b>B</b> and <b>C</b> are ticked by default.</li>
   <li>Press <b>Render</b> (<kbd>F5</kbd>). The viewer splits in two while it works and shows the stack being built.</li>
   <li><b>Look at the results</b>: the tabs under the viewer switch between the outputs. Wheel to zoom, drag to pan.</li>
@@ -191,7 +191,7 @@ li.aside { list-style:none; color:var(--dim); }
 <ol>
   <li><b>Take the dust map:</b> a photograph of an evenly lit white background through the same optics, at the frames' size. Out of focus is fine; it must be bright and even.</li>
   <li><b>File &gt; Set dust map…</b>, or <b>Choose…</b> in the Dust map row of the Render panel, and choose it. The dust map's window opens (below).</li>
-  <li class="aside">The file window lists TIFF, JPEG, PNG and raw files. A raw file can be tried, but it is the whole sensor and frames developed from raw are usually cropped a little smaller: develop the dust photograph the same way as the frames and choose that file.</li>
+  <li class="aside">The file window lists TIFF, JPEG and PNG files; "Images and raw files" in its file type box lists raw files too. A raw file can be tried, but it is the whole sensor and frames developed from raw are usually cropped a little smaller: develop the dust photograph the same way as the frames and choose that file.</li>
   <li>Check what is marked, adjust if needed, and press <b>Use this dust map</b>.</li>
   <li>Render as usual. The map stays in use for every stack of that size, also after a restart, until you press <b>×</b> in the Dust map row. <b>Spots…</b> there opens the window again.</li>
 </ol>
