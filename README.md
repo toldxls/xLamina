@@ -35,19 +35,32 @@ cursor is named beside it, and the two-up viewer can lay the map over another im
 
 ## Hardware
 
-64-bit Windows and an NVIDIA GPU (Ampere or newer); a second GPU shares the work. A 200-frame
-stack of 31 Mpx frames needs about 6 GB of GPU memory.
+64-bit Windows 10 (1903 or later) or 11 and an NVIDIA GPU: GeForce GTX 16 / RTX 20 series or
+newer, with a current NVIDIA driver; a second GPU shares the work. It has been developed and
+tested on one PC (RTX 3080 Ti and RTX 3070, 191 GB of RAM); smaller machines are handled by
+falling back (fewer streams, the image rendered in strips, a coarser depth volume), which is
+slower. A 200-frame stack of 31 Mpx frames wants about 6 GB of GPU memory for the default depth
+resolution. At most 512 frames in one render.
 
 The frames are read once and kept in memory for the rest of the job and for the next render of
-the same folder, as long as they fit (up to 60 % of the machine's RAM): about 40 GB for 200
-16-bit frames, half that for 8-bit. Frames that do not fit are read from the drive again on
-every pass, which still works but runs at the drive's speed. A fast SSD is enough; a RAM disk
-gives no extra speed.
+the same folder, as long as they fit beside what the job itself needs (up to 60 % of the
+machine's RAM): about 40 GB for 200 16-bit frames, half that for 8-bit. Frames that do not fit
+are read from the drive again on every pass, which still works but runs at the drive's speed.
+A fast SSD is enough; a RAM disk gives no extra speed.
 
 ## Install
 
 Download `xLamina-<version>-win64.zip` from the Releases page, unzip it anywhere and run
 `xLamina.exe` in the `xLamina` folder it holds. It needs a current NVIDIA driver (see Hardware).
+
+The program is not signed, so Windows shows "Windows protected your PC" at the first start:
+choose More info, then Run anyway (or, before unzipping, right-click the zip, Properties, tick
+Unblock). A PC with Smart App Control switched on blocks unsigned programs outright.
+
+When a render fails, the message says what happened and what to try. Help > Report a problem
+saves one zip to the Desktop with the logs, the PC's details and the settings (no images, the
+user folder's name replaced) to send with a description; the logs themselves are in
+`%LOCALAPPDATA%\xLamina\logs`.
 
 Updates: a few seconds after it starts, xLamina asks GitHub for the latest release (Help >
 Check for updates at start turns this off). A newer one lights an **Update to x.y.z** button

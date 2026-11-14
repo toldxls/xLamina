@@ -40,6 +40,12 @@
 #include <algorithm>
 #include <cmath>
 
+#include <QGuiApplication>
+#include <QProcess>
+#include <QScreen>
+#include <QStandardPaths>
+
+#include "diaglog.h"
 #include "stackcore/tiff.h"
 #include "version.h"
 
@@ -69,7 +75,10 @@ static const int kMaxRecent = 8;
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle(QString("xLamina %1").arg(XLAMINA_VERSION));
-    resize(1500, 950);
+    {   // the first start's size, inside the screen it opens on (1500 x 950 put the tabs and the status bar below a laptop's screen)
+        const QRect avail = QGuiApplication::primaryScreen() ? QGuiApplication::primaryScreen()->availableGeometry() : QRect(0, 0, 1500, 950);
+        resize(std::min(1500, avail.width() - 40), std::min(950, avail.height() - 60));
+    }
     setAcceptDrops(true);
     gpus_ = enumerateGpus();
     buildMenus();
@@ -123,12 +132,28 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     if (appSettings().value("updates/auto", true).toBool()) QTimer::singleShot(2500, this, [this] { if (!updater_.busy()) updater_.check(); });
     // a PC that cannot render is told so at the start, not at the first Render (not modal: unattended runs go on)
     QTimer::singleShot(400, this, [this] {
-        QSettings s = appSettings();
-        const QList<int> sel = PerfSettings::load(s).gpus;   // the GPUs ticked in Preferences > Performance (none = all)
+        // the GPUs a render would use: those ticked in Preferences > Performance (none = all). A card named in the
+        // settings that is no longer in the PC is not ticked there, so it is not a reason to say "cannot render"
+        const QList<int> sel = perfFromUi().gpus;
         QString gp = QString::fromStdString(stackcore::gpu_problem(std::vector<int>(sel.begin(), sel.end())));
         if (gp.isEmpty()) return;
         onLog(gp);
         QMessageBox* box = new QMessageBox(QMessageBox::Warning, "xLamina", gp + "\n\nFrames can still be opened and compared, but not rendered.", QMessageBox::Ok, this);
+        box->setAttribute(Qt::WA_DeleteOnClose);
+        box->show();
+    });
+    // a render that never finished last time (the program closed by itself, froze and was ended, or the PC went
+    // down): said once at the next start, with the way to send the details (not modal: unattended runs go on)
+    QTimer::singleShot(900, this, [this] {
+        const QString u = DiagLog::takeUnfinished();
+        if (u.isEmpty()) return;
+        onLog("Last time: " + u);
+        DiagLog::write("the previous session did not finish: " + u);
+        QMessageBox* box = new QMessageBox(QMessageBox::Information, "xLamina",
+                                           QString("xLamina did not finish its last job:\n%1.\n\nIf it closed by itself or stopped responding, "
+                                                   "Save a report puts the details in one file to send.").arg(u), QMessageBox::Ok, this);
+        QPushButton* rep = box->addButton("Save a report…", QMessageBox::ActionRole);
+        connect(rep, &QPushButton::clicked, this, [this] { reportProblem(); });
         box->setAttribute(Qt::WA_DeleteOnClose);
         box->show();
     });
@@ -272,6 +297,11 @@ void MainWindow::buildMenus() {
     autoUpdateAct_->setStatusTip("A few seconds after xLamina starts, ask GitHub once; a newer release lights the Update button.");
     connect(autoUpdateAct_, &QAction::toggled, this, [](bool on) { appSettings().setValue("updates/auto", on); });
     help->addSeparator();
+    QAction* rep = help->addAction("&Report a problem…", this, [this] { reportProblem(); });
+    rep->setStatusTip("Save one file to send: the logs, this PC's details and the settings. No images.");
+    QAction* logs = help->addAction("Open the &log folder", this, [this] { QDesktopServices::openUrl(QUrl::fromLocalFile(DiagLog::dir())); });
+    logs->setStatusTip("The log files xLamina keeps: one per session, the last ten.");
+    help->addSeparator();
     help->addAction("&About xLamina", this, &MainWindow::about);
 }
 
@@ -392,6 +422,10 @@ void MainWindow::buildUi() {
     });
     setCentralWidget(centre);
     connect(tabs_, &QTabBar::currentChanged, this, &MainWindow::showOutput);
+    // a click on the tab that is already current shows its output again: after a frame was clicked in the list the
+    // view holds that frame, and with one output there was no way back to it
+    connect(tabs_, &QTabBar::tabBarClicked, this, [this](int i) { if (i >= 0 && i == tabs_->currentIndex()) showOutput(i); });
+    tabs_->installEventFilter(this);   // the middle button closes a comparison tab (eventFilter)
     connect(view_, &ImageView::hovered, this, &MainWindow::depthHover);
     connect(view_, &ImageView::viewChanged, this, [this] { if (hoverFrame_ >= 0) updateDepthHighlight(); });
     connect(view_, &ImageView::zoomChanged, this, [this](double z) { status_->setText(QString("%1 %").arg(z * 100, 0, 'f', 0)); });
@@ -684,7 +718,7 @@ void MainWindow::buildUi() {
     pfl->addRow("Streams per GPU", streams_);
     readers_ = new QSpinBox;
     readers_->setRange(1, 64);
-    readers_->setValue(16);
+    readers_->setValue(PerfSettings().readers);   // 16, fewer on a PC with fewer cores
     readers_->setToolTip("TIFF reader threads. Matters when the frames come from disk; resident frames are uploaded without reading.");
     pfl->addRow("Reader threads", readers_);
     pairThreads_ = new QSpinBox;
@@ -768,15 +802,18 @@ void MainWindow::loadSettings() {
             for (QAction* a : m->actions()) a->setChecked(a->data().toString() == theme_);
     recent_ = s.value("recent").toStringList();
     updateRecent();
+    // a number outside a list (a settings file edited by hand, or from another version) takes the default: a blank
+    // list rendered with whatever its empty value meant
+    auto combo = [](QComboBox* c, int v, int def) { c->setCurrentIndex(v >= 0 && v < c->count() ? v : def); };
     s.beginGroup("render");
     for (const char* n : kOutputs) outputs_[n]->setChecked(s.value(QString("out_%1").arg(n), outputs_[n]->isChecked()).toBool());
     if (!s.contains("cbToMenu")) { outputs_["CB"]->setChecked(false); s.setValue("cbToMenu", true); }   // 0.6.23: CB left the list, once
-    scale_->setCurrentIndex(s.value("scale", 0).toInt());
-    ref_->setCurrentIndex(s.value("ref", 0).toInt());
+    combo(scale_, s.value("scale", 0).toInt(), 0);
+    combo(ref_, s.value("ref", 0).toInt(), 0);
     lockScale_->setChecked(s.value("lockScale", false).toBool());
     fixRs_->setChecked(s.value("fixRs", true).toBool());
     fixBanding_->setChecked(s.value("fixBanding", false).toBool());
-    liveRes_->setCurrentIndex(s.value("liveRes", 2).toInt());
+    combo(liveRes_, s.value("liveRes", 2).toInt(), 2);
     interp_->setCurrentIndex(std::clamp(s.value("interp", 1).toInt(), 0, interp_->count() - 1));   // an odd ini value: never a blank combo
     softCutoff_->setValue(s.value("softCutoff", 0.9).toDouble());
     smoothing_->setValue(s.value("smoothing", 2.0).toDouble());
@@ -786,7 +823,7 @@ void MainWindow::loadSettings() {
     s.endGroup();
     s.beginGroup("advanced");
     advanced_->setChecked(s.value("enabled", false).toBool());
-    depthRes_->setCurrentIndex(s.value("depthRes", 1).toInt());
+    combo(depthRes_, s.value("depthRes", 1).toInt(), 1);
     focusRadius_->setValue(s.value("focusRadius", 6.0).toDouble());
     focusPower_->setValue(s.value("focusPower", 4.0).toDouble());
     depthFmPx_->setValue(s.value("depthFmPx", 6.0).toDouble());
@@ -1028,7 +1065,10 @@ PerfSettings MainWindow::perfFromUi() const {
 }
 
 void MainWindow::perfToUi(const PerfSettings& p) {
-    for (int i = 0; i < gpuBoxes_.size(); ++i) gpuBoxes_[i]->setChecked(p.gpus.isEmpty() || p.gpus.contains(gpus_[i].index));
+    // a list that names none of this PC's cards (a card was taken out) means all of them, as it does for a render
+    bool any = false;
+    for (const GpuInfo& g : gpus_) any = any || p.gpus.contains(g.index);
+    for (int i = 0; i < gpuBoxes_.size(); ++i) gpuBoxes_[i]->setChecked(!any || p.gpus.contains(gpus_[i].index));
     streams_->setValue(p.streams);
     readers_->setValue(p.readers);
     pairThreads_->setValue(p.pairThreads);
@@ -1069,6 +1109,16 @@ void MainWindow::openFolder(const QString& dir) {
     frameList_->clear();
     liveItem_ = markedItem_ = nullptr;   // the rows they pointed at are gone
     liveView_->hide();
+    // the last render belongs to the folder that was open: its tabs, its depth map and its Save as go with it (they
+    // stayed, under the new folder's name, and Save as proposed the new folder for the old image)
+    result_.reset();
+    cache_.clear();
+    depthIdx_.clear();
+    hoverFrame_ = -1;
+    if (twoUp_) twoUp_->setDepth(nullptr, depthStyle_);
+    rebuildTabs();
+    if (tabs_->count() == 0) { current_.clear(); depthBar_->hide(); view_->setCursorNote({}); view_->setPrecise(false); view_->setOverlay(QImage()); view_->setImage(QImage(), false); view_->setLabel({}); }
+    setBusy(false);
     colorSpace_ = QColorSpace();
     worker_.player()->setColorSpace(colorSpace_);
     // the stack is the files of the most common size; other files in the folder are listed greyed out. Between
@@ -1114,8 +1164,27 @@ void MainWindow::openFolder(const QString& dir) {
     setWindowTitle(QString("xLamina %1 — %2").arg(XLAMINA_VERSION, QDir::toNativeSeparators(dir)));
     framesDock_->setWindowTitle(QString("Frames (%1)").arg(frames_.size()));
     syncAllFramesBox();
+    // nothing usable: say why (the reason was only in each grey row's tooltip, under "0 frames of 0 x 0. Press Render.")
+    if (frames_.size() < 2) {
+        QMap<QString, int> why;
+        QString example;
+        for (int i = 0; i < files.size(); ++i)
+            if (!infos[i].ok()) { ++why[QString::fromStdString(infos[i].error)]; if (example.isEmpty()) example = files[i]; }
+        QString top;
+        int topn = 0;
+        for (auto it = why.begin(); it != why.end(); ++it) if (it.value() > topn) { top = it.key(); topn = it.value(); }
+        const QString msg = topn ? QString("None of the %1 image files in this folder can be stacked.\n\n%2 of them: %3 (for example %4).\n\n"
+                                           "xLamina reads 8- or 16-bit RGB or grey TIFF (uncompressed, LZW or ZIP) and JPEG.")
+                                       .arg(files.size()).arg(topn).arg(top, example)
+                                 : QString("This folder holds no two images of the same size to stack.");
+        setStage("No frames to stack in this folder.");
+        statusBar()->showMessage("No frames to stack in " + QDir::toNativeSeparators(dir));
+        if (batchRunning_) batchSkip(topn ? top : QString("no two images of one size"));
+        else QMessageBox::warning(this, "xLamina", msg);
+        return;
+    }
     QString note = QString("%1 frames of %2 x %3").arg(frames_.size()).arg(best.first).arg(best.second);
-    if (skipped) note += QString(" (%1 other file%2 left out)").arg(skipped).arg(skipped > 1 ? "s" : "");
+    if (skipped) note += QString(" (%1 other file%2 left out: point at a grey row for the reason)").arg(skipped).arg(skipped > 1 ? "s" : "");
     if (colorSpace_.isValid()) note += QString(", %1").arg(colorSpace_.description().isEmpty() ? "ICC profile" : colorSpace_.description());
     setStage(note + ". Press Render.");
     statusBar()->showMessage(note + " in " + QDir::toNativeSeparators(dir));
@@ -1158,6 +1227,11 @@ void MainWindow::warmCache() {
 void MainWindow::onThumbnail(int index, QImage image) {
     if (index < 0 || index >= frames_.size()) return;
     thumbsDone_.insert(index);
+    if (image.isNull()) {   // the file could not be read for its thumbnail: the row says so, and the render will too
+        for (int r = 0; r < frameList_->count(); ++r)
+            if (frameList_->item(r)->data(Qt::UserRole).toInt() == index) frameList_->item(r)->setToolTip("This file could not be read for its thumbnail; a render will stop at it. Untick it to leave it out.");
+        return;
+    }
     QIcon icon(QPixmap::fromImage(forDisplay(image)));
     for (int r = 0; r < frameList_->count(); ++r)   // every row showing this frame (a frame can be listed more than once)
         if (frameList_->item(r)->data(Qt::UserRole).toInt() == index) frameList_->item(r)->setIcon(icon);
@@ -1201,6 +1275,18 @@ void MainWindow::frameMenu(const QPoint& pos) {
         c->setToolTip("A second copy of this frame in the stack. Right-click to remove it.");
         frameList_->insertItem(row + 1, c);
     } else if (chosen == remove) {
+        // the row goes out of everything that points at rows first: the last render's list (the labels and the
+        // soft-frame cutoff walk it) and the flagged lists (Drop shifted / soft / warped untick them)
+        QListWidgetItem* gone = frameList_->item(row);
+        if (jobItems_.contains(gone)) jobItems_.clear();   // the labels no longer match the list: they stay as they are
+        shifted_.removeAll(gone);
+        soft_.removeAll(gone);
+        warped_.removeAll(gone);
+        if (liveItem_ == gone) liveItem_ = nullptr;
+        if (markedItem_ == gone) markedItem_ = nullptr;
+        dropShifted_->setEnabled(!shifted_.isEmpty());
+        dropSoft_->setEnabled(!soft_.isEmpty());
+        dropWarped_->setEnabled(!warped_.isEmpty());
         delete frameList_->takeItem(row);
     } else if (chosen == top || chosen == bottom) {
         QListWidgetItem* moved = frameList_->takeItem(row);
@@ -1267,8 +1353,17 @@ void MainWindow::showFrame(int listRow) {
 
 void MainWindow::onFullFrame(int index, QImage image) {
     if (index != 0 || pendingFrame_ < 0 || pendingFrame_ >= frames_.size() || worker_.running()) return;
+    if (image.isNull()) {   // (the status bar stayed on "loading at full resolution…" for ever)
+        statusBar()->showMessage(QString("%1 could not be read (is the drive still connected? is the file complete?)").arg(QFileInfo(frames_[pendingFrame_]).fileName()), 10000);
+        return;
+    }
     current_ = "frame";
     depthBar_->hide();
+    view_->setPrecise(false);
+    view_->setCursorNote({});
+    if (hoverFrame_ >= 0) { hoverFrame_ = -1; updateDepthHighlight(); }
+    view_->setOverlay(QImage());
+    highlightOn_ = false;
     view_->setImage(forDisplay(image), true);
     view_->setLabel(QFileInfo(frames_[pendingFrame_]).fileName());
     statusBar()->showMessage(QString("%1 — %2 x %3 (full resolution)").arg(QFileInfo(frames_[pendingFrame_]).fileName()).arg(image.width()).arg(image.height()));
@@ -1362,11 +1457,18 @@ void MainWindow::runSweep() {
     lastView_.invalidate();
     listTick_.start();
     int live = liveRes_->currentData().toInt();
+    logRunStart(QString("sweep of %1 variants").arg(vars.size()), jo);
     worker_.startSweep(jo, vars, dlg.outDir(), live > 0 ? live : 12);
 }
 
 void MainWindow::onComparison(int index, QImage image) {
     if (index != 0 || pendingCompare_.isEmpty()) return;
+    if (image.isNull()) {
+        QMessageBox::warning(this, "xLamina", QString("%1 could not be read.").arg(pendingCompare_));
+        statusBar()->clearMessage();
+        pendingCompare_.clear();
+        return;
+    }
     compare_[pendingCompare_] = forDisplay(image);   // read like a frame: the stack's profile is the best guess for its colours
     pendingCompare_.clear();
     rebuildTabs();
@@ -1465,9 +1567,16 @@ void MainWindow::render() {
     JobOptions jo;
     if (!buildJob(jo, true)) return;
     // no NVIDIA GPU, or one too old: said here in words (a batch goes on and notes the failure per folder instead)
-    if (QString gp = QString::fromStdString(stackcore::gpu_problem(jo.align.devs)); !gp.isEmpty() && !batchRunning_) {
+    if (QString gp = QString::fromStdString(stackcore::gpu_problem(jo.align.devs, true)); !gp.isEmpty() && !batchRunning_) {
         setStage("Cannot render: no usable NVIDIA GPU.");
         QMessageBox::warning(this, "xLamina", gp);
+        return;
+    }
+    // more frames than the depth stage takes: said now, not after the alignment and the first pass
+    if ((int)jobItems_.size() > stackcore::kMaxFrames && !batchRunning_) {
+        QMessageBox::warning(this, "xLamina", QString("%1 frames are ticked; one render takes at most %2.\n\n"
+                                                      "Untick frames (every second one, or one end of the stack) and render again.")
+                                                  .arg(jobItems_.size()).arg(stackcore::kMaxFrames));
         return;
     }
     if (!jo.stack.cache_frames) worker_.releaseCache();
@@ -1478,6 +1587,7 @@ void MainWindow::render() {
     log_->clear();
     liveView_->hide();
     saveSettings();
+    logRunStart("render", jo);
     setBusy(true);
     stageText_ = "starting";
     elapsed_.start();
@@ -1488,6 +1598,71 @@ void MainWindow::render() {
     listTick_.start();
     int live = liveRes_->currentData().toInt();
     worker_.start(jo, live > 0 ? live : 12, live == 0);
+}
+
+// A run's block in the session's log (diaglog.h): what is rendered and under which settings, so a log sent by
+// someone else says what their render was. The folder by its name only.
+void MainWindow::logRunStart(const QString& what, const stackcore::JobOptions& jo) {
+    QStringList l;
+    const QString first = jo.align.paths.empty() ? QString() : QString::fromStdWString(jo.align.paths.front().wstring());
+    TiffInfo info = first.isEmpty() ? TiffInfo() : tiff_probe(first.toStdWString());
+    qint64 bytes = 0;
+    for (const auto& p : jo.align.paths) bytes += QFileInfo(QString::fromStdWString(p.wstring())).size();
+    l << QString("folder \"%1\": %2 frames, %3 x %4, %5-bit, %6 sample%7, %8, %9 GB on disk")
+             .arg(QFileInfo(folder_).fileName()).arg(jo.align.paths.size()).arg(info.width).arg(info.height).arg(info.bits).arg(info.samples)
+             .arg(info.samples == 1 ? "" : "s", info.jpeg ? "JPEG" : info.wic ? "compressed TIFF" : "TIFF").arg(bytes / 1e9, 0, 'f', 1);
+    QStringList outs;
+    for (const auto& o : jo.stack.outputs) outs << QString::fromStdString(o);
+    l << QString("outputs %1; scale %2; reference %3; lock scale %4; interpolation %5; smoothing %6; C radius %7; B radius %8; FOV %9 mm")
+             .arg(outs.join(',')).arg(jo.stack.po.g.scale).arg(QString::fromStdString(jo.align.ref_rule)).arg(jo.align.lock_scale)
+             .arg(interp_->currentText()).arg(jo.stack.c_smoothing).arg(jo.stack.po.c_radius_px).arg(jo.stack.po.b_radius_px).arg(fov_->value());
+    l << QString("rolling-shutter fix %1; banding fix %2; depth resolution %3; advanced %4; live view 1/%5")
+             .arg(jo.stack.fix_rs).arg(jo.stack.fix_banding).arg(jo.stack.po.depth_fraction).arg(advanced_->isChecked()).arg(liveRes_->currentData().toInt());
+    l << perfFromUi().summary();
+    l << "now: " + hostSummary();
+    DiagLog::runStart(what, l);
+}
+
+// What a failed job tells the user: what happened, in words, and what to do next. The engine's cause when it noted
+// one (pipeline.h Fail), else the return code, else the first error line of the log.
+QString MainWindow::failureMessage(const JobResultData& d) const {
+    using stackcore::Fail;
+    const QString during = d.stage.isEmpty() ? QString() : QString(" during \"%1\"").arg(d.stage);
+    const QString detail = QString::fromStdString(d.fail.detail);
+    Fail kind = d.fail.kind;
+    if (d.rc == 4 && kind != Fail::HostMemory) kind = Fail::None;   // the cards' memory, said below
+    switch (kind) {
+    case Fail::HostMemory:
+        return QString("This PC ran out of memory (RAM)%1.\n\nClose other programs, untick \"Keep the frames resident in host memory\" in "
+                       "File > Preferences > Performance, or render fewer frames. Half resolution (Output) needs a quarter of the memory.").arg(during);
+    case Fail::GpuFault:
+        // a driver older than the build's GPU code ("the provided PTX was compiled with an unsupported toolchain"), or the
+        // start-of-render check's own sentence
+        if (detail.contains("PTX") || detail.contains("toolchain") || detail.contains("JIT"))
+            return QString("The NVIDIA driver on this PC is too old for xLamina.\n\nInstall the current driver (nvidia.com/drivers, or the NVIDIA app), then start xLamina again.");
+        if (detail.startsWith("The NVIDIA driver") || detail.startsWith("The graphics card") || detail.startsWith("xLamina needs")) return detail;
+        return QString("The graphics driver stopped responding%1 (%2).\n\nClose xLamina and open it again before the next render. "
+                       "If it happens again, update the NVIDIA driver.").arg(during, detail);
+    case Fail::FileRead:
+        return QString("A frame could not be read%1:\n%2\n\nCheck that the drive is still connected and the file opens elsewhere, "
+                       "or untick that frame and render again.").arg(during, detail);
+    case Fail::FileWrite:
+        return QString("The result could not be written:\n%1\n\nChoose another Output folder (or free some space, or close the program "
+                       "that has the file open) and render again.").arg(QDir::toNativeSeparators(detail));
+    case Fail::Alignment:
+        return QString("The frames could not be aligned: %1.\n\nIf one frame is unlike the others (another subject, a blank or badly "
+                       "blurred frame), untick it and render again.").arg(detail);
+    case Fail::TooManyFrames:
+        return QString("The stack has %1 frames; one render takes at most %2.\n\nUntick frames (every second one, or one end of the "
+                       "stack) and render again.").arg(detail).arg(stackcore::kMaxFrames);
+    default: break;
+    }
+    if (d.rc == 4)
+        return QString("The graphics card ran out of memory%1, even in strips and at a lower depth resolution.\n\nClose other programs "
+                       "that use the GPU, set Output to Half resolution, or untick outputs you do not need.").arg(during);
+    if (d.rc == 2) return QString("A setting was not accepted%1: %2").arg(during, d.error.isEmpty() ? "see the Log panel" : d.error);
+    return QString("The render failed%1.\n\n%2\n\nHelp > Report a problem saves the details in one file to send.")
+        .arg(during, d.error.isEmpty() ? "The Log panel has the details." : d.error);
 }
 
 void MainWindow::cancel() {
@@ -1801,12 +1976,24 @@ void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
         setBusy(false);
         liveView_->hide();
         resumeThumbnails();
+        DiagLog::runEnd(data->rc == 3 ? "sweep cancelled" : data->rc ? QString("sweep failed, code %1, stage \"%2\": %3").arg(data->rc).arg(data->stage, data->error)
+                                                                      : QString("sweep done in %1 s").arg(data->seconds, 0, 'f', 1));
         if (data->rc == 3) { setStage("Sweep cancelled."); return; }
-        setStage(data->rc ? "Sweep finished with failures; see the log." : QString("Sweep done: %1 variants in %2 s.").arg(data->variants).arg(data->seconds, 0, 'f', 1));
+        setStage(data->rc ? "Sweep finished with failures." : QString("Sweep done: %1 variants in %2 s.").arg(data->variants).arg(data->seconds, 0, 'f', 1));
         progress_->setValue(0);   // the bar empties when the work is done; its text says so
-        if (QFileInfo::exists(QDir(data->outDir).filePath("sweep.json"))) { twoUp(); twoUp_->openSweep(data->outDir); }
+        const bool any = QFileInfo::exists(QDir(data->outDir).filePath("sweep.json"));
+        if (data->rc) QMessageBox::warning(this, "xLamina", (any ? "Some of the sweep's variants failed.\n\n" : "The sweep failed.\n\n") + failureMessage(*data));
+        if (any) { twoUp(); twoUp_->openSweep(data->outDir); }
         return;
     }
+    // rendered, but the files could not be written: the images are here, so they are shown and can be saved elsewhere
+    const bool unwritten = data->rc == 6 && !data->result.names.empty();
+    const QString whyUnwritten = unwritten ? QDir::toNativeSeparators(QString::fromStdString(data->fail.detail)) : QString();
+    DiagLog::runEnd(data->rc == 0 ? QString("done in %1 s").arg(data->seconds, 0, 'f', 1)
+                    : data->rc == 3 ? QString("cancelled during \"%1\"").arg(data->stage)
+                    : QString("FAILED: code %1, cause %2 (%3), stage \"%4\", first error: %5").arg(data->rc).arg((int)data->fail.kind)
+                          .arg(QString::fromStdString(data->fail.detail), data->stage, data->error));
+    if (unwritten) data->rc = 0;
     result_ = data;
     // the render's finish time first, as Helicon names its files: B_2026-11-08_14-15-27_bicubic_s2_c32_b0
     result_->settingsTag = QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss") + "_" + jobTag_;
@@ -1822,14 +2009,30 @@ void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
     labelWobble(data->align, &data->result);
     if (data->rc == 3) { setStage("Cancelled."); if (batchRunning_) batchFinish(true); return; }
     if (data->rc != 0) {
-        setStage("Failed; see the log.");
+        const QString msg = failureMessage(*data);
+        QString first = msg.section('\n', 0, 0);   // the bar and the batch's list take the message's first line
+        if (first.endsWith(':')) first.chop(1);
+        if (data->fail.kind == stackcore::Fail::FileRead || data->fail.kind == stackcore::Fail::FileWrite) first += " (" + QString::fromStdString(data->fail.detail).section(':', 0, 0) + ")";
+        setStage("Failed: " + first);
         if (batchRunning_) {   // no box in a batch: note it and go on
-            batchLog_ << QString("%1: FAILED (%2)").arg(QDir::toNativeSeparators(batchCurrent_), log_->toPlainText().trimmed().section('\n', -1));
-            QTimer::singleShot(0, this, &MainWindow::batchNext);
-        } else QMessageBox::warning(this, "xLamina", "The render failed. The log has the details.");
+            batchLog_ << QString("%1: FAILED (%2)").arg(QDir::toNativeSeparators(batchCurrent_), first);
+            // a driver that stopped answering fails every folder that follows: the batch ends here
+            if (data->fail.kind == stackcore::Fail::GpuFault) {
+                batchLog_ << "The graphics driver stopped responding: close xLamina, open it again and run the rest of the batch.";
+                QTimer::singleShot(0, this, [this] { batchFinish(true); });
+            } else QTimer::singleShot(0, this, &MainWindow::batchNext);
+        } else {
+            QMessageBox box(QMessageBox::Warning, "xLamina", msg, QMessageBox::Ok, this);
+            QPushButton* log = box.addButton("Show the log", QMessageBox::ActionRole);
+            QPushButton* rep = box.addButton("Save a report…", QMessageBox::ActionRole);
+            box.exec();
+            if (box.clickedButton() == log) { if (QDockWidget* d = findChild<QDockWidget*>("log")) { d->show(); d->raise(); } }
+            if (box.clickedButton() == rep) reportProblem();
+        }
         return;
     }
-    setStage(QString("Done in %1 s (alignment %2 s, fusion %3 s).").arg(data->seconds, 0, 'f', 1).arg(data->align.seconds, 0, 'f', 1).arg(data->result.seconds, 0, 'f', 1));
+    if (unwritten) setStage(QString("Rendered in %1 s, but NOT written to the output folder. Use Save as.").arg(data->seconds, 0, 'f', 1));
+    else setStage(QString("Done in %1 s (alignment %2 s, fusion %3 s).").arg(data->seconds, 0, 'f', 1).arg(data->align.seconds, 0, 'f', 1).arg(data->result.seconds, 0, 'f', 1));
     progress_->setValue(0);   // the bar empties when the work is done; its text says so
     setStatusGeometry(*data);
     depthStyle_.lo = 0;   // the range belongs to a stack: the new one starts on all of its frames
@@ -1841,10 +2044,17 @@ void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
     rebuildTabs();
     tabs_->setCurrentIndex(0);
     showOutput(0);
+    if (unwritten && !batchRunning_)
+        QMessageBox::warning(this, "xLamina", QString("The render finished, but its files could not be written:\n%1\n\n"
+                                                      "The images are still here: look at them, and use Save as to keep them somewhere else. "
+                                                      "They are lost when the next render starts or xLamina closes.").arg(whyUnwritten));
     if (batchRunning_) {
-        ++batchDone_;
-        batchLog_ << QString("%1: %2 frames in %3 s -> %4").arg(QDir::toNativeSeparators(batchCurrent_)).arg(data->align.paths.size())
-                         .arg(data->seconds, 0, 'f', 1).arg(QDir::toNativeSeparators(data->outDir));
+        if (unwritten) batchLog_ << QString("%1: rendered but NOT WRITTEN (%2)").arg(QDir::toNativeSeparators(batchCurrent_), whyUnwritten);
+        else {
+            ++batchDone_;
+            batchLog_ << QString("%1: %2 frames in %3 s -> %4").arg(QDir::toNativeSeparators(batchCurrent_)).arg(data->align.paths.size())
+                             .arg(data->seconds, 0, 'f', 1).arg(QDir::toNativeSeparators(data->outDir));
+        }
         QTimer::singleShot(0, this, &MainWindow::batchNext);
     }
 }
@@ -1856,6 +2066,12 @@ QStringList MainWindow::frameFilesIn(const QString& dir) {
     for (const std::string& p : frame_file_patterns()) pats << QString::fromStdString(p);
     QStringList files = QDir(dir).entryList(pats, QDir::Files, QDir::Name);
     files.removeDuplicates();
+    // as a person reads the names: digits as numbers, case ignored (frame9 before frame10; plain code order stacked
+    // unpadded numbering as 1, 10, 100, 11, ...). The same order as Render > Sort frames by name.
+    QCollator coll;
+    coll.setNumericMode(true);
+    coll.setCaseSensitivity(Qt::CaseInsensitive);
+    std::stable_sort(files.begin(), files.end(), [&](const QString& a, const QString& b) { return coll.compare(a, b) < 0; });
     return files;
 }
 
@@ -2028,8 +2244,30 @@ void MainWindow::showOutput(int tab) {
     statusBar()->showMessage(QString("%1 — %2 x %3%4").arg(name).arg(img.width()).arg(img.height()).arg(compare_.contains(name) ? " (comparison image)" : ""));
 }
 
+// The middle button on a comparison tab closes it (the tab's tooltip has always said so).
+bool MainWindow::eventFilter(QObject* o, QEvent* e) {
+    if (o == tabs_ && e->type() == QEvent::MouseButtonRelease) {
+        auto* me = static_cast<QMouseEvent*>(e);
+        const int t = me->button() == Qt::MiddleButton ? tabs_->tabAt(me->position().toPoint()) : -1;
+        if (t >= 0 && compare_.contains(tabs_->tabText(t))) {
+            const QString name = tabs_->tabText(t);
+            compare_.remove(name);
+            cache_.remove(name);
+            rebuildTabs();
+            if (tabs_->count()) showOutput(tabs_->currentIndex());
+            else { current_.clear(); view_->setImage(QImage(), false); view_->setLabel({}); }
+            setBusy(worker_.running());
+            statusBar()->showMessage(QString("%1 closed.").arg(name), 4000);
+            return true;
+        }
+    }
+    return QMainWindow::eventFilter(o, e);
+}
+
 void MainWindow::saveCurrent() {
-    if (current_.isEmpty() || current_ == "frame") return;
+    // a frame is on screen (one was clicked in the list): Save as means the output of the current tab
+    if ((current_.isEmpty() || current_ == "frame") && tabs_->count() > 0 && tabs_->currentIndex() >= 0) showOutput(tabs_->currentIndex());
+    if (current_.isEmpty() || current_ == "frame") { statusBar()->showMessage("Nothing to save yet: render first.", 5000); return; }
     bool isCompare = compare_.contains(current_);
     if (!result_ && !isCompare) return;
     // a render's file carries its finish time, settings and output field of view:
@@ -2336,6 +2574,24 @@ void MainWindow::openManual() {
                                                   .arg(QDir::toNativeSeparators(app + "/manual/index.html")));
 }
 
+// Help > Report a problem: one file on the Desktop with what is needed to look into a failure from elsewhere
+// (diaglog.h): the last sessions' logs, this PC's details, the settings. No image data; the user's folder is not named.
+void MainWindow::reportProblem() {
+    QString folder = QStandardPaths::writableLocation(QStandardPaths::DesktopLocation);
+    if (folder.isEmpty() || !QFileInfo(folder).isWritable()) folder = QDir::tempPath();
+    QString note;
+    if (result_) note = QString("last render: code %1, %2 frames, stage \"%3\", %4").arg(result_->rc).arg(result_->align.paths.size()).arg(result_->stage, result_->error);
+    QString why;
+    const QString p = DiagLog::makeReport(folder, note, &why);
+    if (p.isEmpty()) { QMessageBox::warning(this, "xLamina", "The report could not be saved: " + why); return; }
+    QProcess::startDetached("explorer.exe", {"/select,", QDir::toNativeSeparators(p)});
+    QMessageBox::information(this, "Report a problem",
+                             QString("Saved:\n%1\n\nIt holds the logs of this session and the two before it, this PC's details (Windows, processor, "
+                                     "memory, graphics cards and driver) and xLamina's settings. It holds no images, and your user folder's name "
+                                     "is replaced.\n\nSend that file, with a few words on what you did and what you saw, to the person who gave you xLamina, or "
+                                     "attach it to an issue at github.com/toldxls/xLamina.").arg(QDir::toNativeSeparators(p)));
+}
+
 void MainWindow::about() {
     QMessageBox box(this);
     box.setWindowTitle("About xLamina");
@@ -2371,10 +2627,23 @@ void MainWindow::dropEvent(QDropEvent* e) {
         if (result_ && (ext == "tif" || ext == "tiff" || ext == "jpg" || ext == "jpeg" || ext == "png")) {
             TiffInfo info = tiff_probe(p.toStdWString());
             if (info.ok() && info.samples >= 3) { pendingCompare_ = fi.fileName(); compareLoader_.start({p}, 1 << 20); }
-            else { QImage img = readImageViaWindows(p); if (!img.isNull()) { compare_[fi.fileName()] = img; rebuildTabs(); } }
+            else {
+                QString why;
+                QImage img = readImageViaWindows(p, &why);
+                if (img.isNull()) QMessageBox::warning(this, "xLamina", QString("%1 could not be read:\n%2").arg(fi.fileName(), why));
+                else {
+                    compare_[fi.fileName()] = img;
+                    rebuildTabs();
+                    for (int i = 0; i < tabs_->count(); ++i) if (tabs_->tabText(i) == fi.fileName()) tabs_->setCurrentIndex(i);
+                    showOutput(tabs_->currentIndex());
+                }
+            }
             break;
         }
-        openFolder(fi.absolutePath());
+        // an image file: its folder is the stack. Anything else is not something xLamina opens
+        if (ext == "tif" || ext == "tiff" || ext == "jpg" || ext == "jpeg") { openFolder(fi.absolutePath()); break; }
+        QMessageBox::information(this, "xLamina", QString("%1 is not a folder of frames.\n\nDrop a folder that holds the stack's TIFF or JPEG frames%2.")
+                                                      .arg(fi.fileName(), ext == "zip" || ext == "7z" || ext == "rar" ? " (unpack the archive first)" : ""));
         break;
     }
 }
@@ -2384,7 +2653,18 @@ void MainWindow::closeEvent(QCloseEvent* e) {
         if (QMessageBox::question(this, "xLamina", "A render is running. Cancel it and quit?") != QMessageBox::Yes) { e->ignore(); return; }
         batchRunning_ = false;
         worker_.cancel();
+        DiagLog::runEnd("closed by the user during the run");   // not a run that died: no notice at the next start
     }
+    // the two-up viewer asks about unsaved retouch strokes; "No" there keeps xLamina open
+    if (twoUp_ && twoUp_->isVisible() && !twoUp_->close()) { e->ignore(); return; }
     saveSettings();
     e->accept();
+}
+
+// The loaders' threads end before the members go: the worker (the last member, so the first to go) owns the frame
+// cache they read into, and a window closed while the thumbnails loaded left them writing into freed memory.
+MainWindow::~MainWindow() {
+    thumbs_.shutdown();
+    frameLoader_.shutdown();
+    compareLoader_.shutdown();
 }

@@ -310,7 +310,7 @@ TiffInfo tiff_probe(const std::filesystem::path& path) {
     };
     std::string tiff_date, exif_date, exif_subsec;
     uint64_t exif_ifd = 0;
-    bool tiled = false;
+    bool tiled = false, has_pm = false, preview = false;
     for (uint64_t i = 0; i < n; ++i) {
         const uint8_t* e = ent.data() + i * esz;
         uint16_t tag = (uint16_t)P.num(e, 2), type = (uint16_t)P.num(e + 2, 2);
@@ -328,7 +328,7 @@ TiffInfo tiff_probe(const std::filesystem::path& path) {
             continue;
         }
         switch (tag) {
-            case 256: case 257: case 258: case 259: case 262: case 273: case 277: case 278: case 279:
+            case 254: case 256: case 257: case 258: case 259: case 262: case 273: case 277: case 278: case 279:
             case 284: case 322: case 323: case 324: case 325: case 339:
                 if (!values(e, type, count, v)) { t.error = "bad tag " + std::to_string(tag); return t; }
                 break;
@@ -339,7 +339,8 @@ TiffInfo tiff_probe(const std::filesystem::path& path) {
             case 257: t.height = (uint32_t)v[0]; break;
             case 258: t.bits = (uint16_t)v[0]; break;
             case 259: t.compression = (uint16_t)v[0]; break;
-            case 262: t.photometric = (uint16_t)v[0]; break;
+            case 254: preview = (v[0] & 1) != 0; break;   // NewSubfileType: a reduced-resolution image
+            case 262: t.photometric = (uint16_t)v[0]; has_pm = true; break;
             case 273: t.strip_offsets = v; break;
             case 277: t.samples = (uint16_t)v[0]; break;
             case 279: t.strip_bytes = v; break;
@@ -369,7 +370,8 @@ TiffInfo tiff_probe(const std::filesystem::path& path) {
     }
     t.datetime = !exif_date.empty() ? exif_date : tiff_date;
     if (!exif_date.empty() && !exif_subsec.empty()) t.datetime += "." + exif_subsec;
-    if (!t.width || !t.height || !t.samples) { t.error = "missing size tags"; return t; }
+    if (!t.samples) t.samples = 1;   // SamplesPerPixel is 1 when the tag is absent, as grey and palette files leave it
+    if (!t.width || !t.height) { t.error = "missing size tags"; return t; }
     // a side past 2^20 px is no camera frame, and keeps pixel_bytes() (and every int width / height) from wrapping
     if (t.width > (1u << 20) || t.height > (1u << 20)) { t.error = "image too large"; return t; }
     // and no more than 2^30 pixels: the kernels index pixels with 32-bit integers (a frame that size would not fit
@@ -378,14 +380,28 @@ TiffInfo tiff_probe(const std::filesystem::path& path) {
     if (t.samples != 1 && t.samples != 3 && t.samples != 4) { t.error = "unsupported sample count " + std::to_string(t.samples); return t; }
     if (t.bits == 0) t.bits = 8;
     if (t.bits != 8 && t.bits != 16) { t.error = "unsupported bits " + std::to_string(t.bits); return t; }
-    if (t.sample_format != 1) { t.error = "unsupported sample format"; return t; }
+    if (t.sample_format != 1) { t.error = "unsupported sample format (floating-point or signed samples; export 8- or 16-bit)"; return t; }
+    // only the first image of a file is read: when that is a preview of the real one, stacking it would give a small
+    // soft result without a word
+    if (preview) { t.error = "the file's first image is a reduced-size preview (export a plain TIFF)"; return t; }
+    // what the samples mean. Read straight from the file, anything but RGB (2) or grey with black as zero (1) came out
+    // as false colour or a negative, without a word; white-is-zero grey and palette images go through Windows' decoder
+    bool convert = false;
+    if (has_pm) {
+        const uint16_t pm = t.photometric;
+        if (pm == 5) { t.error = "CMYK TIFF is not supported (export RGB)"; return t; }
+        if (pm == 6 || pm == 8 || pm == 9 || pm == 10) { t.error = "YCbCr / Lab TIFF is not supported (export RGB)"; return t; }
+        if (pm == 0 || pm == 3) convert = true;
+        else if (pm != 1 && pm != 2) { t.error = "unsupported TIFF colour model " + std::to_string(pm) + " (export RGB)"; return t; }
+    }
     if (t.compression == 0) t.compression = 1;
-    if (t.compression != 1 || t.planar != 1 || tiled) {
+    if (t.compression != 1 || t.planar != 1 || tiled || convert) {
+        if (t.bigtiff) { t.error = "compressed or tiled BigTIFF is not supported (save an uncompressed or an ordinary TIFF)"; return t; }
+
         // not readable straight from the file: Windows' TIFF decoder unpacks it into the buffer as chunky RGB
         // (LZW 5, ZIP 8 / 32946, PackBits 32773, with or without the predictor; tiles; planar samples)
         const uint16_t c = t.compression;
         if (c != 1 && c != 5 && c != 8 && c != 32946 && c != 32773) { t.error = "TIFF compression " + std::to_string(c) + " is not supported (use none, LZW or ZIP)"; return t; }
-        if (t.photometric == 5) { t.error = "CMYK TIFF is not supported"; return t; }
         t.wic = true;
         t.samples = 3;
         t.planar = 1;

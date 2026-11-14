@@ -5,8 +5,10 @@
 #include <thrust/sort.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <stdexcept>
 
 #include "stackcore/depth.h"
@@ -688,15 +690,19 @@ std::vector<float> noise_from_pair(const float* d_a, const float* d_b, int w, in
     return mad;
 }
 
-bool write_tiff_rgb16(const std::string& path, const std::vector<float>& rgb, int w, int h, const std::vector<uint8_t>& icc) {
+// Written beside the target as <path>.tmp and renamed over it when every byte is on the disk, so a write that fails
+// (the disk full, the target open in another program) leaves the file that was there as it was and no half-written
+// TIFF with a valid header. `why`, when given, takes the system's reason for a failure.
+bool write_tiff_rgb16(const std::string& path, const std::vector<float>& rgb, int w, int h, const std::vector<uint8_t>& icc, std::string* why) {
+    auto fail = [&](const std::string& what) { if (why) *why = what; return false; };
+    auto sys = [](const char* doing) { return std::string(doing) + ": " + strerror(errno); };
     size_t n = (size_t)w * h * 3;
-    std::vector<uint16_t> u(n);
-    for (size_t i = 0; i < n; ++i) {
-        float v = std::min(std::max(rgb[i], 0.f), 1.f);
-        u[i] = (uint16_t)(v * 65535.0f + 0.5f);
-    }
-    FILE* f = fopen(path.c_str(), "wb");
-    if (!f) return false;
+    if (rgb.size() < n) return fail("the image is incomplete");
+    if (n * 2 > 0xFFFF0000u - icc.size()) return fail("the image is too large for a TIFF file (4 GB)");
+    const std::string tmp = path + ".tmp";
+    FILE* f = fopen(tmp.c_str(), "wb");
+    if (!f) return fail(sys("cannot create the file"));
+    struct Shut { FILE*& f; const std::string& tmp; bool keep = false; ~Shut() { if (f) fclose(f); if (!keep) remove(tmp.c_str()); } } shut{f, tmp};
     // classic little-endian TIFF: header, IFD, BitsPerSample / SampleFormat arrays, ICC profile, then the strip
     bool has_icc = !icc.empty();
     uint32_t ifd_off = 8, n_ent = has_icc ? 12 : 11;
@@ -728,9 +734,25 @@ bool write_tiff_rgb16(const std::string& path, const std::vector<float>& rgb, in
     if (has_icc) fwrite(icc.data(), 1, icc.size(), f);
     long pos = ftell(f);
     while ((uint32_t)pos < data_off) { fputc(0, f); ++pos; }
-    size_t m = fwrite(u.data(), 2, n, f);
-    fclose(f);
-    return m == n;
+    // the 16-bit rows, a block at a time (the whole image as one more buffer was 190 MB per output, all outputs at once)
+    const size_t block = (size_t)w * 3 * 64;
+    std::vector<uint16_t> u(std::min(block, n));
+    for (size_t i0 = 0; i0 < n; i0 += u.size()) {
+        const size_t c = std::min(u.size(), n - i0);
+        for (size_t i = 0; i < c; ++i) {
+            float v = std::min(std::max(rgb[i0 + i], 0.f), 1.f);
+            u[i] = (uint16_t)(v * 65535.0f + 0.5f);
+        }
+        if (fwrite(u.data(), 2, c, f) != c) return fail(sys("cannot write the file"));
+    }
+    if (ferror(f)) return fail(sys("cannot write the file"));
+    FILE* g = f;
+    f = nullptr;
+    if (fclose(g) != 0) return fail(sys("cannot write the file"));
+    remove(path.c_str());   // (rename does not replace a file on Windows; a target that cannot be removed fails the rename)
+    if (rename(tmp.c_str(), path.c_str()) != 0) return fail(sys("cannot replace the file (is it open in another program?)"));
+    shut.keep = true;
+    return true;
 }
 
 }  // namespace stackcore

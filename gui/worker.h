@@ -28,7 +28,10 @@ struct JobResultData {
     stackcore::AlignOut align;
     QString reportJson;
     QString outDir;
-    int rc = 0;
+    int rc = 0;           // 0 done, 1 failed, 2 a bad option, 3 cancelled, 4 the GPU memory ran out, 6 rendered but not written
+    stackcore::FailInfo fail;   // the cause the engine noted (pipeline.h), for the message
+    QString stage;        // the stage the job was in when it ended
+    QString error;        // the first error line of the job's log
     double seconds = 0;   // wall time of the whole job (alignment + fusion + writing)
     bool sweep = false;   // a sweep (outDir holds sweep.json and the variants), not a render: `result` is empty
     int variants = 0;
@@ -92,9 +95,10 @@ public:
     // emits thumbnail(i, image) per file, or thumbnail(indices[i], image) when indices are given (a partial list)
     void start(const QStringList& files, int width, const QList<int>& indices = {});
     void stop();
+    void shutdown();   // stop and wait for the threads: before the frame cache they fill goes (the window's end)
 
 signals:
-    void thumbnail(int index, QImage image);
+    void thumbnail(int index, QImage image);   // a null image: the file could not be read
 
 private:
     QThread thread_;

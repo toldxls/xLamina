@@ -187,10 +187,15 @@ void ManualShots::markAll(const QString& shot, QWidget* root) {
 void ManualShots::grab(QWidget* root, const QString& shot) {
     if (!root) return;
     // a whole window is mostly photograph: JPEG there (a fifth of the PNG's size), PNG for the small panels and dialogs
-    const QPixmap px = root->grab();
-    const bool photo = px.width() * px.height() > 900000;
+    // two pixels per screen pixel, so the manual's zoom view has something to show: text and controls are drawn
+    // at that scale, and a viewer's image from twice as many of its own pixels
+    QPixmap px(root->size() * 2);
+    px.setDevicePixelRatio(2.0);
+    px.fill(root->palette().color(QPalette::Window));
+    root->render(&px);
+    const bool photo = root->width() * root->height() > 900000;
     QFile::remove(QDir(dir_).filePath(shot + (photo ? ".png" : ".jpg")));
-    px.save(QDir(dir_).filePath(shot + (photo ? ".jpg" : ".png")), photo ? "JPG" : "PNG", photo ? 92 : -1);
+    px.save(QDir(dir_).filePath(shot + (photo ? ".jpg" : ".png")), photo ? "JPG" : "PNG", photo ? 88 : -1);
     markAll(shot, root);
 }
 

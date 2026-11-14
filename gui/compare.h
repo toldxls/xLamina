@@ -96,6 +96,7 @@ private:
         std::vector<Stroke> undo;
         Stroke current;
         bool inStroke = false, dirty = false, peek = false;
+        bool baked = false, dropped = false;   // unsaved strokes that Undo no longer reaches: baked into the target, or past the undo depth
         QPointF last;
         std::vector<uint8_t> icc;
     } rt_;

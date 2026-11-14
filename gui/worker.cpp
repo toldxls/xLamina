@@ -1,5 +1,7 @@
 #include "worker.h"
 
+#include "diaglog.h"
+
 #include <QMetaObject>
 
 #include <algorithm>
@@ -115,7 +117,22 @@ void Worker::launch(std::shared_ptr<JobOptions> jo, std::shared_ptr<JobResultDat
     worker->moveToThread(&thread_);
     thread_.start();
     QMetaObject::invokeMethod(worker, [this, jo, data, worker, liveDown, quiet, run] {
-        set_log([this](const std::string& s) { emit logLine(QString::fromStdString(s)); });
+        // every line goes to the session's file on this thread, so it is on the disk whatever happens next; the first
+        // line that reports an error is kept for the failure message
+        auto firstError = std::make_shared<QString>();
+        auto lastStage = std::make_shared<QString>();
+        auto guard = std::make_shared<std::mutex>();
+        set_log([this, firstError, guard](const std::string& s) {
+            const QString line = QString::fromStdString(s);
+            DiagLog::write(line);
+            const QString t = line.trimmed();
+            if (t.startsWith("error:") || t.startsWith("failed:") || t.startsWith("CUDA error") || t.startsWith("cannot ") || t.contains("ran out")) {
+                std::lock_guard<std::mutex> lk(*guard);
+                if (firstError->isEmpty()) *firstError = t;
+            }
+            emit logLine(line);
+        });
+        stackcore::take_fail();   // nothing left over from an earlier job
         Hooks hooks;
         hooks.cancel = &cancel_;
         // the building maps go to the right pane, which never shows more than ~1/4 of the output: at Full (1) they were
@@ -126,7 +143,13 @@ void Worker::launch(std::shared_ptr<JobOptions> jo, std::shared_ptr<JobResultDat
         hooks.preview_every = 1;
         hooks.preview_min_ms = 50;
         hooks.frame_min_ms = 33;
-        hooks.progress = [this](const std::string& stage, double f) {
+        hooks.progress = [this, lastStage, guard](const std::string& stage, double f) {
+            {
+                const QString st = QString::fromStdString(stage);
+                DiagLog::runStage(st);
+                std::lock_guard<std::mutex> lk(*guard);
+                *lastStage = st.section(',', 0, 0);
+            }
             // the live view's sweep: each pass through the stack restarts it; pass 2 (the fine focus) runs backwards
             int pass = stage.find("reading") != std::string::npos || stage.find("frames from") != std::string::npos ? 0
                      : stage.find("pass 1") != std::string::npos ? 1 : stage.find("pass 2") != std::string::npos ? 2
@@ -154,13 +177,34 @@ void Worker::launch(std::shared_ptr<JobOptions> jo, std::shared_ptr<JobResultDat
             }
         }
         auto t0 = std::chrono::steady_clock::now();
+        auto say = [&](const QString& line) {
+            DiagLog::write(line);
+            { std::lock_guard<std::mutex> lk(*guard); if (firstError->isEmpty()) *firstError = line; }
+            emit logLine(line);
+        };
         try {
             data->rc = run(*jo, *data, hooks);
+        } catch (const std::bad_alloc&) {   // the PC's own memory (the alignment's luma stack, a whole-frame buffer)
+            stackcore::note_fail(stackcore::Fail::HostMemory, lastStage->toStdString());
+            say("failed: the PC's memory (RAM) ran out");
+            data->rc = 1;
         } catch (const std::exception& e) {
-            emit logLine(QString("failed: %1").arg(e.what()));
+            say(QString("failed: %1").arg(e.what()));
+            data->rc = 1;
+        } catch (...) {
+            say("failed: an unexpected error");
             data->rc = 1;
         }
         data->seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        data->fail = stackcore::take_fail();
+        {
+            std::lock_guard<std::mutex> lk(*guard);
+            data->stage = *lastStage;
+            data->error = *firstError;
+        }
+        // an alignment that found no pair for a frame says so in its exception's text
+        if (data->rc != 0 && data->fail.kind == stackcore::Fail::None && data->error.contains("usable pair"))
+            data->fail = {stackcore::Fail::Alignment, data->error.section("failed: ", 1).toStdString()};
         set_log(nullptr);
         player_->end();
         running_ = false;
@@ -184,6 +228,13 @@ void ThumbLoader::stop() {
     ++generation_;
 }
 
+// the thread ends when its job has (the job's own threads are joined by it); start() starts it again
+void ThumbLoader::shutdown() {
+    stop();
+    thread_.quit();
+    thread_.wait();
+}
+
 void ThumbLoader::start(const QStringList& files, int width, const QList<int>& indices) {
     stop();
     stop_.store(false);
@@ -194,14 +245,14 @@ void ThumbLoader::start(const QStringList& files, int width, const QList<int>& i
     stackcore::FrameCache* cache = cache_;
     QMetaObject::invokeMethod(job, [this, files, width, gen, job, indices, cache] {
         // one file; run by a few threads at once (a JPEG thumbnail decodes in ~50 ms, a folder of 200 took 10 s on one)
-        auto one = [&](int i, std::vector<uint8_t>& buf) {
+        auto one = [&](int i, std::vector<uint8_t>& buf) -> bool {
             const std::filesystem::path path(files[i].toStdWString());
             TiffInfo info = tiff_probe(path.native());
-            if (!info.ok() || info.samples < 3) return;
+            if (!info.ok()) return false;
             if ((info.jpeg || info.raw) && width < (int)info.width / 2) {   // a thumbnail: decoded small by the codec itself (a raw file developed at half size); no cache fill (the render's 16 readers decode in parallel). The full-size view below decodes whole
                 std::vector<uint8_t> small;
                 int sw = 0, sh = 0;
-                if (!fast_thumbnail(path, info, width, small, sw, sh)) return;
+                if (!fast_thumbnail(path, info, width, small, sw, sh)) return false;
                 QImage img(sw, sh, QImage::Format_RGB32);
                 for (int y = 0; y < sh; ++y) {
                     QRgb* out = reinterpret_cast<QRgb*>(img.scanLine(y));
@@ -209,7 +260,7 @@ void ThumbLoader::start(const QStringList& files, int width, const QList<int>& i
                     for (int x = 0; x < sw; ++x, p += 3) out[x] = qRgb(p[0], p[1], p[2]);
                 }
                 emit thumbnail(indices.isEmpty() ? i : indices.value(i, i), img);
-                return;
+                return true;
             }
             int down = std::max(1, (int)info.width / width);
             int pw = info.width / down, ph = info.height / down;
@@ -223,8 +274,9 @@ void ThumbLoader::start(const QStringList& files, int width, const QList<int>& i
                         const uint8_t* p = srow + (size_t)(x * down) * bpp;
                         int c[3];
                         for (int k = 0; k < 3; ++k) {
-                            if (info.bits == 16) { unsigned v = info.big_endian ? (p[2 * k] << 8) | p[2 * k + 1] : (p[2 * k + 1] << 8) | p[2 * k]; c[k] = v >> 8; }
-                            else c[k] = p[k];
+                            const int s = info.samples >= 3 ? k : 0;   // a grey frame: its one sample three times
+                            if (info.bits == 16) { unsigned v = info.big_endian ? (p[2 * s] << 8) | p[2 * s + 1] : (p[2 * s + 1] << 8) | p[2 * s]; c[k] = v >> 8; }
+                            else c[k] = p[s];
                         }
                         out[x] = qRgb(c[0], c[1], c[2]);
                     }
@@ -233,13 +285,13 @@ void ThumbLoader::start(const QStringList& files, int width, const QList<int>& i
             // resident already (the folder was opened before, or a render read it): sample it under the cache's lock
             if (cache && cache->with(path, [&](const stackcore::FrameCache::Entry& e) { sample(e.buf + e.offset); })) {
                 emit thumbnail(indices.isEmpty() ? i : indices.value(i, i), img);
-                return;
+                return true;
             }
             const size_t cap = tiff_buffer_capacity(info.pixel_bytes());
             uint8_t* pinned = cache ? cache->reserve(cap) : nullptr;   // nullptr: no cache, or its budget is spent
             if (pinned) {
                 TiffRead rd = tiff_read_pixels(path, info, pinned, cap);
-                if (!rd.ok()) { cache->unreserve(pinned, cap); return; }
+                if (!rd.ok()) { cache->unreserve(pinned, cap); return false; }
                 sample(pinned + rd.data_offset_in_buf);
                 cache->insert(path, pinned, cap, rd.data_offset_in_buf, rd.bytes);   // the stack warms up while the list fills
             } else {
@@ -247,10 +299,11 @@ void ThumbLoader::start(const QStringList& files, int width, const QList<int>& i
                 if (buf.size() < need) buf.resize(need);
                 uint8_t* base = buf.data() + (kReadAlign - ((uintptr_t)buf.data() % kReadAlign)) % kReadAlign;
                 TiffRead rd = tiff_read_pixels(path, info, base, buf.size() - (base - buf.data()));
-                if (!rd.ok()) return;
+                if (!rd.ok()) return false;
                 sample(base + rd.data_offset_in_buf);
             }
             emit thumbnail(indices.isEmpty() ? i : indices.value(i, i), img);
+            return true;
         };
         std::atomic<int> next{0};
         std::vector<std::thread> pool;
@@ -260,7 +313,10 @@ void ThumbLoader::start(const QStringList& files, int width, const QList<int>& i
                 for (;;) {
                     int i = next++;
                     if (i >= files.size() || stop_.load() || generation_.load() != gen) break;
-                    try { one(i, buf); } catch (const std::exception&) {}   // a file whose header asks for more memory than there is: no thumbnail, not a crash
+                    bool ok = false;
+                    try { ok = one(i, buf); } catch (const std::exception&) {}   // a file whose header asks for more memory than there is: no thumbnail, not a crash
+                    // a file that could not be read says so with a null image (the views that wait for it stopped waiting never)
+                    if (!ok && !stop_.load() && generation_.load() == gen) emit thumbnail(indices.isEmpty() ? i : indices.value(i, i), QImage());
                 }
             });
         for (auto& t : pool) t.join();

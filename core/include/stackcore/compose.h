@@ -129,8 +129,9 @@ FinalOutputs finalize(const FoldState& st, const std::vector<float>& noise_mad, 
 std::vector<float> noise_from_pair(const float* d_img_a, const float* d_img_b, int w, int h, int levels, cudaStream_t s);
 
 // 16-bit RGB TIFF (uncompressed, one strip), values clipped to [0, 1] like frames.write_rgb16;
-// `icc` (may be empty) is embedded as the ICC profile so the colours keep their meaning
+// `icc` (may be empty) is embedded as the ICC profile so the colours keep their meaning. Written as <path>.tmp and
+// renamed over the target, so a failed write leaves the previous file whole; `why` takes the reason for a failure
 bool write_tiff_rgb16(const std::string& path, const std::vector<float>& rgb, int w, int h,
-                      const std::vector<uint8_t>& icc = {});
+                      const std::vector<uint8_t>& icc = {}, std::string* why = nullptr);
 
 }  // namespace stackcore

@@ -3,6 +3,9 @@
 // QSettings store they all persist in (%APPDATA%\xLamina\xLamina.ini).
 #pragma once
 
+#include <algorithm>
+#include <thread>
+
 #include <QByteArray>
 #include <QList>
 #include <QSettings>
@@ -26,7 +29,7 @@ QString hostSummary();                                       // "RAM 64 GB (41 G
 struct PerfSettings {
     QList<int> gpus;         // CUDA device indices to use; empty = all
     int streams = 2;         // upload / compute streams per GPU in the fusion passes
-    int readers = 16;        // TIFF reader threads
+    int readers = std::clamp((int)std::thread::hardware_concurrency(), 2, 16);   // TIFF reader threads: 16, fewer on a PC with fewer cores
     int pairThreads = 3;     // alignment pairs in flight per GPU
     bool cacheFrames = true; // keep the frames pinned in host memory between passes and renders
 

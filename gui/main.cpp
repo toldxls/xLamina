@@ -3,6 +3,9 @@
 #include <QIcon>
 #include <QTimer>
 
+#include <QMessageBox>
+
+#include "diaglog.h"
 #include "mainwindow.h"
 #include "manualshots.h"
 #include "prefs.h"
@@ -19,12 +22,39 @@
 //   --updated-from V    passed by the updater to the new instance, which says so in the status bar
 //   --manual DIR        developer aid: with --render, save the manual's screen grabs and rects.js to DIR, then quit
 //                       (manualshots.h; tools\manual.cmd runs it off screen)
+//   --report DIR        save the problem report (Help > Report a problem) into DIR and quit
 //   --hover FX,FY       developer aid: after the render, show the last tab and move a synthetic cursor to that
 //                       fraction of the view (the depth map's note and highlight, for an unattended grab)
+// An exception that reaches the event loop (a slot that ran out of memory converting a whole image, say) ended the
+// program without a word. It is logged and said instead, and the window stays.
+class App : public QApplication {
+public:
+    using QApplication::QApplication;
+    bool notify(QObject* o, QEvent* e) override {
+        try { return QApplication::notify(o, e); }
+        catch (const std::bad_alloc&) { report("this PC ran out of memory (RAM)"); }
+        catch (const std::exception& x) { report(QString::fromLocal8Bit(x.what())); }
+        catch (...) { report("an unknown error"); }
+        return false;
+    }
+
+private:
+    void report(const QString& what) {
+        DiagLog::write("unexpected error in the window: " + what);
+        if (busy_) return;   // one box, not one per event
+        busy_ = true;
+        QMessageBox::warning(activeWindow(), "xLamina", "Something went wrong: " + what + ".\n\nxLamina keeps running, but it is safest to save your "
+                                                        "work and restart it. Help > Report a problem saves the details to send.");
+        busy_ = false;
+    }
+    bool busy_ = false;
+};
+
 int main(int argc, char** argv) {
-    QApplication app(argc, argv);
+    App app(argc, argv);
     app.setApplicationName("xLamina");
     app.setOrganizationName("xLamina");
+    DiagLog::open();   // the session's log file, with the machine's details (diaglog.h)
     Updater::removeLeftovers();                              // the files an update renamed aside
     QTimer::singleShot(5000, &Updater::removeLeftovers);     // again, once the replaced exe has surely exited
     QIcon icon;
@@ -32,11 +62,18 @@ int main(int argc, char** argv) {
     app.setWindowIcon(icon);
     applyTheme(appSettings().value("ui/theme", "dark").toString());
     for (int i = 1; i < argc; ++i) if (QString::fromLocal8Bit(argv[i]) == "--manual") ManualShots::keepOffScreen();
+    for (int i = 1; i + 1 < argc; ++i)
+        if (QString::fromLocal8Bit(argv[i]) == "--report") {   // the report Help > Report a problem saves, into DIR, with no window
+            QString why;
+            const QString p = DiagLog::makeReport(QString::fromLocal8Bit(argv[i + 1]), "made with --report", &why);
+            DiagLog::write(p.isEmpty() ? "report: " + why : "report saved: " + p);
+            return p.isEmpty() ? 1 : 0;
+        }
     MainWindow w;
     w.show();
     bool autoRender = false, sample = false, selfUpdate = false;
     QStringList batchDirs;
-    QString folder, shots, bench, updatedFrom, hover, manual;
+    QString folder, shots, bench, updatedFrom, hover, manual, report;
     double every = 3, renderIn = -1;
     for (int i = 1; i < argc; ++i) {
         QString a = QString::fromLocal8Bit(argv[i]);
@@ -51,6 +88,7 @@ int main(int argc, char** argv) {
         else if (a == "--updated-from" && i + 1 < argc) updatedFrom = QString::fromLocal8Bit(argv[++i]);
         else if (a == "--hover" && i + 1 < argc) hover = QString::fromLocal8Bit(argv[++i]);
         else if (a == "--manual" && i + 1 < argc) manual = QString::fromLocal8Bit(argv[++i]);
+        else if (a == "--report" && i + 1 < argc) report = QString::fromLocal8Bit(argv[++i]);
         else folder = a;
     }
     if (!updatedFrom.isEmpty()) w.notifyUpdated(updatedFrom);

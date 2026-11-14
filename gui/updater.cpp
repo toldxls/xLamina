@@ -4,6 +4,7 @@
 #include <QCryptographicHash>
 #include <QDir>
 #include <QDirIterator>
+#include <QThread>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -197,7 +198,8 @@ QString Updater::install(const QString& zip) {
     QList<Done> done;
     auto rollback = [&done] {
         for (int i = done.size() - 1; i >= 0; --i) {
-            if (done[i].copied) QFile::remove(done[i].target);
+            // the new file goes whether its copy finished or stopped half-way (a full disk), then the old one comes back
+            if (done[i].copied || !done[i].aside.isEmpty()) QFile::remove(done[i].target);
             if (!done[i].aside.isEmpty()) QFile::rename(done[i].aside, done[i].target);
         }
     };
@@ -212,9 +214,12 @@ QString Updater::install(const QString& zip) {
             d.aside = target + kAside;
             QFile::remove(d.aside);   // a leftover of an earlier update that is still in use gets a numbered name
             for (int n = 2; QFileInfo::exists(d.aside) && n < 10; ++n) d.aside = target + kAside + QString::number(n);
-            if (!QFile::rename(target, d.aside)) {
+            // a virus scanner or a sync program holds a file for a moment after it is written: a few tries over two seconds
+            bool moved = false;
+            for (int tries = 0; tries < 8 && !(moved = QFile::rename(target, d.aside)); ++tries) QThread::msleep(250);
+            if (!moved) {
                 rollback();
-                return "Cannot replace " + QDir::toNativeSeparators(target) + " (is another xLamina running from this folder?).";
+                return "Cannot replace " + QDir::toNativeSeparators(target) + ": the file is in use by another program (a virus scanner, a sync program such as OneDrive, or another xLamina). Close it and try again.";
             }
         }
         done.push_back(d);
@@ -230,10 +235,10 @@ QString Updater::install(const QString& zip) {
 }
 
 void Updater::removeLeftovers() {
-    // Only what install() renamed aside: a program file (exe, dll, ico, md, LICENSE) with ".old" or ".old2".."old9"
+    // Only what install() renamed aside: a program file (exe, dll, ico, md, LICENSE; the manual's html, js, css, png, jpg) with ".old" or ".old2".."old9"
     // at the very end of its name, whose replacement sits beside it. The folder may hold the user's own files (a
     // zip unpacked straight into Downloads): "notes.old.txt" or "backup.old" there are none of our business.
-    static const QRegularExpression ours("^(.+\\.(exe|dll|ico|md)|LICENSE)\\.old[2-9]?$", QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression ours("^(.+\\.(exe|dll|ico|md|html|js|css|png|jpg)|LICENSE)\\.old[2-9]?$", QRegularExpression::CaseInsensitiveOption);
     QDirIterator it(appDir(), {QString("*") + kAside + "*"}, QDir::Files, QDirIterator::Subdirectories);
     while (it.hasNext()) {
         QString f = it.next();

@@ -1,5 +1,6 @@
 #include "stackcore/streamer.h"
 
+#include <windows.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -133,8 +134,15 @@ StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, con
     int S_sum = 0;
     for (int s : S_dev) S_sum += s;
     const int R = std::max(1, opt.readers);
-    const int P = opt.pool > 0 ? opt.pool : R + 2 * S_sum;
     const size_t cap = tiff_buffer_capacity(max_px);
+    // the ring: a buffer per reader and two per stream, but never more than a quarter of the memory that is free now
+    // (16 readers with 100 Mpx frames pinned 12 GB on a PC that had the frames streamed because it was short of memory)
+    int P = opt.pool > 0 ? opt.pool : R + 2 * S_sum;
+    if (opt.pool <= 0) {
+        MEMORYSTATUSEX ms{};
+        ms.dwLength = sizeof ms;
+        if (GlobalMemoryStatusEx(&ms) && cap > 0) P = std::max(2 * S_sum + 2, std::min(P, (int)std::min<uint64_t>(1 << 20, ms.ullAvailPhys / 4 / cap)));
+    }
     std::unique_ptr<PinnedPool> ring = take_ring(cap, P);
     PinnedPool& pool = *ring;
     st.frames_per_device.assign(devs.size(), 0);
@@ -268,6 +276,13 @@ StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, con
     for (size_t di = 0; di < devs.size(); ++di) {
         st.frames += st.frames_per_device[di];
         if (!worker_errors[di].empty()) st.errors.push_back("device " + std::to_string(devs[di]) + ": " + worker_errors[di]);
+    }
+    // developer aid: STACKER_FAULT_READ=N reports a read error in the N-th pass of the process (1 = the alignment's
+    // read, 2 = pass 1, 3 = pass 2, 4 = pass 3), to test that every pass's errors end the job
+    if (const char* fr = getenv("STACKER_FAULT_READ")) {
+        static std::atomic<int> pass{0};
+        if (++pass == atoi(fr) && !paths.empty())
+            st.errors.push_back(paths[std::min<size_t>(4, paths.size() - 1)].filename().string() + ": injected read fault (STACKER_FAULT_READ)");
     }
     // a clean pass hands its ring to the next one; after an error buffers may still be out, so it is freed instead
     if (!failed.load() && ring->idle()) {

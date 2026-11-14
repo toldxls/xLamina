@@ -1,4 +1,4 @@
-﻿// The pipeline as a library: alignment, pass 1 (+ depth volume), the fusion
+// The pipeline as a library: alignment, pass 1 (+ depth volume), the fusion
 // and the folder-level job. The CLI and the GUI both call this. Progress and
 // preview callbacks let a GUI show the stack building (DESIGN.md: progressive
 // preview); a cancel flag stops a job between frames.
@@ -27,9 +27,31 @@ namespace stackcore {
 using LogFn = std::function<void(const std::string&)>;
 // Why this PC cannot render, in words for the user, or an empty string when it can: no NVIDIA GPU or driver, or
 // a GPU (of `devs`, or of all when that is empty) older than the architecture the kernels are compiled for.
-std::string gpu_problem(const std::vector<int>& devs = {});
+// With launch, a small kernel is also run on each of the GPUs: a driver too old for the code this build carries for a
+// card answers every other call and fails only there ("the provided PTX was compiled with an unsupported toolchain").
+// That starts the cards' contexts (a few tenths of a second each), so a front end asks for it when a render begins.
+std::string gpu_problem(const std::vector<int>& devs = {}, bool launch = false);
 void set_log(LogFn fn);
 void logf(const char* fmt, ...);
+
+// Why a job failed, for a front end to put into words (the return codes stay as they are: 0 done, 1 failed,
+// 2 a bad option, 3 cancelled, 4 the GPU memory ran out, 6 the outputs were computed but could not be written).
+// The engine notes the first cause of a job; a front end calls take_fail() before a job (to clear) and after it.
+enum class Fail {
+    None,
+    HostMemory,      // the PC's own memory (RAM) ran out
+    GpuFault,        // a CUDA call failed for another reason than memory: the driver was reset or stopped answering
+    FileRead,        // a frame could not be read; detail names it
+    FileWrite,       // the output folder or a file in it could not be written; detail names it and says why
+    Alignment,       // a frame has no usable pair; detail names it
+    TooManyFrames,   // more frames than the depth stage takes
+    Other,
+};
+struct FailInfo { Fail kind = Fail::None; std::string detail; };
+void note_fail(Fail kind, const std::string& detail);
+FailInfo take_fail();
+// the most frames a stack may have (the depth stage's kernels hold one value per frame in fixed storage)
+constexpr int kMaxFrames = 512;
 
 // progress(stage, fraction 0..1); preview(name, rgb float interleaved, w, h);
 // frame(k, rgb, w, h): the frame just processed (warped onto the output grid, small)
@@ -297,6 +319,7 @@ struct AlignOptions {
     std::vector<int> baselines = {1, 2, 4, 8}, devs;
     int readers = 16;
     int pair_threads = 3;             // pairs in flight per GPU (each on its own stream); the per-pair arithmetic is unchanged
+    int max_frames = 0;               // > 0: more frames than this end the job at once (run_job sets kMaxFrames)
     bool lock_scale = false;
     double um_per_px = 0;             // 0 = unknown; negative = -FOV in mm, resolved once the width is known
     FrameCache* cache = nullptr;      // resident frames (pass 0 fills it); null = stream from disk

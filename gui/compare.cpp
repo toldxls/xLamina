@@ -26,6 +26,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "prefs.h"
 #include "stackcore/compose.h"
 #include "stackcore/tiff.h"
 
@@ -222,7 +223,7 @@ CompareWindow::CompareWindow(QWidget* parent) : QMainWindow(parent) {
         rt_.inStroke = false;
         if (!rt_.current.r.isEmpty()) {
             rt_.undo.push_back(std::move(rt_.current));
-            if ((int)rt_.undo.size() > kUndoDepth) rt_.undo.erase(rt_.undo.begin());
+            if ((int)rt_.undo.size() > kUndoDepth) { rt_.undo.erase(rt_.undo.begin()); rt_.dropped = true; }   // that stroke stays, past undoing
             rt_.dirty = true;
         }
         rt_.current = Stroke{};
@@ -243,7 +244,7 @@ CompareWindow::CompareWindow(QWidget* parent) : QMainWindow(parent) {
     statusBar()->showMessage("Open a sweep folder or add images, then pick one for each pane. Space flips them; R retouches the left one from the right.");
 
     connect(&loader_, &ThumbLoader::thumbnail, this, &CompareWindow::onLoaded);
-    QSettings s;
+    QSettings s = appSettings();   // the same file as every other setting (it was the registry)
     restoreGeometry(s.value("compare/geometry").toByteArray());
     if (s.contains("compare/outer")) outer->restoreState(s.value("compare/outer").toByteArray());
 }
@@ -255,7 +256,7 @@ void CompareWindow::closeEvent(QCloseEvent* e) {
         auto r = QMessageBox::question(this, "xLamina", "The retouch has unsaved strokes. Close anyway?", QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
         if (r != QMessageBox::Yes) { e->ignore(); return; }
     }
-    QSettings s;
+    QSettings s = appSettings();   // the same file as every other setting (it was the registry)
     s.setValue("compare/geometry", saveGeometry());
     if (auto* outer = qobject_cast<QSplitter*>(centralWidget())) s.setValue("compare/outer", outer->saveState());
     QMainWindow::closeEvent(e);
@@ -276,6 +277,13 @@ static bool sameFile(const QString& a, const QString& b) {
 
 void CompareWindow::addEntry(Entry e) {
     auto replace = [&](int i) {
+        // the image being retouched, or painted from, stays as it is: the strokes belong to it (a new render's output
+        // of the same name slid in under them, and Save result wrote the old pixels under the new name)
+        if (rt_.on && (i == rt_.target || i == rt_.source)) {
+            statusBar()->showMessage(QString("%1 is being retouched: it was not replaced. Leave Retouch, then press Compare again.").arg(entries_[i].name), 8000);
+            return;
+        }
+        overlayFor_[0] = overlayFor_[1] = -1;   // the difference shown was the old image's
         bool shown = sel_[0] == i || sel_[1] == i;
         entries_[i] = std::move(e);
         rebuildList();
@@ -373,7 +381,7 @@ void CompareWindow::openSweep(const QString& dir) {
 }
 
 void CompareWindow::openSweepDialog() {
-    QSettings s;
+    QSettings s = appSettings();   // the same file as every other setting (it was the registry)
     QString d = QFileDialog::getExistingDirectory(this, "Sweep folder (holds sweep.json)", s.value("compare/lastSweep").toString());
     if (d.isEmpty()) return;
     s.setValue("compare/lastSweep", d);
@@ -381,7 +389,7 @@ void CompareWindow::openSweepDialog() {
 }
 
 void CompareWindow::openImageDialog() {
-    QSettings s;
+    QSettings s = appSettings();   // the same file as every other setting (it was the registry)
     QStringList fns = QFileDialog::getOpenFileNames(this, "Images to compare", s.value("compare/lastImage").toString(), "Images (*.tif *.tiff *.jpg *.jpeg *.png);;All files (*)");
     if (fns.isEmpty()) return;
     s.setValue("compare/lastImage", QFileInfo(fns.first()).absolutePath());
@@ -760,6 +768,7 @@ bool CompareWindow::retouchSetSource(int index) {
 }
 
 void CompareWindow::retouchBake() {
+    if (!rt_.undo.empty() || rt_.dropped) rt_.baked = true;   // unsaved work that Undo and Reset no longer reach
     rt_.tgt16 = rt_.res16;
     rt_.tgtDisp = rt_.resDisp.copy();
     std::fill(rt_.mask.begin(), rt_.mask.end(), 0);
@@ -840,7 +849,7 @@ void CompareWindow::retouchUndo() {
     composite(s.r);
     view_[0]->patch(s.r);
     undoAct_->setEnabled(!rt_.undo.empty());
-    rt_.dirty = !rt_.undo.empty();
+    rt_.dirty = !rt_.undo.empty() || rt_.baked || rt_.dropped;   // strokes that can no longer be undone are still unsaved work
     retouchStatus();
 }
 
@@ -851,14 +860,14 @@ void CompareWindow::retouchReset() {
     composite(QRect(0, 0, rt_.w, rt_.h));
     view_[0]->patch(QRect(0, 0, rt_.w, rt_.h));
     undoAct_->setEnabled(false);
-    rt_.dirty = false;
+    rt_.dirty = rt_.baked;   // strokes painted from an earlier source are part of the target now and stay
     retouchStatus();
 }
 
 void CompareWindow::retouchSave() {
     if (!rt_.on) return;
     const Entry& t = entries_[rt_.target];
-    QString dir = !t.path.isEmpty() ? QFileInfo(t.path).absolutePath() : QSettings().value("compare/lastSweep").toString();
+    QString dir = !t.path.isEmpty() ? QFileInfo(t.path).absolutePath() : appSettings().value("compare/lastSweep").toString();
     QString base = !t.path.isEmpty() ? QFileInfo(t.path).completeBaseName() : t.name;
     QString def = QDir(dir).filePath(base + "_retouched.tif");
     QString fn = QFileDialog::getSaveFileName(this, "Save the retouched image", def, "16-bit TIFF (*.tif)");
@@ -866,10 +875,11 @@ void CompareWindow::retouchSave() {
     QApplication::setOverrideCursor(Qt::WaitCursor);
     std::vector<float> rgb(rt_.res16.size());
     for (size_t i = 0; i < rgb.size(); ++i) rgb[i] = rt_.res16[i] / 65535.0f;
-    bool ok = stackcore::write_tiff_rgb16(fn.toLocal8Bit().toStdString(), rgb, rt_.w, rt_.h, rt_.icc);
+    std::string why;
+    bool ok = stackcore::write_tiff_rgb16(fn.toStdString(), rgb, rt_.w, rt_.h, rt_.icc, &why);
     QApplication::restoreOverrideCursor();
-    if (!ok) { QMessageBox::warning(this, "xLamina", QString("Could not write %1").arg(QDir::toNativeSeparators(fn))); return; }
-    rt_.dirty = false;
+    if (!ok) { QMessageBox::warning(this, "xLamina", QString("Could not write %1:\n%2").arg(QDir::toNativeSeparators(fn), QString::fromStdString(why))); return; }
+    rt_.dirty = rt_.baked = rt_.dropped = false;
     statusBar()->showMessage(QString("Saved %1").arg(QDir::toNativeSeparators(fn)), 6000);
     QString name = QFileInfo(fn).fileName();
     Entry e;

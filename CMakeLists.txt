@@ -9,11 +9,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-# Compute capability 7.5 (GTX 16 / RTX 20 series) and newer: native code for 7.5 plus PTX, which the driver compiles
-# for later cards.
-if(NOT CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 75)
-endif()
+# Compute capability 7.5 (GTX 16 / RTX 20 series) and newer. Native code for each generation in use (7.5, 8.6 = RTX 30,
+# 8.9 = RTX 40, 12.0 = RTX 50) plus the 7.5 PTX for anything else: with PTX alone a later card depended on its driver
+# compiling code from this toolkit, which a driver older than the toolkit may refuse. -DXLAMINA_CUDA_ARCHS=75 builds
+# the small set (a quarter of the kernels' compile time).
+set(XLAMINA_CUDA_ARCHS "75;86-real;89-real;120-real" CACHE STRING "CUDA architectures the kernels are compiled for")
+set(CMAKE_CUDA_ARCHITECTURES ${XLAMINA_CUDA_ARCHS})
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)

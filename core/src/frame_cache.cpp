@@ -58,7 +58,12 @@ void FrameCache::prepare(const std::vector<fs::path>& paths, size_t budget_bytes
     MEMORYSTATUSEX ms{};
     ms.dwLength = sizeof ms;
     GlobalMemoryStatusEx(&ms);
-    const size_t reserve = (size_t)8 << 30;
+    // ... and leave the job its own memory: the depth volume on the host is the large piece, about half the frames'
+    // bytes for 8-bit files at the default depth resolution (a quarter for 16-bit), beside the alignment's luma and
+    // the outputs. A fixed 8 GB left a 32 GB PC paging and a 16 GB one without room for the volume at all.
+    uint64_t frames_bytes = 0;
+    for (auto& k : keep) { uint64_t sz = 0; int64_t mt = 0; file_identity(fs::path(k), sz, mt); frames_bytes += sz; }
+    const size_t reserve = std::max<size_t>((size_t)8 << 30, (size_t)(frames_bytes / 2) + ((size_t)4 << 30));
     size_t by_free = ms.ullAvailPhys > reserve ? (size_t)ms.ullAvailPhys - reserve + resident_ : resident_;
     size_t by_total = (size_t)(ms.ullTotalPhys * 0.6);
     budget_ = std::min(by_free, by_total);

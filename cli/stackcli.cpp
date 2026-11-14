@@ -681,10 +681,33 @@ static int cmd_run(int argc, char** argv) {
         else return usage();
     }
     if (i < argc) { fprintf(stderr, "option %s has no value\n", argv[i]); return usage(); }
+    // developer aid: STACKER_BALLAST_GB=N holds N GB of every GPU for the length of the run, to see how a job goes on
+    // a card with that much less memory (a 12 GB card with 6 held stands in for a 6 GB one)
+    struct Ballast { std::vector<std::pair<int, void*>> held; ~Ballast() { for (auto& h : held) { cudaSetDevice(h.first); cudaFree(h.second); } } } ballast;
+    if (const char* b = getenv("STACKER_BALLAST_GB")) {
+        int n = 0;
+        cudaGetDeviceCount(&n);
+        for (int d = 0; d < n; ++d) {
+            void* p = nullptr;
+            size_t fr = 0, tot = 0;
+            if (cudaSetDevice(d) == cudaSuccess && cudaMalloc(&p, (size_t)(atof(b) * 1073741824.0)) == cudaSuccess) ballast.held.push_back({d, p});
+            cudaGetLastError();
+            cudaMemGetInfo(&fr, &tot);
+            printf("ballast: GPU %d has %.2f of %.2f GB free\n", d, fr / 1e9, tot / 1e9);
+        }
+    }
     if (dirs.size() == 1) {
         jo.align.dir = dirs[0];
         AlignOut A;
-        return run_job(jo, A, Hooks{});
+        const int rc = run_job(jo, A, Hooks{});
+        if (rc != 0) {   // the cause the engine noted, as the window would word it
+            static const char* kinds[] = {"", "the PC's memory ran out", "the GPU driver failed", "a frame could not be read", "the outputs could not be written",
+                                          "the frames could not be aligned", "too many frames", "another error"};
+            FailInfo f = take_fail();
+            if (rc == 4 && f.kind == Fail::None) printf("run failed (code 4): the GPU memory ran out, in strips and at 1/4 depth resolution too\n");
+            else printf("run failed (code %d)%s%s%s%s\n", rc, f.kind != Fail::None ? ": " : "", kinds[(int)f.kind], f.detail.empty() ? "" : ": ", f.detail.c_str());
+        }
+        return rc;
     }
     // each folder's outputs in its own place: <folder>_stacker by default, --out DIR\<folder name> when --out is given
     int worst = 0, done = 0;

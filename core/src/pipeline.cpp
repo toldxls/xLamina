@@ -1,4 +1,4 @@
-﻿// The pipeline as a library (see pipeline.h). Grown out of stackcli's commands.
+// The pipeline as a library (see pipeline.h). Grown out of stackcli's commands.
 #include "stackcore/pipeline.h"
 
 #include <cuda_runtime.h>
@@ -19,6 +19,7 @@
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
+#include <cwctype>
 
 #include "stackcore/convert.h"
 #include "stackcore/depth.h"
@@ -30,20 +31,24 @@ namespace stackcore {
 namespace fs = std::filesystem;
 
 // a failed CUDA call ends the function: 4 when it was out of memory (run_stack answers that with a render in strips or
-// at 1/4 depth resolution), 1 otherwise
+// at 1/4 depth resolution), 1 otherwise (noted as a GPU fault: a reset driver fails every later call of the process)
 #define CK(x)                                                                                   \
     do {                                                                                        \
         cudaError_t e_ = (x);                                                                   \
         if (e_ != cudaSuccess) {                                                                \
             logf("CUDA error: %s (%s:%d)", cudaGetErrorString(e_), "pipeline.cpp", __LINE__);         \
             if (e_ == cudaErrorMemoryAllocation) { cudaGetLastError(); return 4; }              \
+            note_fail(Fail::GpuFault, cudaGetErrorString(e_));                                  \
             return 1;                                                                           \
         }                                                                                       \
     } while (0)
 #define CK_THROW(x)                                                                             \
     do {                                                                                        \
         cudaError_t e_ = (x);                                                                   \
-        if (e_ != cudaSuccess) throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(e_)); \
+        if (e_ != cudaSuccess) {                                                                \
+            if (e_ != cudaErrorMemoryAllocation) note_fail(Fail::GpuFault, cudaGetErrorString(e_)); \
+            throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(e_) + " (pipeline.cpp:" + std::to_string(__LINE__) + ")"); \
+        }                                                                                       \
     } while (0)
 // an allocation in the fusion: out of memory returns 4, which run_stack answers with a render at 1/4 depth resolution
 #define CK_MEM(x)                                                                               \
@@ -56,9 +61,70 @@ namespace fs = std::filesystem;
         }                                                                                       \
         if (e_ != cudaSuccess) {                                                                \
             logf("CUDA error: %s (%s:%d)", cudaGetErrorString(e_), "pipeline.cpp", __LINE__);         \
+            note_fail(Fail::GpuFault, cudaGetErrorString(e_));                                  \
             return 1;                                                                           \
         }                                                                                       \
     } while (0)
+
+// the first cause of a job's failure (pipeline.h); a memory shortfall of the PC is kept over a later consequence of it
+static std::mutex g_fail_m;
+static FailInfo g_fail;
+void note_fail(Fail kind, const std::string& detail) {
+    std::lock_guard<std::mutex> lk(g_fail_m);
+    if (g_fail.kind == Fail::None) g_fail = {kind, detail};
+}
+FailInfo take_fail() {
+    std::lock_guard<std::mutex> lk(g_fail_m);
+    FailInfo f = g_fail;
+    g_fail = {};
+    return f;
+}
+
+// What a pass's stream errors mean for the job: 0 none, 4 a GPU ran out of memory (run_stack renders again in strips
+// or at 1/4), 1 otherwise, with the cause noted: a frame that could not be read ("IMG_1.tif: short read") or a GPU
+// worker that died ("device 0: ..."). A pass with an error has not seen every frame and its result is not used.
+static int stream_fail(const StreamerStats& st) {
+    if (st.errors.empty()) return 0;
+    for (auto& e : st.errors) if (strstr(e.c_str(), "out of memory")) return 4;
+    const std::string& e = st.errors.front();
+    const bool gpu = e.rfind("device ", 0) == 0 || e.find("cuda") != std::string::npos || e.find("CUDA") != std::string::npos;
+    note_fail(gpu ? Fail::GpuFault : Fail::FileRead, e);
+    return 1;
+}
+
+// The output folder, made if it is not there. False, with the reason logged and noted, when it cannot be made.
+static bool make_out_dir(const fs::path& od) {
+    std::error_code ec;
+    fs::create_directories(od, ec);
+    if (!ec && fs::is_directory(od, ec)) return true;
+    const std::string why = od.string() + ": " + (ec ? ec.message() : std::string("it is not a folder"));
+    logf("cannot create the output folder %s", why.c_str());
+    note_fail(Fail::FileWrite, why);
+    return false;
+}
+
+// The outputs as 16-bit TIFFs in `od`, one thread each (the conversion and the write of each: 0.68 s for three in a
+// row). Returns how many were written; one that was not is logged and noted with its path and the system's reason.
+// Nothing a writer does can end the process: a throw in a thread without a catch did.
+static size_t write_outputs(const fs::path& od, const std::vector<std::string>& names, const std::vector<const std::vector<float>*>& imgs,
+                            int ow, int oh, const std::vector<uint8_t>& icc) {
+    std::atomic<size_t> written{0};
+    std::vector<std::thread> writers;
+    for (size_t j = 0; j < names.size(); ++j)
+        writers.emplace_back([&, j] {
+            const std::string path = (od / (names[j] + ".tif")).string();
+            std::string why;
+            bool ok = false;
+            try { ok = write_tiff_rgb16(path, *imgs[j], ow, oh, icc, &why); }
+            catch (const std::bad_alloc&) { why = "out of memory"; }
+            catch (const std::exception& e) { why = e.what(); }
+            if (ok) { ++written; return; }
+            logf("cannot write %s: %s", path.c_str(), why.c_str());
+            note_fail(Fail::FileWrite, path + ": " + why);
+        });
+    for (auto& t : writers) t.join();
+    return written.load();
+}
 
 static LogFn g_log;
 void set_log(LogFn fn) { g_log = std::move(fn); }
@@ -74,7 +140,7 @@ void logf(const char* fmt, ...) {
     else { fputs(s.c_str(), stdout); fputc('\n', stdout); fflush(stdout); }
 }
 
-std::string gpu_problem(const std::vector<int>& devs) {
+std::string gpu_problem(const std::vector<int>& devs, bool launch) {
 #ifndef XLAMINA_MIN_CUDA_ARCH
 #define XLAMINA_MIN_CUDA_ARCH 75
 #endif
@@ -99,6 +165,27 @@ std::string gpu_problem(const std::vector<int>& devs) {
             std::string s = std::string("xLamina needs an NVIDIA GPU (") + cards + "). GPU " + std::to_string(d) + " (" + p.name + ") is too old for it.";
             if (n > 1) s += " Untick it in Preferences > Performance to render on the other GPU.";
             return s;
+        }
+        if (!launch) continue;
+        // one small kernel: the first thing a driver too old for this build's code for the card refuses
+        float *d_rgb = nullptr, *d_y = nullptr;
+        cudaError_t e2 = cudaSetDevice(d);
+        if (e2 == cudaSuccess) e2 = cudaMalloc(&d_rgb, 3 * 256 * sizeof(float));
+        if (e2 == cudaSuccess) e2 = cudaMalloc(&d_y, 256 * sizeof(float));
+        if (e2 == cudaSuccess) e2 = cudaMemset(d_rgb, 0, 3 * 256 * sizeof(float));
+        if (e2 == cudaSuccess) {
+            try { luma(d_rgb, d_y, 256, 0); } catch (const std::exception&) {}
+            e2 = cudaDeviceSynchronize();
+            if (e2 == cudaSuccess) e2 = cudaGetLastError();
+        }
+        cudaFree(d_rgb); cudaFree(d_y);
+        cudaGetLastError();
+        if (e2 != cudaSuccess && e2 != cudaErrorMemoryAllocation) {
+            const std::string es = cudaGetErrorString(e2);
+            logf("GPU %d (%s): the test kernel failed: %s", d, p.name, es.c_str());
+            if (es.find("PTX") != std::string::npos || es.find("toolchain") != std::string::npos || es.find("JIT") != std::string::npos || es.find("river") != std::string::npos)
+                return std::string("The NVIDIA driver on this PC is too old for xLamina on the ") + p.name + ". Install the current driver (nvidia.com/drivers, or the NVIDIA app) and start xLamina again.";
+            return std::string("The graphics card ") + p.name + " does not run xLamina's code (" + es + "). Install the current NVIDIA driver and start xLamina again; if that does not help, send a report (Help > Report a problem).";
         }
     }
     return {};
@@ -947,8 +1034,7 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
     if (st.errors.empty()) return 0;   // (`release` frees the cards' buffers on every way out)
     // a GPU that ran out of memory for the depth slices (the most likely place at 1/2 resolution): tell run_stack
     // to render again at 1/4 instead of failing the job
-    for (auto& e : st.errors) if (strstr(e.c_str(), "out of memory")) return 4;
-    return 1;
+    return stream_fail(st);   // 4 for a card out of memory, 1 with the cause noted
 }
 
 // The flat mask's two texture thresholds from a merged fold state on the current device: the guide and the chain of
@@ -1032,13 +1118,58 @@ static StreamerStats run_pass(const std::vector<fs::path>& run_paths, const std:
     opt.cancel = hooks.cancel;
     opt.cache = cache;
     std::atomic<int> done{0};
-    for (int d : devs) {
+    // Whatever ends the pass, a throw from the set-up included, the cards' buffers go: a failed attempt that kept
+    // them left the render in strips or at 1/4 that follows it with gigabytes less to work in. On the way out of a
+    // failure the handles that were never created are "freed" too, so the error state is cleared afterwards.
+    struct Release {
+        std::vector<PassDev>& ctx; const std::vector<int>& devs; bool ok = false;
+        ~Release() {
+            for (int d : devs) {
+                if (d < 0 || d >= (int)ctx.size()) continue;
+                auto& D = ctx[d];
+                if (cudaSetDevice(d) != cudaSuccess) continue;
+                for (auto& S : D.slots) {
+                    cudaFree(S.d_rgb); cudaFree(S.d_scratch); cudaFree(S.d_warp);
+                    if (S.ready) cudaEventDestroy(S.ready);
+                    if (S.done) cudaEventDestroy(S.done);
+                    S.fp.free();
+                }
+                D.slots.clear();
+                D.bp.free();
+                D.rc.free();
+                if (D.fold_s) cudaStreamDestroy(D.fold_s);
+                D.fold_s = nullptr;
+            }
+            if (!ok) cudaGetLastError();
+        }
+    } release{ctx, devs};
+    // Slots by the memory each card has free now, as pass 1 counts them (a frame as read, the warp's scratch and
+    // the warped frame per slot): the fixed count ran a small card past its memory, where Windows pages GPU memory
+    // to the host instead of refusing. A card without room for one slot ends the attempt as out of memory.
+    const size_t slot_bytes = npx_full * 12 + (g.scale != 1.0 ? (size_t)g.work_w() * g.work_h() * 12 : 0) + npx_out * 12 +
+                              (hooks.frame ? npx_out * 12 : 0);
+    opt.streams_by_device.assign(devs.size(), streams);
+    for (size_t i = 0; i < devs.size(); ++i) {
+        size_t fr = 0, tot = 0;
+        CK_THROW(cudaSetDevice(devs[i]));
+        CK_THROW(cudaMemGetInfo(&fr, &tot));
+        const size_t keep = (size_t)384 << 20;   // the kernels' own scratch and the previews
+        const int fit = fr > keep ? (int)std::min<size_t>((size_t)streams, (fr - keep) / slot_bytes) : 0;
+        if (fit < 1) {
+            logf("GPU %d memory ran out (%s needs %.2f GB for one frame slot, %.2f GB free)", devs[i], what, slot_bytes / 1e9, fr / 1e9);
+            throw std::runtime_error("GPU memory ran out for a frame slot");
+        }
+        if (fit < streams) logf("  %s: GPU %d takes %d stream%s (%.2f GB free)", what, devs[i], fit, fit == 1 ? "" : "s", fr / 1e9);
+        opt.streams_by_device[i] = fit;
+    }
+    for (size_t di = 0; di < devs.size(); ++di) {
+        const int d = devs[di];
         auto& D = ctx[d];
         D.dev = d;
         CK_THROW(cudaSetDevice(d));
         CK_THROW(cudaStreamCreateWithFlags(&D.fold_s, cudaStreamNonBlocking));
         D.rc.upload(po, g);
-        D.slots.resize(streams);
+        D.slots.resize(opt.streams_by_device[di]);
         int idx = 0;
         for (auto& S : D.slots) {
             S.index = idx++;
@@ -1083,18 +1214,7 @@ static StreamerStats run_pass(const std::vector<fs::path>& run_paths, const std:
     for (size_t i = 0; i < devs.size(); ++i) split += (i ? ", GPU " : "; GPU ") + std::to_string(devs[i]) + " " + std::to_string(st.frames_per_device[i]);
     logf("  %s: %d frames in %.2f s (%.1f frames/s%s)%s", what, st.frames, st.seconds, st.frames / st.seconds, source_note(st).c_str(),
          split.c_str());
-    for (int d : devs) {
-        auto& D = ctx[d];
-        CK_THROW(cudaSetDevice(d));
-        for (auto& S : D.slots) {
-            cudaFree(S.d_rgb); cudaFree(S.d_scratch); cudaFree(S.d_warp);
-            cudaEventDestroy(S.ready); cudaEventDestroy(S.done);
-            S.fp.free();
-        }
-        D.bp.free();
-        D.rc.free();
-        cudaStreamDestroy(D.fold_s);
-    }
+    release.ok = true;   // (the buffers are freed by `release`, as on every other way out)
     return st;
 }
 
@@ -1260,10 +1380,11 @@ static void ready_cache(FrameCache* cache, const std::vector<fs::path>& paths, c
 
 // Returns the GPUs' pooled memory (cudaMallocAsync keeps freed blocks for the process): another xLamina or
 // stackcli on the same cards would otherwise find them short between renders.
-static void trim_pools() {
+static void trim_pools(const std::vector<int>& devs) {   // the job's cards (empty = all): a card left out of the job is not touched
     int n = 0;
     if (cudaGetDeviceCount(&n) != cudaSuccess) return;
     for (int d = 0; d < n; ++d) {
+        if (!devs.empty() && std::find(devs.begin(), devs.end(), d) == devs.end()) continue;
         cudaMemPool_t pool;
         if (cudaDeviceGetDefaultMemPool(&pool, d) == cudaSuccess) cudaMemPoolTrimTo(pool, 0);
     }
@@ -1277,6 +1398,12 @@ static void trim_pools() {
 static int try_stack(StackOptions& so, int strips) {
     try {
         return strips >= 2 ? run_stack_strips(so, strips) : run_stack_once(so, nullptr);
+    } catch (const std::bad_alloc&) {
+        // the PC's own memory: the depth volume on the host is the large piece (frames x depth pixels x 6 bytes),
+        // and strips or the 1/4 volume make it smaller, so the same fallbacks are tried as for the cards' memory
+        logf("the PC's memory (RAM) ran out during the fusion");
+        note_fail(Fail::HostMemory, "during the fusion");
+        return 4;
     } catch (const std::exception& e) {
         if (!strstr(e.what(), "memory")) throw;
         logf("%s", e.what());
@@ -1303,7 +1430,7 @@ int run_stack(StackOptions& so) {
     limit_stack_options(so);   // options set directly (the GUI, a job built in code) pass the same limits as parsed ones
     int rc;
     auto dead = [&]() {   // after an attempt that ran out of memory: is there anything left to try with?
-        trim_pools();
+        trim_pools(so.po.opt.devices);
         if (cuda_usable(so)) return false;
         logf("the GPU driver gives no memory back to this process any more (out of page-locked memory): close xLamina, open it again and render once more");
         return true;
@@ -1324,7 +1451,7 @@ int run_stack(StackOptions& so) {
             int n = room > ov + 1 ? (int)std::ceil((L - ov) / (room - ov)) : 2;
             for (n = std::clamp(n, 2, 16); n <= 16 && rc == 4 && !so.hooks.cancelled(); ++n) {
                 logf("GPU memory ran short for the whole frame: rendering it in %d strips", n);
-                trim_pools();
+                trim_pools(so.po.opt.devices);
                 rc = try_stack(so, n);
                 if (rc == 4 && dead()) return 1;
             }
@@ -1334,11 +1461,11 @@ int run_stack(StackOptions& so) {
     if (rc == 4 && dead()) return 1;
     if (rc == 4 && so.po.depth_fraction > 0.25) {
         logf("GPU memory ran short at depth resolution %g: rendering again at 1/4", so.po.depth_fraction);
-        trim_pools();
+        trim_pools(so.po.opt.devices);
         so.po.depth_fraction = 0.25;
         rc = try_stack(so, so.strips >= 2 ? so.strips : 1);
     }
-    trim_pools();
+    trim_pools(so.po.opt.devices);
     return rc;
 }
 
@@ -1430,7 +1557,7 @@ static int run_stack_strips(StackOptions& so, int n) {
         ne = NoiseEstimate{};
     }
     if (hooks.cancelled()) return 3;
-    trim_pools();
+    trim_pools(so.po.opt.devices);
 
     // the flat mask's thresholds are ranks over the rectangle (the flattest fifth, the 90th percentile of texture), so
     // a strip's own would follow its content: one fold of the whole frame, without the volume, gives the frame's
@@ -1466,7 +1593,7 @@ static int run_stack_strips(StackOptions& so, int n) {
             }
             if (hooks.cancelled()) return 3;
             cudaGetLastError();
-            trim_pools();
+            trim_pools(so.po.opt.devices);
             if (r == 0 && sc != g.scale) logf("strips: the whole frame folded at half size for the flat regions' thresholds");
         }
         if (r != 0) {
@@ -1519,7 +1646,7 @@ static int run_stack_strips(StackOptions& so, int n) {
         logf("strip %d of %d: %s %d..%d", i + 1, n, along_x ? "x" : "y", (along_x ? g.x0 : g.y0) + a[i], (along_x ? g.x0 : g.y0) + b[i]);
         if (int r = run_stack_once(ss, &ne)) return r;
         if (hooks.cancelled()) return 3;
-        trim_pools();
+        trim_pools(so.po.opt.devices);
 
         off[i] = (int)std::lround(a[i] * g.scale);
         ext[i] = along_x ? res.w : res.h;
@@ -1591,16 +1718,13 @@ static int run_stack_strips(StackOptions& so, int n) {
 
     // ---- write, as one render
     auto t5 = std::chrono::steady_clock::now();
-    if (!so.out.empty()) {
-        fs::create_directories(so.out);
+    bool wrote = true;   // false: the outputs exist (the result takes them) but are not in the folder
+    if (!so.out.empty() && !(wrote = make_out_dir(so.out))) {}
+    else if (!so.out.empty()) {
         fs::path od(so.out);
-        std::vector<std::thread> writers;
-        std::atomic<int> failed{0};
-        for (size_t j = 0; j < names.size(); ++j)
-            writers.emplace_back([&, j] {
-                if (!write_tiff_rgb16((od / (names[j] + ".tif")).string(), acc[j], ow, oh, icc)) { logf("cannot write %s\n", names[j].c_str()); ++failed; }
-            });
-        for (auto& t : writers) t.join();
+        std::vector<const std::vector<float>*> imgs;
+        for (auto& a : acc) imgs.push_back(&a);
+        wrote = write_outputs(od, names, imgs, ow, oh, icc) == names.size();
         if (so.diagnostics) {   // the stitched maps; the smoothed depth and the flat mask exist per strip only
             write_raw(od / "depth.f32", depth.data(), depth.size());
             write_raw(od / "conf.f32", conf.data(), conf.size());
@@ -1621,8 +1745,7 @@ static int run_stack_strips(StackOptions& so, int n) {
             if (!so.note.empty()) fprintf(mf, "options %s\n", so.note.c_str());
             fclose(mf);
         }
-        if (failed) return 1;
-        logf("wrote %zu outputs (%dx%d) in %.2f s -> %s", names.size(), ow, oh, since(t5), so.out.c_str());
+        if (wrote) logf("wrote %zu outputs (%dx%d) in %.2f s -> %s", names.size(), ow, oh, since(t5), so.out.c_str());
     }
     if (so.result) {
         auto& R = *so.result;
@@ -1638,7 +1761,7 @@ static int run_stack_strips(StackOptions& so, int n) {
     }
     logf("fusion total %.2f s in %d strips", since(t_all), n);
     if (hooks.progress) hooks.progress("done", 1.0);
-    return 0;
+    return wrote ? 0 : 6;   // 6: rendered, not written (the result holds the images)
 }
 
 static int run_stack_once(StackOptions& so, NoiseEstimate* noise_cache) {
@@ -1747,7 +1870,7 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
     stage("depth map", 0.0);
     auto t1 = std::chrono::steady_clock::now();
     CK(cudaSetDevice(prim));
-    cudaStream_t s;
+    cudaStream_t s = nullptr;
     CK(cudaStreamCreate(&s));
     // the noise estimate first: the confidence ramp needs the focus measure's floor, the finalize the pyramid MADs
     NoiseEstimate ne;
@@ -1761,6 +1884,8 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
     if (!ne.mad.empty() && (int)ne.mad.size() != P.fp.levels - 1) ne.mad.resize(P.fp.levels - 1, ne.mad.back());
     DepthResult R;
     float* d_guide = nullptr;
+    // the guide and the stream go on every way out of the fusion, a throw from a kernel wrapper included
+    struct Top { float*& guide; cudaStream_t& s; int prim; ~Top() { cudaSetDevice(prim); cudaFree(guide); if (s) cudaStreamDestroy(s); } } top{d_guide, s, prim};
     {
         float *d_V, *d_ga;
         struct DevFree { std::vector<void*> p; ~DevFree() { for (void* q : p) cudaFree(q); } } dfree;   // freed on any exit, a throw included
@@ -1871,7 +1996,7 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
         hooks.preview(name, small.data(), pw, ph);
     };
     preview_depth("depth map");
-    if (hooks.cancelled()) { cudaFree(d_guide); cudaStreamDestroy(s); return 3; }
+    if (hooks.cancelled()) return 3;   // (	op frees the guide and the stream)
 
     // ---- pass 2: refinement
     auto t2 = std::chrono::steady_clock::now();
@@ -1884,6 +2009,23 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
         std::vector<RefineState> rst(ndev);
         std::vector<std::vector<RefineScratch>> rsc(ndev);
         std::vector<float*> d_depth(ndev, nullptr);
+        // on a way out that is not the end of the pass (a card out of memory part-way through these allocations, a
+        // frame that could not be read) the cards' buffers go, so that the attempt that follows finds them free
+        struct Tidy {
+            std::vector<RefineState>& rst; std::vector<std::vector<RefineScratch>>& rsc; std::vector<float*>& d_depth;
+            const std::vector<int>& devs; int prim; bool done = false;
+            ~Tidy() {
+                if (done) return;
+                for (int d : devs) {
+                    if (cudaSetDevice(d) != cudaSuccess) continue;
+                    for (auto& sc : rsc[d]) sc.free();
+                    cudaFree(d_depth[d]);
+                    rst[d].free();
+                }
+                cudaSetDevice(prim);
+                cudaGetLastError();
+            }
+        } tidy{rst, rsc, d_depth, P.devs, prim};
         for (int d : P.devs) {
             CK(cudaSetDevice(d));
             rst[d].alloc(d, ow, oh);
@@ -1897,7 +2039,7 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
         std::vector<fs::path> back_paths(P.paths.rbegin(), P.paths.rend());
         std::vector<PassDev> ctx;
         std::atomic<int> refined{0};
-        run_pass(back_paths, back_k, P.T, P.g, po, P.devs, streams, po.opt.readers, po.opt.cache, ctx,
+        const StreamerStats st2 = run_pass(back_paths, back_k, P.T, P.g, po, P.devs, streams, po.opt.readers, po.opt.cache, ctx,
                  [&](int dev, PassSlot& S, int, cudaStream_t ss) { refine_measure(S.d_warp, rsc[dev][S.index], ss); },
                  [&](int dev, PassSlot& S, int k, cudaStream_t fs) {
                      refine_accumulate(rst[dev], k, rsc[dev][S.index].fm, d_depth[dev], refine_r, fs);
@@ -1908,6 +2050,9 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
                          });
                  },
                  "pass 2: fine focus", hooks);
+        // a frame that was not read has not entered the refinement: no result from it (it used to be logged only,
+        // and the render went on to "Done" without the frame)
+        if (int r = hooks.cancelled() ? 0 : stream_fail(st2)) return r;
         for (size_t i = 1; i < P.devs.size(); ++i) merge_device(rst[prim], rst[P.devs[i]]);
         for (int d : P.devs) {
             CK(cudaSetDevice(d));
@@ -1917,13 +2062,14 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
         CK(cudaSetDevice(prim));
         refine_depth(R.depth_s, R.conf, R.spill, P.vp.dw, P.vp.dh, rst[prim], ow, oh, P.g.scale, s);
         for (int d : P.devs) rst[d].free();   // leaves the last device selected
+        tidy.done = true;
         CK(cudaSetDevice(prim));
     }
     std::vector<float> Ds = smooth_depth(R.depth_s, d_guide, ow, oh, P.g.scale, K, s);
     logf("refine: %.2f s\n", since(t2));
     if (so.result) so.result->refine_seconds = since(t2);
     preview_depth("depth map (refined)");
-    if (hooks.cancelled()) { cudaFree(d_guide); cudaStreamDestroy(s); return 3; }
+    if (hooks.cancelled()) return 3;   // (	op frees the guide and the stream)
 
     // ---- pass 3: composition over the frames that carry a label
     auto t3 = std::chrono::steady_clock::now();
@@ -1940,6 +2086,24 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
         std::vector<std::vector<ComposeScratch>> csc(ndev);
         std::vector<float*> d_D(ndev, nullptr), d_Ds(ndev, nullptr), d_W(ndev, nullptr);
         float s1 = (float)std::max(0.8, soft_px * P.g.scale);
+        float* d_fs = nullptr;   // the flat mask on the card, while its width map is made
+        struct Tidy {   // as in pass 2: the cards' buffers go on a way out that is not the end of the pass
+            std::vector<ComposeState>& cst; std::vector<std::vector<ComposeScratch>>& csc;
+            std::vector<float*>& d_D; std::vector<float*>& d_Ds; std::vector<float*>& d_W; float*& d_fs;
+            const std::vector<int>& devs; int prim; bool done = false;
+            ~Tidy() {
+                if (done) return;
+                cudaFree(d_fs);   // (on the device that was selected when the way out was taken)
+                for (int d : devs) {
+                    if (cudaSetDevice(d) != cudaSuccess) continue;
+                    for (auto& sc : csc[d]) sc.free();
+                    cudaFree(d_D[d]); cudaFree(d_Ds[d]); cudaFree(d_W[d]);
+                    cst[d].free();
+                }
+                cudaSetDevice(prim);
+                cudaGetLastError();
+            }
+        } tidy{cst, csc, d_D, d_Ds, d_W, d_fs, P.devs, prim};
         for (int d : P.devs) {
             CK(cudaSetDevice(d));
             cst[d].alloc(d, ow, oh);
@@ -1950,19 +2114,19 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
             CK(cudaMemcpy(d_D[d], R.depth_s.data(), no * sizeof(float), cudaMemcpyHostToDevice));
             CK(cudaMemcpy(d_Ds[d], Ds.data(), no * sizeof(float), cudaMemcpyHostToDevice));
             if (wide) {
-                float* d_fs = nullptr;
                 CK(cudaMalloc(&d_fs, P.flat.size() * sizeof(float)));
                 CK(cudaMalloc(&d_W[d], no * sizeof(float)));
                 CK(cudaMemcpy(d_fs, P.flat.data(), P.flat.size() * sizeof(float), cudaMemcpyHostToDevice));
                 flat_width_map(d_fs, P.vp.dw, P.vp.dh, d_W[d], ow, oh, (float)so.flat_blend, 0);
                 CK(cudaDeviceSynchronize());
                 cudaFree(d_fs);
+                d_fs = nullptr;
             }
         }
         if (wide) logf("compose: the smooth-depth blend spans up to %.0f frames in flat regions; %zu frames carry weight\n", so.flat_blend, ks.size());
         std::vector<PassDev> ctx;
         std::atomic<int> composed{0};
-        run_pass(sub, ks, P.T, P.g, po, P.devs, streams, po.opt.readers, po.opt.cache, ctx,
+        const StreamerStats st3 = run_pass(sub, ks, P.T, P.g, po, P.devs, streams, po.opt.readers, po.opt.cache, ctx,
                  [&](int, PassSlot&, int, cudaStream_t) {},
                  [&](int dev, PassSlot& S, int k, cudaStream_t fs) {
                      compose_frame(cst[dev], k, S.d_warp, d_D[dev], d_Ds[dev], csc[dev][S.index], fs, d_W[dev]);
@@ -1974,6 +2138,7 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
                          });
                  },
                  "pass 3: composition", hooks);
+        if (int r = hooks.cancelled() ? 0 : stream_fail(st3)) return r;   // a frame missing from the composition: no result
         for (size_t i = 1; i < P.devs.size(); ++i) merge_device(cst[prim], cst[P.devs[i]]);
         for (int d : P.devs) {
             CK(cudaSetDevice(d));
@@ -1983,12 +2148,13 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
         CK(cudaSetDevice(prim));
         b_img = compose_mix(cst[prim], R.conf, ow, oh, P.g.scale, s);
         for (int d : P.devs) cst[d].free();   // leaves the last device selected
+        tidy.done = true;
         CK(cudaSetDevice(prim));
         logf("compose: %zu of %d frames carry a label; %.2f s\n", ks.size(), K, since(t3));
     }
     if (so.result) so.result->compose_seconds = since(t3);
     if (hooks.preview) { std::vector<float> small; int pw, ph; downsample_preview(b_img, ow, oh, hooks.preview_down, small, pw, ph); hooks.preview("B", small.data(), pw, ph); }
-    if (hooks.cancelled()) { cudaFree(d_guide); cudaStreamDestroy(s); return 3; }
+    if (hooks.cancelled()) return 3;   // (	op frees the guide and the stream)
     stage("finalize", 0.0);
 
     // ---- finalize (the noise estimate was taken before the depth stage)
@@ -2032,13 +2198,12 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
 
     // ---- write
     auto t5 = std::chrono::steady_clock::now();
-    std::atomic<size_t> written{0};
-    if (!out.empty()) {
-    fs::create_directories(out);
+    bool wrote = true;   // false: the outputs exist (the result holds them) but are not in the folder
+    if (!out.empty() && !(wrote = make_out_dir(out))) {}
+    else if (!out.empty()) {
     fs::path od(out);
-    // one thread per output: the 16-bit conversion and the file write of each (0.68 s for three in a row)
-    std::vector<std::thread> writers;
-    std::atomic<int> failed{0};
+    std::vector<std::string> wnames;
+    std::vector<const std::vector<float>*> wimgs;
     for (size_t i = 0; i < F.names.size(); ++i) {
         if (!wanted(F.names[i])) continue;
         const std::vector<float>* img = &F.images[i];
@@ -2046,13 +2211,11 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
             size_t j = std::find(so.result->names.begin(), so.result->names.end(), F.names[i]) - so.result->names.begin();
             img = &so.result->images[j];
         }
-        std::string path = (od / (F.names[i] + ".tif")).string(), name = F.names[i];
-        writers.emplace_back([img, path, name, ow, oh, &icc, &failed, &written] {
-            if (!write_tiff_rgb16(path, *img, ow, oh, icc)) { logf("cannot write %s\n", name.c_str()); ++failed; }
-            else ++written;
-        });
+        wnames.push_back(F.names[i]);
+        wimgs.push_back(img);
     }
-    struct Join { std::vector<std::thread>& t; ~Join() { for (auto& x : t) if (x.joinable()) x.join(); } } join{writers};
+    const size_t written = write_outputs(od, wnames, wimgs, ow, oh, icc);
+    wrote = written == wnames.size();
     if (so.diagnostics) {   // the CLI's raw maps for analysis scripts and hash checks; the GUI writes none
         write_raw(od / "depth.f32", R.depth_s.data(), R.depth_s.size());
         if (!P.flat.empty()) write_raw(od / "flat.f32", P.flat.data(), P.flat.size());   // depth-resolution grid (stack.txt: w, h x depth fraction)
@@ -2087,17 +2250,13 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
         if (!so.note.empty()) fprintf(mf, "options %s\n", so.note.c_str());
         fclose(mf);
     }
-    for (auto& t : writers) t.join();
-    if (failed) return 1;
-    logf("wrote %zu outputs (%dx%d) in %.2f s -> %s", written.load(), ow, oh, since(t5), out.c_str());
+    if (wrote) logf("wrote %zu outputs (%dx%d) in %.2f s -> %s", written, ow, oh, since(t5), out.c_str());
     if (so.result) so.result->write_seconds = since(t5);
     }
-    cudaFree(d_guide);
-    cudaStreamDestroy(s);
     if (so.result) so.result->seconds = since(t_all);
     logf("fusion total %.2f s", since(t_all));
     stage("done", 1.0);
-    return 0;
+    return wrote ? 0 : 6;   // 6: rendered, not written (the result holds the images)
 }
 
 // ----------------------------------------------------------------------------- sweep: many B's over one pass 1
@@ -2511,7 +2670,34 @@ int run_align(AlignOptions& ao, AlignOut& A) {
             auto name = e.path().filename().string();
             if (e.is_regular_file() && is_frame_file(e.path()) && name.rfind(prefix, 0) == 0) paths.push_back(e.path());
         }
-        std::sort(paths.begin(), paths.end());
+        // by name as a person reads it: digits as numbers and without regard to case, so frame9 comes before frame10
+        // and IMG_2 beside img_3 (plain code order stacked unpadded numbering as 1, 10, 100, 11, ...). Names that are
+        // equal that way fall back to the plain order, so the result does not depend on the directory's listing.
+        auto natural_less = [](const fs::path& pa, const fs::path& pb) {
+            const std::wstring a = pa.filename().wstring(), b = pb.filename().wstring();
+            size_t i = 0, j = 0;
+            while (i < a.size() && j < b.size()) {
+                if (iswdigit(a[i]) && iswdigit(b[j])) {
+                    size_t i0 = i, j0 = j;
+                    while (i < a.size() && a[i] == L'0') ++i;
+                    while (j < b.size() && b[j] == L'0') ++j;
+                    size_t i1 = i, j1 = j;
+                    while (i < a.size() && iswdigit(a[i])) ++i;
+                    while (j < b.size() && iswdigit(b[j])) ++j;
+                    if (i - i1 != j - j1) return i - i1 < j - j1;   // more digits = larger
+                    int c = a.compare(i1, i - i1, b, j1, j - j1);
+                    if (c) return c < 0;
+                    if (i - i0 != j - j0) return i - i0 > j - j0;   // 007 before 7
+                    continue;
+                }
+                wint_t ca = towlower(a[i]), cb = towlower(b[j]);
+                if (ca != cb) return ca < cb;
+                ++i; ++j;
+            }
+            if (a.size() - i != b.size() - j) return a.size() - i < b.size() - j;
+            return pa < pb;
+        };
+        std::sort(paths.begin(), paths.end(), natural_less);
     }
     // frames are the files of the most common size; anything else in the folder (a previous stack's
     // outputs, say) is left out and reported. Between two sizes with as many files each (the raw files and
@@ -2537,7 +2723,12 @@ int run_align(AlignOptions& ao, AlignOut& A) {
     }
     const int N = (int)paths.size();
     if (N < 2) { logf("need >= 2 frames, found %d\n", N); return 1; }
-    if (std::string gp = gpu_problem(devs); !gp.empty()) { logf("%s", gp.c_str()); return 1; }
+    if (ao.max_frames > 0 && N > ao.max_frames) {   // said before any work: the depth stage refused only after alignment and pass 1
+        logf("the stack has %d frames: at most %d can be fused in one render. Leave frames out (every second one, or one end) and render again.", N, ao.max_frames);
+        note_fail(Fail::TooManyFrames, std::to_string(N));
+        return 1;
+    }
+    if (std::string gp = gpu_problem(devs, true); !gp.empty()) { logf("%s", gp.c_str()); note_fail(Fail::GpuFault, gp); return 1; }
     int ndev = 0;
     CK(cudaGetDeviceCount(&ndev));
     if (devs.empty()) for (int i = 0; i < ndev; ++i) devs.push_back(i);
@@ -2569,9 +2760,39 @@ int run_align(AlignOptions& ao, AlignOut& A) {
         // (0.6.25: with the frames read while the folder's thumbnails loaded, "reading" looked like a second read)
         const char* stage_name = ao.cache && ao.cache->count() >= N ? "frames from memory" : "reading frames";
         std::atomic<int> done{0};
-        for (int d : devs) {
+        // the slots go on every way out before the end of the pass (a card out of memory part-way through them)
+        struct Tidy {
+            std::vector<std::vector<Slot>>& slots; const std::vector<int>& devs; bool done = false;
+            ~Tidy() {
+                if (done) return;
+                for (int d : devs) {
+                    if (cudaSetDevice(d) != cudaSuccess) continue;
+                    for (auto& S : slots[d]) { cudaFree(S.d_rgb); cudaFree(S.d_y); cudaFree(S.d_small); cudaFree(S.d_rows); S.rz.free(); S.fp.free(); }
+                }
+                cudaGetLastError();
+            }
+        } tidy{slots, devs};
+        // slots by the memory each card has free: a frame as float RGB and its luma per slot (16 bytes a pixel) beside
+        // the streamer's copy of the file (up to 6). Three were taken whatever the card and the frame size, which a
+        // 4 to 8 GB card with 60 to 100 Mpx frames does not hold.
+        opt.streams_by_device.assign(devs.size(), opt.streams_per_gpu);
+        for (size_t i = 0; i < devs.size(); ++i) {
+            size_t fr = 0, tot = 0;
+            CK(cudaSetDevice(devs[i]));
+            CK(cudaMemGetInfo(&fr, &tot));
+            const size_t per = (size_t)W * H * 24 + ((size_t)64 << 20), keep = (size_t)512 << 20;
+            const int fit = fr > keep ? (int)std::min<size_t>((size_t)opt.streams_per_gpu, (fr - keep) / per) : 0;
+            if (fit < 1) {
+                logf("GPU %d memory ran out (reading a %d x %d frame needs %.2f GB, %.2f GB free)", devs[i], W, H, per / 1e9, fr / 1e9);
+                return 4;
+            }
+            if (fit < opt.streams_per_gpu) logf("  GPU %d reads with %d stream%s (%.2f GB free)", devs[i], fit, fit == 1 ? "" : "s", fr / 1e9);
+            opt.streams_by_device[i] = fit;
+        }
+        for (size_t di = 0; di < devs.size(); ++di) {
+            const int d = devs[di];
             CK(cudaSetDevice(d));
-            slots[d].resize(opt.streams_per_gpu);
+            slots[d].resize(opt.streams_by_device[di]);
             for (auto& S : slots[d]) {
                 CK(cudaMalloc(&S.d_rgb, (size_t)W * H * 3 * sizeof(float)));
                 CK(cudaMalloc(&S.d_y, (size_t)W * H * sizeof(float)));
@@ -2601,6 +2822,10 @@ int run_align(AlignOptions& ao, AlignOut& A) {
             CK(cudaDeviceSynchronize());
             for (auto& S : slots[d]) { S.fp.flush(hooks); cudaFree(S.d_rgb); cudaFree(S.d_y); cudaFree(S.d_small); cudaFree(S.d_rows); S.rz.free(); S.fp.free(); }
         }
+        tidy.done = true;
+        // a frame that could not be read has no luma: the alignment of zeros ended much later as "no usable pair",
+        // or went through on garbage. The pass's errors end the job here, with the file named.
+        if (!hooks.cancelled()) if (int r = stream_fail(st)) return r;
         logf("align: %d frames %dx%d -> luma %dx%d in %.2f s%s\n", N, W, H, w, h, st.seconds, source_note(st).c_str());
         if (getenv("STACKER_MEM_DEBUG"))
             for (int d : devs) { size_t fr, tot; cudaSetDevice(d); cudaMemGetInfo(&fr, &tot); logf("  [mem] GPU %d after pass 0: %.2f GB free", d, fr / 1e9); }
@@ -2640,6 +2865,17 @@ int run_align(AlignOptions& ao, AlignOut& A) {
     };
     std::vector<PyrCache> caches(ndev);
     for (auto& C : caches) C.cap = 16 + 8 * T;   // each thread's pairs touch ~9 frames (baselines up to 8)
+    // ... as far as the card's free memory goes (a pyramid is about 24 bytes per pixel of the align grid): the cache
+    // only saves rebuilding, so a smaller one changes the time, not the transforms. Each thread holds two at once.
+    for (int d : devs) {
+        size_t fr = 0, tot = 0;
+        if (cudaSetDevice(d) != cudaSuccess || cudaMemGetInfo(&fr, &tot) != cudaSuccess) { cudaGetLastError(); continue; }
+        const size_t per = (size_t)w * h * 24, keep = ((size_t)768 << 20) + (size_t)T * w * h * 64;
+        const int fit = fr > keep ? (int)std::min<size_t>(1000, (fr - keep) / std::max<size_t>(per, 1)) : 0;
+        const int cap = std::max(2 * T + 2, std::min(caches[d].cap, fit));
+        if (cap < caches[d].cap) logf("  GPU %d keeps %d pyramids (%.2f GB free)", d, cap, fr / 1e9);
+        caches[d].cap = cap;
+    }
     std::vector<std::thread> workers;
     std::vector<std::string> worker_err(ndev);
     std::vector<std::atomic<int>> per_dev(ndev);
@@ -2828,7 +3064,7 @@ std::string report_json(const AlignOptions& ao, const AlignOut& A) {
 void write_report(const AlignOptions& ao, const AlignOut& A, const fs::path& od) {
     const int N = (int)A.paths.size();
     const int* rect = A.rect;
-    fs::create_directories(od);
+    if (!make_out_dir(od)) return;   // (logged and noted)
     FILE* f = fopen((od / "report.json").string().c_str(), "w");
     if (!f) { logf("cannot write %s\n", (od / "report.json").string().c_str()); return; }
     std::string js = report_json(ao, A);
@@ -2860,6 +3096,9 @@ int run_job(JobOptions& jo, AlignOut& A, Hooks hooks) {
     so.po.opt.cache = cache;
     struct Unlink { FrameCache*& a; FrameCache*& b; bool mine; ~Unlink() { if (mine) a = b = nullptr; } } unlink{ao.cache, so.po.opt.cache, own_cache != nullptr};
     auto t_all = std::chrono::steady_clock::now();
+    // an output folder that cannot be made is found now, not after the alignment and the whole fusion
+    if (so.write_outputs && !make_out_dir(out)) return 1;
+    ao.max_frames = kMaxFrames;
     if (int r = run_align(ao, A)) return r;
     write_report(ao, A, out);
     so.po.paths = A.paths;
@@ -2889,6 +3128,8 @@ int run_sweep_job(JobOptions& jo, const std::vector<SweepVariant>& variants, con
     so.po.opt.cache = cache;
     struct Unlink { FrameCache*& a; FrameCache*& b; bool mine; ~Unlink() { if (mine) a = b = nullptr; } } unlink{ao.cache, so.po.opt.cache, own_cache != nullptr};
     auto t_all = std::chrono::steady_clock::now();
+    if (!make_out_dir(out_dir)) return 1;
+    ao.max_frames = kMaxFrames;
     if (int r = run_align(ao, A)) return r;
     write_report(ao, A, out_dir);   // report.json + list.txt beside the variants: `stackcli sweep` can continue from them
     so.po.paths = A.paths;

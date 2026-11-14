@@ -37,6 +37,7 @@ if not "%REDIST%"=="" (
 ) else ( echo VC++ redist not found: the zip will need the runtime installed & exit /b 3 )
 rem the manual (Help > Manual opens manual\index.html beside the program)
 xcopy /e /q /y /i docs\manual dist\%NAME%\manual >nul
+if not exist dist\%NAME%\manual\index.html ( echo the manual was not copied: docs\manual\index.html is missing & exit /b 4 )
 copy /y README.md dist\%NAME%\ >nul
 copy /y LICENSE dist\%NAME%\ >nul
 rem the icon as a file: a shortcut that points at it keeps a sharp icon across updates (Explorer's cache serves a

@@ -41,6 +41,7 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(QWidget* parent = nullptr);
+    ~MainWindow() override;
     void openFolder(const QString& dir);
     bool rendering() const { return worker_.running(); }
     void startBatch(const QStringList& dirs);   // render these folders one after the other (File > Batch render's Start)
@@ -54,6 +55,7 @@ protected:
     void dragEnterEvent(QDragEnterEvent* e) override;
     void dropEvent(QDropEvent* e) override;
     void closeEvent(QCloseEvent* e) override;
+    bool eventFilter(QObject* o, QEvent* e) override;   // the middle button on a comparison tab closes it
 
 public slots:
     void render();
@@ -73,6 +75,9 @@ private slots:
     void batchNext();      // open and render the queue's next folder, or finish
     void preferences();                        // File > Preferences: General, Performance, System
     void about();
+    void reportProblem();                      // Help > Report a problem: the logs, the PC's details and the settings as one file
+    void logRunStart(const QString& what, const stackcore::JobOptions& jo);   // the run's block in the session's log
+    QString failureMessage(const JobResultData& d) const;                     // a failed job in words, with the next step
     void openManual();                         // Help > Manual (F1): manual\index.html beside the program, in the browser
     void checkForUpdates();                    // Help > Check for updates: the result in a box
     void showUpdate();                         // the dialog: what changed, Update and restart / Skip / Later

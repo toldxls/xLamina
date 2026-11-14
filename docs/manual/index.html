@@ -37,12 +37,23 @@ mark { background:var(--mark); color:#000; border-radius:2px; padding:0 1px; }
 .tip { border-left:3px solid var(--accent2); background:var(--panel); padding:7px 12px; margin:10px 0; }
 .dev { display:inline-block; font-size:11px; border:1px solid var(--accent); color:var(--accent); border-radius:3px; padding:0 5px; vertical-align:middle; margin-left:6px; }
 figure.shot { margin:14px 0 18px; }
-figure.shot.narrow .wrap { max-width:420px; }
-figure.shot.mid .wrap { max-width:820px; }
-.wrap { position:relative; display:inline-block; max-width:100%; border:1px solid var(--line); border-radius:4px; overflow:hidden; line-height:0; cursor:zoom-in; }
-.wrap.big { max-width:none !important; cursor:zoom-out; }
-.wrap img { max-width:100%; height:auto; display:block; }
+figure.shot.narrow .wrap { max-width:460px; }
+figure.shot.mid .wrap { max-width:860px; }
+/* the margin around the grab keeps the marks on its edges in sight */
+.wrap { display:inline-block; max-width:100%; border:1px solid var(--line); border-radius:4px; padding:16px; background:var(--panel); line-height:0; cursor:zoom-in; }
+.inner { position:relative; display:inline-block; max-width:100%; }
+.inner img { max-width:100%; height:auto; display:block; }
+nav a.here { background:var(--accent2); color:#fff; }
+/* the zoom view: the grab at its full size, wheel to zoom, drag to pan */
+#zoom { position:fixed; inset:0; z-index:10; background:rgba(0,0,0,.88); overflow:auto; display:none; cursor:grab; }
+#zoom.on { display:block; }
+#zoom.drag { cursor:grabbing; }
+#zoom .inner { max-width:none; margin:40px; line-height:0; }
+#zoom .inner img { max-width:none; width:100%; }
+#zoomhelp { position:fixed; z-index:11; left:50%; bottom:14px; transform:translateX(-50%); background:rgba(0,0,0,.75); color:#eee; padding:5px 14px; border-radius:14px; font-size:13px; display:none; pointer-events:none; }
+#zoom.on + #zoomhelp { display:block; }
 .pin { position:absolute; width:18px; height:18px; margin:-13px 0 0 -13px; border-radius:50%; background:var(--accent2); color:#fff; font:bold 11px/18px "Segoe UI", sans-serif; text-align:center; box-shadow:0 0 0 1.5px #fff, 0 1px 4px #000; pointer-events:none; }
+.pin.edge { margin:-9px 0 0 -17px; }
 .box { position:absolute; border:2px solid var(--mark); border-radius:3px; box-shadow:0 0 0 2000px rgba(0,0,0,.45); opacity:0; pointer-events:none; transition:opacity .12s; }
 .box.on { opacity:1; }
 .cursor { position:absolute; width:26px; height:26px; pointer-events:none; filter:drop-shadow(0 1px 2px #000); }
@@ -67,7 +78,7 @@ ol.legend li:hover { background:var(--panel); }
 
 <section id="quick" data-k="start begin first steps tutorial how to stack">
 <h2>Quick start</h2>
-<p>xLamina stacks a folder of focus-bracketed frames into one image that is sharp throughout. It needs 64-bit Windows and an NVIDIA GPU.</p>
+<p>xLamina stacks a folder of focus-bracketed frames into one image that is sharp throughout. It needs 64-bit Windows 10 or 11 and an NVIDIA graphics card (GeForce GTX 16 / RTX 20 series or newer) with a current driver.</p>
 <ol>
   <li><b>Open the folder</b> that holds the frames: <b>Open folder</b> in the toolbar (<kbd>Ctrl+O</kbd>), or drop the folder onto the window.</li>
   <li><b>Tick the outputs</b> you want in the Render panel. <b>B</b> and <b>C</b> are ticked by default.</li>
@@ -95,11 +106,15 @@ ol.legend li:hover { background:var(--panel); }
 <section id="frames-in" data-k="tiff jpeg jpg raw dng lzw zip file format input 8-bit 16-bit greyed profile icc adobe rgb drop">
 <h2>Frames: what xLamina reads</h2>
 <ul>
-  <li><b>TIFF</b>, 8-bit or 16-bit, uncompressed or compressed (LZW, ZIP, PackBits), and <b>JPEG</b>. Uncompressed TIFF reads fastest.</li>
+  <li><b>TIFF</b>, 8-bit or 16-bit, RGB or grey, uncompressed or compressed (LZW, ZIP, PackBits), and <b>JPEG</b>. Uncompressed TIFF reads fastest.</li>
   <li><b>Camera raw files and DNG are not read.</b> Export TIFFs from a raw converter first.</li>
-  <li>Every image of the stack's size is a frame. Other images in the folder are listed greyed out and left alone.</li>
+  <li><b>Not read:</b> CMYK, Lab and YCbCr TIFFs, 32-bit (floating-point) TIFFs, and files whose first image is a small preview. Export plain RGB.</li>
+  <li>Every image of the stack's size is a frame, so keep other stackers' results and duplicate exports out of the folder: an image of the same size would be stacked as a frame. Images of another size are listed greyed out and left alone; point at a grey row for the reason.</li>
+  <li>The frames open in the order of their names, numbers read as numbers (frame9 before frame10).</li>
+  <li>At most 512 frames in one render.</li>
   <li>The frames' colour profile (for example Adobe RGB) is kept in the outputs and used for display.</li>
   <li>Frames smaller than 64 x 64 px are refused.</li>
+  <li>The orientation flag of a camera held upright is not applied: such a stack comes out on its side and can be turned afterwards.</li>
 </ul>
 <p>Frames are read once and kept in memory while they fit (up to 60 % of the machine's RAM), so a second render of the same folder starts at once. A fast SSD is enough; a RAM disk gives no extra speed.</p>
 </section>
@@ -491,14 +506,30 @@ ol.legend li:hover { background:var(--panel); }
 <p>All settings, the window layout, the theme and the recent folders are kept in <code>%APPDATA%\xLamina\xLamina.ini</code>.</p>
 </section>
 
-<section id="trouble" data-k="troubleshooting problem error fails no gpu cuda driver out of memory greyed strips slow blurry doubled edges ghost halo noise">
+<section id="problems" data-k="error failed crash closed froze report a problem log file diagnostics send bug support help message did not finish">
+<h2>When something goes wrong</h2>
+<p>A render that fails says what happened and what to try next: the graphics card or the PC out of memory, a frame that could not be read (named), an output folder that could not be written, a graphics driver that stopped responding. The box has two buttons: <b>Show the log</b> and <b>Save a report…</b>.</p>
+<ul>
+  <li><b>Help &gt; Report a problem…</b> saves one file, <code>xLamina-report-…zip</code>, to the Desktop. It holds the logs of this session and the two before it, the PC's details (Windows, processor, memory, graphics cards and driver) and xLamina's settings. It holds no images, and the name of your user folder is replaced. Send that file with a few words on what you did and what you saw.</li>
+  <li><b>Help &gt; Open the log folder</b> shows the log files themselves: one per session, the last ten.</li>
+  <li>If xLamina closed by itself or was ended during a render, the next start says so and offers to save the report.</li>
+  <li>If the files could not be written (disk full, a file open in another program), the finished images are still shown: use <b>Save as…</b> to keep them somewhere else before the next render.</li>
+  <li>After "The graphics driver stopped responding", close xLamina and open it again before rendering.</li>
+</ul>
+</section>
+
+<section id="trouble" data-k="troubleshooting problem error fails no gpu cuda driver out of memory greyed strips slow blurry doubled edges ghost halo noise smartscreen windows protected">
 <h2>Troubleshooting</h2>
 <table>
   <tr><th>What you see</th><th>What to do</th></tr>
-  <tr><td>"No CUDA GPU found"</td><td>xLamina needs an NVIDIA GPU (Ampere or newer) and a current driver. Frames can still be opened and compared, but not rendered.</td></tr>
+  <tr><td>"Windows protected your PC" at the first start</td><td>xLamina is not signed. Choose More info, then Run anyway. (Or, before unzipping: right-click the zip, Properties, tick Unblock.)</td></tr>
+  <tr><td>"None of the image files in this folder can be stacked"</td><td>The box names the reason, for example a kind of TIFF that is not read. Export 8- or 16-bit RGB TIFF or JPEG.</td></tr>
+  <tr><td>More than 512 frames</td><td>One render takes at most 512. Untick every second frame, or one end of the stack.</td></tr>
+  <tr><td>"No CUDA GPU found", or "the driver is too old"</td><td>xLamina needs an NVIDIA graphics card (GeForce GTX 16 / RTX 20 series or newer) and a current NVIDIA driver. Frames can still be opened and compared, but not rendered.</td></tr>
   <tr><td>A file is greyed in the list</td><td>It is not the stack's image size, so it is not a frame. It is left alone.</td></tr>
   <tr><td>Raw or DNG files do not open</td><td>Export TIFFs from a raw converter.</td></tr>
-  <tr><td>The render failed</td><td>The Log panel has the reason.</td></tr>
+  <tr><td>The render failed</td><td>The message says why and what to try; see <a href="#problems">When something goes wrong</a>.</td></tr>
+  <tr><td>Out of memory on a smaller PC</td><td>Set Output to Half resolution, untick outputs you do not need, close other programs, and in Preferences &gt; Performance untick "Keep the frames resident in host memory".</td></tr>
   <tr><td>A very large stack renders in strips</td><td>Expected: when the depth volume does not fit the GPUs the image is rendered in overlapping strips and joined. It takes longer.</td></tr>
   <tr><td>Renders are slower than they were</td><td>Check Preferences &gt; Performance (both GPUs ticked, frames resident) and set Live view to Off; run the Quick benchmark.</td></tr>
   <tr><td>Doubled edges in the result</td><td>Keep Correct rolling-shutter warp checked; look for red or violet frames and drop them.</td></tr>
@@ -510,6 +541,7 @@ ol.legend li:hover { background:var(--panel); }
 </section>
 
 </main>
+<div id="zoom"></div><div id="zoomhelp">Wheel: zoom &nbsp;·&nbsp; Drag: pan &nbsp;·&nbsp; Click or Esc: close</div>
 <script src="img/rects.js"></script>
 <script>
 (function () {
@@ -520,8 +552,11 @@ ol.legend li:hover { background:var(--panel); }
   // the figures: the grab, a numbered pin and a hover box per mark, and the cursor
   document.querySelectorAll('figure.shot').forEach(function (fig) {
     var shot = fig.dataset.img, R = RECTS[shot] || {};
-    var wrap = document.createElement('div');
-    wrap.className = 'wrap';
+    var outer = document.createElement('div');
+    outer.className = 'wrap';
+    var wrap = document.createElement('div');   // the grab with its marks: positions are fractions of this box
+    wrap.className = 'inner';
+    outer.appendChild(wrap);
     var img = new Image();
     img.onerror = function () { img.onerror = null; img.src = 'img/' + shot + '.jpg'; };   // whole-window grabs are JPEG
     img.src = 'img/' + shot + '.png';
@@ -551,9 +586,10 @@ ol.legend li:hover { background:var(--panel); }
       var pin = document.createElement('div');
       pin.className = 'pin';
       pin.textContent = i + 1;
-      // a point mark sits on the point; a control's pin sits on its top-left corner, clear of most of its text
-      var px = r[4] ? r[0] + r[2] / 2 + 0.004 : Math.max(0.012, r[0]);
-      var py = r[4] ? r[1] + r[3] / 2 + 0.006 : Math.max(0.018, r[1]);
+      // a point mark sits on the point; a control's pin sits beside its left edge
+      var px = r[4] ? r[0] + r[2] / 2 : r[0];
+      var py = r[4] ? r[1] + r[3] / 2 : r[1] + Math.min(r[3] / 2, 0.02);
+      if (!r[4]) pin.className = 'pin edge';   // just outside the control's left edge
       pin.style.left = pct(px);
       pin.style.top = pct(py);
       wrap.appendChild(pin);
@@ -571,13 +607,51 @@ ol.legend li:hover { background:var(--panel); }
         wrap.appendChild(cur);
       }
     }
-    fig.insertBefore(wrap, fig.firstChild);
-    wrap.addEventListener('click', function () { wrap.classList.toggle('big'); });
+    fig.insertBefore(outer, fig.firstChild);
+    outer.title = 'Click to zoom';
+    outer.addEventListener('click', function () { openZoom(wrap, img); });
     fig.querySelectorAll('ol.legend > li').forEach(function (li, i) {
       li.addEventListener('mouseenter', function () { if (boxes[i]) boxes[i].classList.add('on'); });
       li.addEventListener('mouseleave', function () { if (boxes[i]) boxes[i].classList.remove('on'); });
     });
   });
+
+  // the zoom view: a copy of the grab and its marks at the grab's own size (the files hold two pixels per screen
+  // pixel, so this is twice the window's size); the wheel zooms about the cursor, dragging pans, a click or Esc closes
+  var zoom = document.getElementById('zoom'), zw = 0, znat = 0, moved = false;
+  function setZoom(w, cx, cy) {
+    var box = zoom.firstChild, old = zw;
+    zw = Math.max(300, Math.min(znat * 2, w));
+    var fx = (zoom.scrollLeft + cx - 40) / old, fy = (zoom.scrollTop + cy - 40) / old;   // the point under the cursor
+    box.style.width = zw + 'px';
+    zoom.scrollLeft = fx * zw + 40 - cx;
+    zoom.scrollTop = fy * zw + 40 - cy;
+  }
+  function openZoom(wrap, img) {
+    if (!img.naturalWidth) return;
+    zoom.innerHTML = '';
+    var copy = wrap.cloneNode(true);
+    zoom.appendChild(copy);
+    znat = img.naturalWidth;
+    zw = Math.max(wrap.clientWidth, Math.min(znat, window.innerWidth * 1.6));
+    copy.style.width = zw + 'px';
+    zoom.classList.add('on');
+    zoom.scrollLeft = Math.max(0, (zw + 80 - window.innerWidth) / 2);
+    zoom.scrollTop = 0;
+  }
+  zoom.addEventListener('wheel', function (e) { e.preventDefault(); setZoom(zw * Math.pow(1.0018, -e.deltaY), e.clientX, e.clientY); }, {passive: false});
+  zoom.addEventListener('mousedown', function (e) {
+    moved = false;
+    var x = e.clientX, y = e.clientY, sl = zoom.scrollLeft, st = zoom.scrollTop;
+    zoom.classList.add('drag');
+    function move(ev) { if (Math.abs(ev.clientX - x) + Math.abs(ev.clientY - y) > 4) moved = true; zoom.scrollLeft = sl - (ev.clientX - x); zoom.scrollTop = st - (ev.clientY - y); }
+    function up() { zoom.classList.remove('drag'); document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); }
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+    e.preventDefault();
+  });
+  zoom.addEventListener('click', function () { if (!moved) zoom.classList.remove('on'); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') zoom.classList.remove('on'); });
 
   // the contents
   var toc = document.getElementById('toc'), sections = [].slice.call(document.querySelectorAll('main section'));
@@ -589,6 +663,23 @@ ol.legend li:hover { background:var(--panel); }
     s._link = a;
     s._text = (s.textContent + ' ' + (s.dataset.k || '')).toLowerCase();
   });
+
+  // the contents follow the page: the section at the top of the window is the one marked
+  var spyQueued = false;
+  function spy() {
+    spyQueued = false;
+    var here = null, line = window.innerHeight * 0.25;
+    sections.forEach(function (s) { if (!s.classList.contains('hide') && s.getBoundingClientRect().top <= line) here = s; });
+    if (!here) here = sections.filter(function (s) { return !s.classList.contains('hide'); })[0];
+    sections.forEach(function (s) { s._link.classList.toggle('here', s === here); });
+    if (here) {   // and stays in sight in the list
+      var a = here._link, nav = a.closest('nav'), r = a.getBoundingClientRect();
+      if (r.top < 60 || r.bottom > window.innerHeight - 20) nav.scrollTop += r.top - window.innerHeight / 2;
+    }
+  }
+  window.addEventListener('scroll', function () { if (!spyQueued) { spyQueued = true; requestAnimationFrame(spy); } }, {passive: true});
+  window.addEventListener('resize', spy);
+  spy();
 
   // search: every word must be in the section (its text or its keywords); matches are marked
   var q = document.getElementById('q'), count = document.getElementById('count');
@@ -626,6 +717,7 @@ ol.legend li:hover { background:var(--panel); }
       s._link.classList.toggle('hide', !ok);
       if (ok) { ++shown; if (words.length) markIn(s, words); }
     });
+    spy();
     count.textContent = words.length ? (shown ? shown + ' of ' + sections.length + ' sections match' : 'Nothing found. Try one word, e.g. "retouch" or "soft".') : '';
   }
   q.addEventListener('input', search);
