@@ -58,6 +58,7 @@ DepthStyle DepthStyle::load(QSettings& s) {
     st.brightness = std::clamp(s.value("depthView/brightness", 0).toInt(), -100, 100);
     st.contrast = std::clamp(s.value("depthView/contrast", 0).toInt(), -100, 100);
     st.popup = s.value("depthView/popup", true).toBool();
+    st.highlight = s.value("depthView/highlight", true).toBool();
     return st;
 }
 
@@ -68,6 +69,7 @@ void DepthStyle::save(QSettings& s) const {
     s.setValue("depthView/brightness", brightness);
     s.setValue("depthView/contrast", contrast);
     s.setValue("depthView/popup", popup);
+    s.setValue("depthView/highlight", highlight);
 }
 
 double DepthStyle::adjust(double t) const {
@@ -214,9 +216,15 @@ DepthBar::DepthBar(bool withOverlay, QWidget* parent) : QWidget(parent) {
         emit changed();
     });
     popup_ = new QCheckBox("Frame popup");
-    popup_->setToolTip("Checked = a popup beside the cursor names the frame the map chose there, and the frames around it.\nUnchecked = the status bar only.");
+    popup_->setToolTip("Checked = a note beside the cursor names the frame the map chose there, and the frames around it.\nUnchecked = the status bar only.");
     l->addWidget(popup_);
     connect(popup_, &QCheckBox::toggled, this, [this](bool) { read(); });
+    if (!withOverlay) {
+        highlight_ = new QCheckBox("Highlight frame");
+        highlight_->setToolTip("Checked = every pixel taken from the frame under the cursor is marked across the image, the rest dimmed.");
+        l->addWidget(highlight_);
+        connect(highlight_, &QCheckBox::toggled, this, [this](bool) { read(); });
+    }
     if (withOverlay) {
         l->addWidget(new QLabel(" Overlay"));
         overlay_ = new QSlider(Qt::Horizontal);
@@ -248,13 +256,12 @@ void DepthBar::setStyle(const DepthStyle& st) {
     st_ = st;
     st_.lo = std::clamp(st_.lo, 0, K_ - 2);
     if (st_.hi >= 0) st_.hi = std::clamp(st_.hi, st_.lo + 1, K_ - 1);
-    const QList<QWidget*> ws = {palette_, invert_, lo_, hi_, bands_, overlay_, brightness_, contrast_, popup_};
-    brightness_->blockSignals(true);
-    contrast_->blockSignals(true);
-    popup_->blockSignals(true);
+    const QList<QWidget*> ws = {palette_, invert_, lo_, hi_, bands_, overlay_, brightness_, contrast_, popup_, highlight_};
+    for (QWidget* w : ws) if (w) w->blockSignals(true);
     brightness_->setValue(st_.brightness);
     contrast_->setValue(st_.contrast);
     popup_->setChecked(st_.popup);
+    if (highlight_) highlight_->setChecked(st_.highlight);
     for (QWidget* w : ws) if (w) w->blockSignals(true);
     palette_->setCurrentIndex(st_.palette);
     invert_->setChecked(st_.invert);
@@ -280,6 +287,7 @@ void DepthBar::read() {
     s.brightness = brightness_->value();
     s.contrast = contrast_->value();
     s.popup = popup_->isChecked();
+    if (highlight_) s.highlight = highlight_->isChecked();
     if (overlay_) s.overlay = overlay_->value();
     if (s == st_) return;
     setStyle(s);

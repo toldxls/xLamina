@@ -80,9 +80,29 @@ void ImageView::setLiveWindow(const QImage& img, const QRect& win, const QSize& 
 
 void ImageView::setOverlay(const QImage& argb, double opacity) {
     if (argb.isNull()) { overlay_->setVisible(false); overlay_->setPixmap(QPixmap()); return; }
+    setOverlayAt(argb, QPointF(0, 0), 1.0, opacity);
+}
+
+void ImageView::setOverlayAt(const QImage& argb, QPointF pos, double scale, double opacity) {
+    if (argb.isNull()) { setOverlay(QImage()); return; }
     overlay_->setPixmap(QPixmap::fromImage(argb));
+    overlay_->setPos(pos);
+    overlay_->setScale(scale);
     overlay_->setOpacity(opacity);
     overlay_->setVisible(true);
+}
+
+// ScrollHandDrag puts the hand back after every drag (mouseReleaseEvent restores the crosshair)
+void ImageView::setPrecise(bool on) {
+    if (precise_ == on) return;
+    precise_ = on;
+    if (!brush_) viewport()->setCursor(on ? Qt::CrossCursor : Qt::OpenHandCursor);
+}
+
+void ImageView::setCursorNote(const QString& text) {
+    if (note_ == text) return;
+    note_ = text;
+    viewport()->update();
 }
 
 void ImageView::setOverlayOpacity(double opacity) { overlay_->setOpacity(opacity); }
@@ -149,7 +169,7 @@ void ImageView::setBrush(bool on, double radius, double hardness) {
     brushRadius_ = radius;
     brushHardness_ = hardness;
     setDragMode(on ? QGraphicsView::NoDrag : QGraphicsView::ScrollHandDrag);
-    viewport()->setCursor(on ? Qt::BlankCursor : Qt::ArrowCursor);
+    viewport()->setCursor(on ? Qt::BlankCursor : precise_ ? Qt::CrossCursor : Qt::ArrowCursor);
     viewport()->update();
 }
 
@@ -183,6 +203,24 @@ void ImageView::drawForeground(QPainter* p, const QRectF&) {
         p->drawRoundedRect(r, 6, 6);
         p->setPen(QColor(235, 235, 235));
         p->drawText(r, Qt::AlignCenter, label_);
+    }
+    if (!note_.isEmpty() && cursorIn_ && !brush_) {   // the note beside the cursor, kept inside the view
+        QFont f = p->font();
+        f.setPointSize(10);
+        f.setBold(false);
+        p->setFont(f);
+        const QRect vp = viewport()->rect();
+        QRect r = QFontMetrics(f).boundingRect(QRect(0, 0, 900, 200), Qt::AlignLeft | Qt::AlignTop, note_).adjusted(0, 0, 18, 12);
+        QPoint at = cursor_.toPoint() + QPoint(18, 20);
+        if (at.x() + r.width() > vp.right() - 4) at.setX(std::max(4, cursor_.toPoint().x() - 14 - r.width()));
+        if (at.y() + r.height() > vp.bottom() - 4) at.setY(std::max(4, cursor_.toPoint().y() - 14 - r.height()));
+        r.moveTopLeft(at);
+        p->setRenderHint(QPainter::Antialiasing);
+        p->setPen(QPen(QColor(255, 255, 255, 90), 1));
+        p->setBrush(QColor(0, 0, 0, 205));
+        p->drawRoundedRect(r, 5, 5);
+        p->setPen(QColor(240, 240, 240));
+        p->drawText(r.adjusted(9, 6, -9, -6), Qt::AlignLeft | Qt::AlignTop, note_);
     }
     if (brush_ && cursorIn_) {
         double rr = brushRadius_ * zoom();
@@ -265,9 +303,10 @@ void ImageView::mouseMoveEvent(QMouseEvent* e) {
         viewport()->update();
     } else {
         QGraphicsView::mouseMoveEvent(e);
+        if (!note_.isEmpty()) viewport()->update();   // the note follows the cursor
     }
     QPointF p = mapToScene(e->pos());
-    emit hovered((int)p.x(), (int)p.y());
+    emit hovered((int)std::floor(p.x()), (int)std::floor(p.y()));
 }
 
 void ImageView::mouseReleaseEvent(QMouseEvent* e) {
@@ -276,6 +315,7 @@ void ImageView::mouseReleaseEvent(QMouseEvent* e) {
         if (panning_ && (e->button() == Qt::MiddleButton || e->button() == Qt::RightButton)) { panning_ = false; viewport()->setCursor(Qt::BlankCursor); return; }
     }
     QGraphicsView::mouseReleaseEvent(e);
+    if (precise_ && !brush_) viewport()->setCursor(Qt::CrossCursor);
 }
 
 void ImageView::mouseDoubleClickEvent(QMouseEvent* e) {
@@ -296,6 +336,7 @@ void ImageView::keyPressEvent(QKeyEvent* e) {
 
 void ImageView::leaveEvent(QEvent* e) {
     cursorIn_ = false;
+    emit hovered(-1, -1);
     viewport()->update();
     QGraphicsView::leaveEvent(e);
 }

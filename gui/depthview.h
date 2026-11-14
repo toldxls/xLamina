@@ -26,11 +26,12 @@ struct DepthStyle {
     int brightness = 0, contrast = 0;
     int overlay = 0;       // two-up viewer: the map over the other images, % opacity (0 = off)
     bool popup = true;     // the frame under the cursor in a popup beside it
+    bool highlight = true; // main view: every pixel of the frame under the cursor is marked
     bool sameImage(const DepthStyle& o) const {   // the two draw the same picture
         return palette == o.palette && invert == o.invert && lo == o.lo && hi == o.hi && bands == o.bands &&
                brightness == o.brightness && contrast == o.contrast;
     }
-    bool operator==(const DepthStyle& o) const { return sameImage(o) && overlay == o.overlay && popup == o.popup; }
+    bool operator==(const DepthStyle& o) const { return sameImage(o) && overlay == o.overlay && popup == o.popup && highlight == o.highlight; }
     // the position in the palette (0 .. 1) after brightness and contrast
     double adjust(double t) const;
     // kept between sessions, all but the range, which belongs to a stack
@@ -75,6 +76,7 @@ private:
     QSlider* brightness_ = nullptr;
     QSlider* contrast_ = nullptr;
     QCheckBox* popup_ = nullptr;
+    QCheckBox* highlight_ = nullptr;   // the main view's bar only
     QLabel* legend_ = nullptr;
     QLabel* ends_[2] = {nullptr, nullptr};
 };

@@ -48,6 +48,7 @@ public:
     void autoBenchmark(bool sample, const QString& reportPath);   // developer aid: run the benchmark unattended, quit when done
     void notifyUpdated(const QString& from);                      // the first start after an update: say so
     void selfUpdate();                                            // developer aid: update to the latest release without asking
+    void probeHover(double fx, double fy);                        // developer aid: the last tab, and a mouse move at that fraction of the view
 
 protected:
     void dragEnterEvent(QDragEnterEvent* e) override;
@@ -129,6 +130,10 @@ private:
     bool hasDepth() const;
     void setDepthStyle(const DepthStyle& st, bool fromTwoUp);
     void depthHover(int x, int y);
+    void updateDepthHighlight();           // the frame under the cursor marked across what the view shows
+    int hoverFrame_ = -1;                  // that frame, -1 = none
+    bool highlightOn_ = false;
+    std::vector<uint16_t> depthIdx_;       // the depth map rounded to frames, built when first needed
     DepthStyle depthStyle_;
     DepthBar* depthBar_ = nullptr;
 

@@ -34,6 +34,12 @@ public:
     // drawn over the image on the same pixel grid (the difference highlight, the depth map); null = none
     void setOverlay(const QImage& argb, double opacity = 1.0);
     void setOverlayOpacity(double opacity);
+    // an overlay for part of the image: `argb` drawn from image position `pos`, each of its pixels `scale` image pixels
+    void setOverlayAt(const QImage& argb, QPointF pos, double scale, double opacity = 1.0);
+    // a crosshair instead of the hand (the depth map: which pixel is under the cursor must be plain); dragging still pans
+    void setPrecise(bool on);
+    // a few lines drawn beside the cursor while it is over the view (the depth map's frame); empty = none
+    void setCursorNote(const QString& text);
     // retouch: the pane draws `img` (owned by the caller, same size as the image) instead of its pixmap; patch(r)
     // repaints r after the caller changed those pixels. mask (w*h, 0..255) is tinted when shown. null = back to the pixmap
     void setLive(const QImage* img, const std::vector<uint8_t>* mask);
@@ -46,7 +52,7 @@ public:
 signals:
     void zoomChanged(double z);
     void viewChanged();                   // zoom, scroll or size: what the viewport shows has changed
-    void hovered(int x, int y);
+    void hovered(int x, int y);           // image coordinates under the cursor; (-1, -1) when it leaves the view
     void strokeBegin(QPointF imagePos);
     void strokeTo(QPointF imagePos);
     void strokeEnd();
@@ -70,6 +76,8 @@ private:
     LiveImageItem* live_ = nullptr;
     QImage image_;
     QString label_;
+    QString note_;
+    bool precise_ = false;
     bool fitted_ = true;
     bool winActive_ = false;              // the pixmap item shows a live-view crop, placed and scaled (setLiveWindow)
     bool brush_ = false, painting_ = false, panning_ = false;

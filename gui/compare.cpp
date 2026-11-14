@@ -19,7 +19,6 @@
 #include <QSettings>
 #include <QStatusBar>
 #include <QToolBar>
-#include <QToolTip>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -492,6 +491,7 @@ void CompareWindow::setDepth(std::shared_ptr<JobResultData> r, const DepthStyle&
     depthStyle_ = st;
     depthStyle_.overlay = keep;
     depthTb_->setVisible(depth_ != nullptr);
+    for (ImageView* v : view_) { v->setPrecise(depth_ != nullptr); if (!depth_) v->setCursorNote({}); }   // a crosshair: the pixel under the cursor is plain
     if (!depth_) { updateOverlay(); return; }
     depthBar_->setFrames((int)depth_->align.paths.size());
     depthBar_->setStyle(depthStyle_);
@@ -535,17 +535,14 @@ bool CompareWindow::depthOverlay() {
 
 // the frame the depth map chose under the cursor, for any image on the render's pixel grid
 void CompareWindow::depthHover(int pane, int x, int y) {
-    if (!depth_ || sel_[pane] < 0) return;
+    if (!depth_ || sel_[pane] < 0) { view_[pane]->setCursorNote({}); return; }
     const auto& R = depth_->result;
-    if (x < 0 || y < 0 || x >= R.w || y >= R.h || entries_[sel_[pane]].image.size() != QSize(R.w, R.h)) { QToolTip::hideText(); return; }
+    if (x < 0 || y < 0 || x >= R.w || y >= R.h || entries_[sel_[pane]].image.size() != QSize(R.w, R.h)) { view_[pane]->setCursorNote({}); return; }
     // "within" a patch of about 8 screen pixels around the cursor
     const int radius = std::clamp((int)std::lround(8.0 / std::max(view_[pane]->zoom(), 1e-3)), 1, 64);
     const QString text = depthFrameText(R.depth.data(), R.w, R.h, depth_->align.paths, x, y, radius);
     statusBar()->showMessage(QString("x %1, y %2: %3").arg(x).arg(y).arg(QString(text).replace('\n', "; ")));
-    if (depthStyle_.popup && !rt_.on) {   // the one-pixel rectangle makes the popup follow every move
-        const QPoint at = QCursor::pos() + QPoint(14, 10);
-        QToolTip::showText(at, text, view_[pane], QRect(view_[pane]->mapFromGlobal(at), QSize(1, 1)));
-    }
+    view_[pane]->setCursorNote(depthStyle_.popup ? text : QString());   // drawn by the view beside the cursor
 }
 
 void CompareWindow::flip() {

@@ -31,8 +31,8 @@
 #include <QDateTime>
 #include <QTextBrowser>
 #include <QToolBar>
+#include <QMouseEvent>
 #include <QToolButton>
-#include <QToolTip>
 #include <tuple>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -390,6 +390,7 @@ void MainWindow::buildUi() {
     setCentralWidget(centre);
     connect(tabs_, &QTabBar::currentChanged, this, &MainWindow::showOutput);
     connect(view_, &ImageView::hovered, this, &MainWindow::depthHover);
+    connect(view_, &ImageView::viewChanged, this, [this] { if (hoverFrame_ >= 0) updateDepthHighlight(); });
     connect(view_, &ImageView::zoomChanged, this, [this](double z) { status_->setText(QString("%1 %").arg(z * 100, 0, 'f', 0)); });
 
     // ---- left: frames
@@ -913,23 +914,85 @@ void MainWindow::setDepthStyle(const DepthStyle& st, bool fromTwoUp) {
         cache_.remove("depth");
         if (current_ == "depth") showOutput(tabs_->currentIndex());
     }
+    if (!depthStyle_.highlight && hoverFrame_ >= 0) hoverFrame_ = -1;
+    if (!depthStyle_.popup) view_->setCursorNote({});
+    updateDepthHighlight();   // the marking colour goes with the palette
     if (twoUp_ && !fromTwoUp) twoUp_->setDepthStyle(depthStyle_);
 }
 
 // the frame the depth map chose under the cursor: in the status bar for every output of the render, and in a
 // popup beside the cursor on the depth tab
 void MainWindow::depthHover(int x, int y) {
-    if (!developer_ || !hasDepth() || worker_.running() || current_.isEmpty() || current_ == "frame" || compare_.contains(current_)) return;
+    const bool live = developer_ && hasDepth() && !worker_.running() && !current_.isEmpty() && current_ != "frame" && !compare_.contains(current_) &&
+                      view_->image().size() == QSize(result_->result.w, result_->result.h) &&
+                      x >= 0 && y >= 0 && x < result_->result.w && y < result_->result.h;
+    if (!live) {
+        view_->setCursorNote({});
+        if (hoverFrame_ >= 0) { hoverFrame_ = -1; updateDepthHighlight(); }
+        return;
+    }
     const auto& R = result_->result;
-    if (view_->image().size() != QSize(R.w, R.h)) return;
-    if (x < 0 || y < 0 || x >= R.w || y >= R.h) { QToolTip::hideText(); return; }
     const int radius = std::clamp((int)std::lround(8.0 / std::max(view_->zoom(), 1e-3)), 1, 64);   // about 8 screen pixels
     const QString text = depthFrameText(R.depth.data(), R.w, R.h, result_->align.paths, x, y, radius);
     statusBar()->showMessage(QString("%1 — x %2, y %3: %4").arg(current_).arg(x).arg(y).arg(QString(text).replace('\n', "; ")));
-    if (depthStyle_.popup && current_ == "depth") {   // the one-pixel rectangle makes the popup follow every move
-        const QPoint at = QCursor::pos() + QPoint(14, 10);
-        QToolTip::showText(at, text, view_, QRect(view_->mapFromGlobal(at), QSize(1, 1)));
+    const bool onDepth = current_ == "depth";
+    view_->setCursorNote(onDepth && depthStyle_.popup ? text : QString());   // drawn by the view beside the cursor
+    const int K = (int)result_->align.paths.size();
+    const int k = onDepth && depthStyle_.highlight ? std::clamp((int)std::lround(R.depth[(size_t)y * R.w + x]), 0, K - 1) : -1;
+    if (k != hoverFrame_) { hoverFrame_ = k; updateDepthHighlight(); }
+}
+
+// The frame under the cursor across the image: its pixels marked, the rest dimmed. Drawn for what the view shows
+// only, at the screen's resolution (one overlay pixel per block of image pixels when zoomed out; a block is marked
+// when any of its pixels is the frame's), so it costs the same at every zoom and follows pans and zooms.
+void MainWindow::updateDepthHighlight() {
+    if (hoverFrame_ < 0 || current_ != "depth" || !depthStyle_.highlight || !hasDepth()) {
+        if (highlightOn_) { view_->setOverlay(QImage()); highlightOn_ = false; }
+        return;
     }
+    const auto& R = result_->result;
+    const int K = (int)result_->align.paths.size();
+    if (depthIdx_.size() != R.depth.size()) {   // the frame per pixel, rounded once per render
+        depthIdx_.resize(R.depth.size());
+        for (size_t i = 0; i < R.depth.size(); ++i) depthIdx_[i] = (uint16_t)std::clamp((int)std::lround(R.depth[i]), 0, K - 1);
+    }
+    const QRect vis = view_->visibleSceneRect().toAlignedRect().intersected(QRect(0, 0, R.w, R.h));
+    if (vis.isEmpty()) return;
+    const int s = std::max(1, (int)std::floor(1.0 / std::max(view_->zoom(), 1e-3)));
+    const int ow = (vis.width() + s - 1) / s, oh = (vis.height() + s - 1) / s;
+    // a colour the palette does not hold: white on Turbo, cyan on the others
+    const QRgb on = depthStyle_.palette == 4 ? qRgba(255, 255, 255, 255) : qRgba(0, 255, 255, 255);
+    const QRgb off = qRgba(0, 0, 0, 120);
+    const uint16_t k = (uint16_t)hoverFrame_;
+    QImage ov(ow, oh, QImage::Format_ARGB32_Premultiplied);
+    std::vector<uint8_t> hit(ow);
+    for (int oy = 0; oy < oh; ++oy) {
+        std::fill(hit.begin(), hit.end(), (uint8_t)0);
+        const int y1 = std::min(vis.y() + (oy + 1) * s, vis.y() + vis.height());
+        for (int y = vis.y() + oy * s; y < y1; ++y) {
+            const uint16_t* p = depthIdx_.data() + (size_t)y * R.w + vis.x();
+            for (int ox = 0; ox < ow; ++ox) {
+                const int x1 = std::min((ox + 1) * s, vis.width());
+                for (int x = ox * s; x < x1; ++x) hit[ox] |= (uint8_t)(p[x] == k);
+            }
+        }
+        QRgb* row = reinterpret_cast<QRgb*>(ov.scanLine(oy));
+        for (int ox = 0; ox < ow; ++ox) row[ox] = hit[ox] ? on : off;
+    }
+    view_->setOverlayAt(ov, vis.topLeft(), s);
+    highlightOn_ = true;
+}
+
+// developer aid (--hover FX,FY): the last tab (the depth map, with the developer controls) and a mouse move at that
+// fraction of the view, as if the cursor were there, so an unattended run can be grabbed with the note and the
+// highlight on show
+void MainWindow::probeHover(double fx, double fy) {
+    if (tabs_->count() == 0) return;
+    tabs_->setCurrentIndex(tabs_->count() - 1);
+    QWidget* vp = view_->viewport();
+    const QPointF pos(fx * vp->width(), fy * vp->height());
+    QMouseEvent e(QEvent::MouseMove, pos, vp->mapToGlobal(pos), Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(vp, &e);
 }
 
 std::vector<std::string> MainWindow::selectedOutputs() const {
@@ -1768,6 +1831,8 @@ void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
     setStatusGeometry(*data);
     depthStyle_.lo = 0;   // the range belongs to a stack: the new one starts on all of its frames
     depthStyle_.hi = -1;
+    depthIdx_.clear();
+    hoverFrame_ = -1;
     depthBar_->setFrames((int)data->align.paths.size());
     depthBar_->setStyle(depthStyle_);
     rebuildTabs();
@@ -1949,7 +2014,12 @@ void MainWindow::showOutput(int tab) {
     QImage img = outputImage(name);
     if (img.isNull()) return;
     current_ = name;
-    depthBar_->setVisible(name == "depth" && !compare_.contains(name));
+    const bool onDepth = name == "depth" && !compare_.contains(name);
+    depthBar_->setVisible(onDepth);
+    view_->setPrecise(onDepth);   // a crosshair on the depth map: the pixel under the cursor is plain
+    view_->setCursorNote({});
+    hoverFrame_ = -1;
+    updateDepthHighlight();
     view_->setImage(img, true);   // the zoomed area carries over from the live view / the other outputs
     view_->setLabel(compare_.contains(name) ? name + "  (comparison)" : name);
     statusBar()->showMessage(QString("%1 — %2 x %3%4").arg(name).arg(img.width()).arg(img.height()).arg(compare_.contains(name) ? " (comparison image)" : ""));
