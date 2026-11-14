@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QDir>
+#include <QFileInfo>
 #include <QIcon>
 #include <QTimer>
 
@@ -11,7 +12,7 @@
 #include "prefs.h"
 #include "updater.h"
 
-// xLamina [FOLDER] [--render] [--shots DIR [--every S]] [--bench REPORT.txt [--sample]] [--self-update] [--batch DIR DIR ...]
+// xLamina [FOLDER | FILE FILE ...] [--render] [--shots DIR [--every S]] [--bench REPORT.txt [--sample]] [--self-update] [--batch DIR DIR ...]
 //   --batch   every argument after it is a folder: render them one after the other with the saved settings, then quit
 //   --render  start a render of FOLDER at once
 //   --render-in S       developer aid: start the render S seconds after opening (the thumbnails' cache fill first)
@@ -72,7 +73,7 @@ int main(int argc, char** argv) {
     MainWindow w;
     w.show();
     bool autoRender = false, sample = false, selfUpdate = false;
-    QStringList batchDirs;
+    QStringList batchDirs, positional;
     QString folder, shots, bench, updatedFrom, hover, manual, report;
     double every = 3, renderIn = -1;
     for (int i = 1; i < argc; ++i) {
@@ -89,11 +90,13 @@ int main(int argc, char** argv) {
         else if (a == "--hover" && i + 1 < argc) hover = QString::fromLocal8Bit(argv[++i]);
         else if (a == "--manual" && i + 1 < argc) manual = QString::fromLocal8Bit(argv[++i]);
         else if (a == "--report" && i + 1 < argc) report = QString::fromLocal8Bit(argv[++i]);
-        else folder = a;
+        else { folder = a; positional << a; }
     }
     if (!updatedFrom.isEmpty()) w.notifyUpdated(updatedFrom);
     if (selfUpdate) QMetaObject::invokeMethod(&w, &MainWindow::selfUpdate, Qt::QueuedConnection);
-    if (!folder.isEmpty()) w.openFolder(folder);
+    // a folder, or several image files (a stack of just those: files dropped onto the program's icon arrive this way)
+    if (positional.size() > 1 && !QFileInfo(positional.first()).isDir()) w.openFiles(positional);
+    else if (!folder.isEmpty()) { if (QFileInfo(folder).isDir()) w.openFolder(folder); else w.openFiles({folder}); }
     if (autoRender) QMetaObject::invokeMethod(&w, "render", Qt::QueuedConnection);
     if (!batchDirs.isEmpty()) {
         QMetaObject::invokeMethod(&w, [&w, batchDirs] { w.startBatch(batchDirs); }, Qt::QueuedConnection);

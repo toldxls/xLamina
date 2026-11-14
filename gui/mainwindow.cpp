@@ -193,6 +193,12 @@ void MainWindow::buildMenus() {
     QMenu* file = menuBar()->addMenu("&File");
     QAction* open = file->addAction("&Open folder…", QKeySequence::Open, this, &MainWindow::chooseFolder);
     open->setStatusTip("Open a folder of TIFF or JPEG frames (or drop one onto the window).");
+    QAction* openF = file->addAction("Open f&iles…", QKeySequence("Ctrl+Shift+F"), this, [this] {
+        const QStringList fns = QFileDialog::getOpenFileNames(this, "The frames of the stack (select several)", folder_.isEmpty() ? recent_.value(0) : folder_,
+                                                              "Frames (*.tif *.tiff *.jpg *.jpeg);;All files (*)");
+        if (!fns.isEmpty()) openFiles(fns);
+    });
+    openF->setStatusTip("Stack only the files you select, not everything in their folder (or drop the files onto the window).");
     recentMenu_ = file->addMenu("Open &recent");
     batchAct_ = file->addAction("&Batch render…", QKeySequence("Ctrl+Shift+B"), this, &MainWindow::batch);
     batchAct_->setStatusTip("Queue several folders and render them one after the other with the current settings.");
@@ -617,7 +623,24 @@ void MainWindow::buildUi() {
     outDir_ = new QLineEdit;
     outDir_->setPlaceholderText("<folder>_stacker");
     outDir_->setToolTip("Where the TIFFs and report.json are written after a render.");
-    fl->addRow("Output folder", outDir_);
+    {   // the field with a browse button: the folder can be typed or chosen
+        QWidget* row = new QWidget;
+        QHBoxLayout* rl = new QHBoxLayout(row);
+        rl->setContentsMargins(0, 0, 0, 0);
+        rl->setSpacing(4);
+        QToolButton* browse = new QToolButton;
+        browse->setText("…");
+        browse->setToolTip("Choose the folder the outputs and report.json are written to.\nIt applies to this stack; another folder opened starts at <folder>_stacker again.");
+        connect(browse, &QToolButton::clicked, this, [this] {
+            QString start = outDir_->text();
+            while (!start.isEmpty() && !QDir(start).exists()) { const QString up = QFileInfo(start).absolutePath(); if (up == start) break; start = up; }
+            const QString d = QFileDialog::getExistingDirectory(this, "Output folder", start.isEmpty() ? folder_ : start);
+            if (!d.isEmpty()) outDir_->setText(QDir::toNativeSeparators(d));
+        });
+        rl->addWidget(outDir_, 1);
+        rl->addWidget(browse);
+        fl->addRow("Output folder", row);
+    }
     pl->addWidget(sg);
 
     // ---- advanced: the depth / composition parameters, at the validated defaults unless ticked
@@ -796,7 +819,7 @@ void MainWindow::loadSettings() {
     theme_ = s.value("ui/theme", "dark").toString();
     depthStyle_ = DepthStyle::load(s);
     depthBar_->setStyle(depthStyle_);
-    setDeveloper(s.value("ui/developer", false).toBool());
+    setDeveloper(s.value("ui/developer", true).toBool());   // on at the first start (off until 1.0.7); a saved choice stays
     for (QMenu* m : menuBar()->findChildren<QMenu*>())
         if (m->title() == "&Theme")
             for (QAction* a : m->actions()) a->setChecked(a->data().toString() == theme_);
@@ -1077,22 +1100,68 @@ void MainWindow::perfToUi(const PerfSettings& p) {
 
 // ----------------------------------------------------------------------------- folders and frames
 
+// A stack of chosen files: those of the first file's folder (a stack lives in one folder; files from elsewhere are
+// named and left out). One file alone is not a stack: its folder opens instead.
+void MainWindow::openFiles(const QStringList& paths) {
+    if (paths.isEmpty()) return;
+    const QString dir = QFileInfo(paths.first()).absolutePath();
+    QStringList names, elsewhere;
+    for (const QString& p : paths) {
+        QFileInfo fi(p);
+        if (fi.absolutePath().compare(dir, Qt::CaseInsensitive) == 0) names << fi.fileName();
+        else elsewhere << fi.fileName();
+    }
+    if (names.size() < 2) { openFolder(dir); return; }
+    openFolder(dir, names);
+    if (!elsewhere.isEmpty())
+        QMessageBox::information(this, "xLamina", QString("%1 file%2 from another folder left out (%3%4): a stack is the files of one folder.")
+                                                      .arg(elsewhere.size()).arg(elsewhere.size() == 1 ? " was" : "s were", elsewhere.mid(0, 3).join(", "), elsewhere.size() > 3 ? ", …" : ""));
+}
+
 void MainWindow::chooseFolder() {
     QString d = QFileDialog::getExistingDirectory(this, "Folder with the stack's frames", folder_.isEmpty() ? recent_.value(0) : folder_);
     if (!d.isEmpty()) openFolder(d);
 }
 
-void MainWindow::openFolder(const QString& dir) {
+void MainWindow::openFolder(const QString& dir, const QStringList& only) {
     if (worker_.running()) {   // the running job refers to the list's rows (jobItems_, liveItem_, markedItem_)
         statusBar()->showMessage("A render is running; open the folder when it has finished.", 4000);
         return;
     }
     QDir d(dir);
     QStringList files = frameFilesIn(dir);   // TIFF, JPEG (raw too in a build with LibRaw)
+    if (!only.isEmpty()) {   // chosen files: the stack is these, the rest of the folder is not listed
+        QStringList kept;
+        for (const QString& f : files) if (only.contains(f, Qt::CaseInsensitive)) kept << f;
+        files = kept;
+    }
     if (files.size() < 2) {
         if (batchRunning_) { batchSkip(QString("%1 image files, a stack needs at least 2").arg(files.size())); return; }
         QMessageBox::warning(this, "xLamina", QString("%1\n\nholds %2 image files (TIFF or JPEG); a stack needs at least 2.").arg(dir).arg(files.size()));
         return;
+    }
+    // A folder of hundreds of images is someone's whole picture folder more often than one stack: every file would be
+    // read for its size and its thumbnail (minutes for thousands), and one render takes at most kMaxFrames frames anyway.
+    // Asked before anything is read; in a batch the folder is skipped.
+    if (only.isEmpty() && files.size() > 500) {
+        if (batchRunning_) { batchSkip(QString("%1 image files: more than one stack (at most %2 frames)").arg(files.size()).arg(stackcore::kMaxFrames)); return; }
+        QMessageBox box(QMessageBox::Question, "xLamina",
+                        QString("%1\n\nholds %2 image files. Opening them all reads every one of them, which takes a while, and one render "
+                                "takes at most %3 frames.\n\nIf the stack is only some of these files, choose them.")
+                            .arg(QDir::toNativeSeparators(dir)).arg(files.size()).arg(stackcore::kMaxFrames), QMessageBox::Cancel, this);
+        QPushButton* pick = box.addButton("Choose files…", QMessageBox::AcceptRole);
+        QPushButton* all = box.addButton(QString("Open all %1").arg(files.size()), QMessageBox::ActionRole);
+        box.setDefaultButton(pick);
+        DiagLog::write(QString("a folder of %1 image files: asked whether to open them all").arg(files.size()));
+        box.exec();
+        DiagLog::write(box.clickedButton() == pick ? "answer: choose files" : box.clickedButton() == all ? "answer: open all" : "answer: cancel");
+        if (box.clickedButton() == pick) {
+            const QStringList fns = QFileDialog::getOpenFileNames(this, "The frames of the stack (select several)", dir, "Frames (*.tif *.tiff *.jpg *.jpeg);;All files (*)");
+            if (fns.size() > 1) openFiles(fns);
+            else if (fns.size() == 1) statusBar()->showMessage("A stack needs at least 2 files: select several (Shift or Ctrl + click).", 8000);
+            return;
+        }
+        if (box.clickedButton() != all) return;
     }
     thumbs_.stop();
     thumbsDone_.clear();
@@ -1184,6 +1253,7 @@ void MainWindow::openFolder(const QString& dir) {
         return;
     }
     QString note = QString("%1 frames of %2 x %3").arg(frames_.size()).arg(best.first).arg(best.second);
+    if (!only.isEmpty()) note += " (the files you chose; the rest of the folder is left out)";
     if (skipped) note += QString(" (%1 other file%2 left out: point at a grey row for the reason)").arg(skipped).arg(skipped > 1 ? "s" : "");
     if (colorSpace_.isValid()) note += QString(", %1").arg(colorSpace_.description().isEmpty() ? "ICC profile" : colorSpace_.description());
     setStage(note + ". Press Render.");
@@ -2618,10 +2688,19 @@ void MainWindow::dropEvent(QDropEvent* e) {
     QStringList dirs;
     for (const QUrl& u : e->mimeData()->urls()) if (QFileInfo(u.toLocalFile()).isDir()) dirs << u.toLocalFile();
     if (dirs.size() > 1) { QTimer::singleShot(0, this, [this, dirs] { batchDialog(dirs); }); return; }
+    {   // several image files (no folder among them): the stack is those files, not everything in their folder
+        QStringList imgs;
+        for (const QUrl& u : e->mimeData()->urls()) {
+            const QFileInfo fi(u.toLocalFile());
+            const QString x = fi.suffix().toLower();
+            if (fi.isFile() && (x == "tif" || x == "tiff" || x == "jpg" || x == "jpeg")) imgs << fi.absoluteFilePath();
+        }
+        if (dirs.isEmpty() && imgs.size() > 1) { QTimer::singleShot(0, this, [this, imgs] { openFiles(imgs); }); return; }
+    }
     for (const QUrl& u : e->mimeData()->urls()) {
         QString p = u.toLocalFile();
         QFileInfo fi(p);
-        if (fi.isDir()) { openFolder(p); break; }
+        if (fi.isDir()) { QTimer::singleShot(0, this, [this, p] { openFolder(p); }); break; }   // after the drop has returned: openFolder may ask a question
         // a dropped image file: a comparison image when a result is on screen, otherwise its folder
         QString ext = fi.suffix().toLower();
         if (result_ && (ext == "tif" || ext == "tiff" || ext == "jpg" || ext == "jpeg" || ext == "png")) {
@@ -2641,7 +2720,7 @@ void MainWindow::dropEvent(QDropEvent* e) {
             break;
         }
         // an image file: its folder is the stack. Anything else is not something xLamina opens
-        if (ext == "tif" || ext == "tiff" || ext == "jpg" || ext == "jpeg") { openFolder(fi.absolutePath()); break; }
+        if (ext == "tif" || ext == "tiff" || ext == "jpg" || ext == "jpeg") { const QString d = fi.absolutePath(); QTimer::singleShot(0, this, [this, d] { openFolder(d); }); break; }
         QMessageBox::information(this, "xLamina", QString("%1 is not a folder of frames.\n\nDrop a folder that holds the stack's TIFF or JPEG frames%2.")
                                                       .arg(fi.fileName(), ext == "zip" || ext == "7z" || ext == "rar" ? " (unpack the archive first)" : ""));
         break;

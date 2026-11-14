@@ -42,7 +42,9 @@ class MainWindow : public QMainWindow {
 public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
-    void openFolder(const QString& dir);
+    // only, when given, holds file names of the folder: the stack is those files and nothing else of the folder
+    void openFolder(const QString& dir, const QStringList& only = {});
+    void openFiles(const QStringList& paths);   // File > Open files, or several image files dropped: a stack of just these
     bool rendering() const { return worker_.running(); }
     void startBatch(const QStringList& dirs);   // render these folders one after the other (File > Batch render's Start)
     bool batchRunning() const { return batchRunning_; }

@@ -62,6 +62,7 @@ ol.legend { margin:8px 0 0; padding-left:0; list-style:none; counter-reset:n; co
 ol.legend li { counter-increment:n; position:relative; padding:2px 4px 2px 32px; break-inside:avoid; border-radius:4px; }
 ol.legend li::before { content:counter(n); position:absolute; left:4px; top:3px; width:20px; height:20px; border-radius:50%; background:var(--accent2); color:#fff; font:bold 11px/20px "Segoe UI", sans-serif; text-align:center; }
 ol.legend li:hover { background:var(--panel); }
+li.aside { list-style:none; color:var(--dim); }
 @media (max-width: 900px) { nav { position:static; width:auto; border-right:0; } main { margin-left:0; padding:16px; } ol.legend { columns:1; } }
 @media print { nav { display:none; } main { margin:0; max-width:none; } .wrap { break-inside:avoid; } }
 </style>
@@ -81,6 +82,7 @@ ol.legend li:hover { background:var(--panel); }
 <p>xLamina stacks a folder of focus-bracketed frames into one image that is sharp throughout. It needs 64-bit Windows 10 or 11 and an NVIDIA graphics card (GeForce GTX 16 / RTX 20 series or newer) with a current driver.</p>
 <ol>
   <li><b>Open the folder</b> that holds the frames: <b>Open folder</b> in the toolbar (<kbd>Ctrl+O</kbd>), or drop the folder onto the window.</li>
+  <li class="aside">To stack only some of a folder's files: <b>File &gt; Open files…</b> (<kbd>Ctrl+Shift+F</kbd>) and select them, or drop those files onto the window.</li>
   <li><b>Tick the outputs</b> you want in the Render panel. <b>B</b> and <b>C</b> are ticked by default.</li>
   <li>Press <b>Render</b> (<kbd>F5</kbd>). The viewer splits in two while it works and shows the stack being built.</li>
   <li><b>Look at the results</b>: the tabs under the viewer switch between the outputs. Wheel to zoom, drag to pan.</li>
@@ -111,7 +113,7 @@ ol.legend li:hover { background:var(--panel); }
   <li><b>Not read:</b> CMYK, Lab and YCbCr TIFFs, 32-bit (floating-point) TIFFs, and files whose first image is a small preview. Export plain RGB.</li>
   <li>Every image of the stack's size is a frame, so keep other stackers' results and duplicate exports out of the folder: an image of the same size would be stacked as a frame. Images of another size are listed greyed out and left alone; point at a grey row for the reason.</li>
   <li>The frames open in the order of their names, numbers read as numbers (frame9 before frame10).</li>
-  <li>At most 512 frames in one render.</li>
+  <li>At most 512 frames in one render. A folder with more than 500 images is not opened straight away: xLamina asks first and offers <b>Choose files…</b>, so a folder that holds all of your pictures does not get read from end to end.</li>
   <li>The frames' colour profile (for example Adobe RGB) is kept in the outputs and used for display.</li>
   <li>Frames smaller than 64 x 64 px are refused.</li>
   <li>The orientation flag of a camera held upright is not applied: such a stack comes out on its side and can be turned afterwards.</li>
@@ -132,7 +134,7 @@ ol.legend li:hover { background:var(--panel); }
   </ol>
   <figcaption>The list after a render. The second and third lines appear once a render has measured the frames.</figcaption>
 </figure>
-<p>The list is the stack order. Click a frame to see it at full resolution.</p>
+<p>The list is the stack order. Click a frame to see it at full resolution. A stack opened with <b>File &gt; Open files…</b> lists only the files that were chosen.</p>
 <table>
   <tr><th>Colour</th><th>Meaning</th><th>What to do</th></tr>
   <tr><td>Red</td><td>The shift from the previous frame is an outlier: the stage or the specimen moved.</td><td>Render &gt; Drop shifted frames, then Render again.</td></tr>
@@ -177,7 +179,7 @@ ol.legend li:hover { background:var(--panel); }
     <li><b>Live view</b>: the resolution of the two panes shown while rendering. See <a href="#rendering">While it renders</a>.</li>
     <li><b>Smoothing (C)</b>: how much of C's weak detail is taken from B instead. 0 = the raw selection (noisiest), 2 = the default, 3 = the same as Cn.</li>
     <li><b>Field of view</b>: the width of one frame in mm. Optional; it gives the geometry report its µm/px and the saved file name its field of view.</li>
-    <li><b>Output folder</b>: where the files are written. Empty = <code>&lt;folder&gt;_stacker</code> beside the frames.</li>
+    <li><b>Output folder</b>: where the files are written, <code>&lt;folder&gt;_stacker</code> beside the frames unless you type another or choose one with the <b>…</b> button. The choice applies to this stack; the next folder opened starts at its own <code>_stacker</code> again.</li>
   </ol>
 </figure>
 <p><b>Render &gt; Reset settings to defaults</b> puts the panel back as installed. With <a href="#developer">Developer controls</a> on, the panel also shows Radius (C), Radius (B) and the Advanced group.</p>
@@ -364,7 +366,7 @@ ol.legend li:hover { background:var(--panel); }
 
 <section id="developer" data-k="developer controls advanced radius depth resolution focus window power volume aggregation refine soft labels halo prior dark reach flat smoothing developer outputs">
 <h2>Developer controls <span class="dev">developer</span></h2>
-<p><b>View &gt; Developer controls</b> (also in Preferences &gt; General) shows the tuning controls: the outputs beyond B and C, Radius (C), Radius (B), the Advanced group, Tools &gt; Developer outputs, and the <a href="#depth">depth map</a> tab. Turning it off changes nothing about a render except that the extra outputs are not rendered.</p>
+<p><b>View &gt; Developer controls</b> (also in Preferences &gt; General), on when xLamina is first installed, shows the tuning controls: the outputs beyond B and C, Radius (C), Radius (B), the Advanced group, Tools &gt; Developer outputs, and the <a href="#depth">depth map</a> tab. Turning it off changes nothing about a render except that the extra outputs are not rendered.</p>
 <figure class="shot narrow" data-img="render_panel_developer" data-cursor="row Radius (C)" data-marks="group Outputs;row Radius (C);row Radius (B);group Advanced">
   <ol class="legend">
     <li>All the <a href="#outputs">outputs</a>.</li>
@@ -464,6 +466,7 @@ ol.legend li:hover { background:var(--panel); }
 <table>
   <tr><th>Main window</th><th></th></tr>
   <tr><td><kbd>Ctrl+O</kbd></td><td>Open folder</td></tr>
+  <tr><td><kbd>Ctrl+Shift+F</kbd></td><td>Open files (a stack of the files you select)</td></tr>
   <tr><td><kbd>F5</kbd> or <kbd>Ctrl+R</kbd></td><td>Render</td></tr>
   <tr><td><kbd>Esc</kbd></td><td>Cancel the render</td></tr>
   <tr><td><kbd>Ctrl+S</kbd></td><td>Save as…</td></tr>
