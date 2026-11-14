@@ -52,6 +52,11 @@ void depthRange(const float* depth, size_t n, int K, int& lo, int& hi);
 // the span of frames within `radius` pixels when there is more than one. Empty outside the map
 QString depthFrameText(const float* depth, int w, int h, const std::vector<std::filesystem::path>& paths, int x, int y, int radius);
 
+// One frame marked across a part of the map: an overlay for the rectangle `vis` of the image, one overlay pixel per
+// s x s image pixels (a block is marked when any of its pixels is frame k's), the frame's pixels in a colour the
+// palette does not hold and the rest dimmed. idx = the map rounded to frames, w pixels wide.
+QImage depthLayerMark(const uint16_t* idx, int w, int k, const QRect& vis, int s, int palette);
+
 class DepthBar : public QWidget {
     Q_OBJECT
 public:

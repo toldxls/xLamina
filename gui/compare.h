@@ -87,6 +87,18 @@ private:
     DepthBar* depthBar_ = nullptr;
     QToolBar* depthTb_ = nullptr;
     bool depthOv_[2] = {false, false};   // the pane's overlay pixmap is the current depth image
+    // the depth map's controls, crosshair, note and overlay are there while a pane shows the depth map, and only then
+    bool depthShown() const;
+    void updateDepthTools();
+    // a layer held on show, as in the main window: a click on either pane holds the frame the map chose there, its
+    // pixels marked over every pane on the render's grid; the arrow keys and PgUp / PgDn step, Esc lets go
+    int heldFrame_ = -1;
+    bool layerMarked_ = false;
+    std::vector<uint16_t> depthIdx_;     // the map rounded to frames
+    std::vector<char> depthHas_;         // frames the map uses at all
+    void holdLayer(int k);               // -1 = let go
+    void stepLayer(int delta);
+    bool markLayer();                    // the held layer over the panes; false when none is held
 
     // ---- retouch
     struct Stroke { QRect r; std::vector<uint8_t> mask; };   // the mask before the stroke, inside r

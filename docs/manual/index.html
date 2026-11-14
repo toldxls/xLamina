@@ -518,7 +518,16 @@ li.aside { list-style:none; color:var(--dim); }
     <li>The depth map itself, listed as <b>depth</b>.</li>
   </ol>
 </figure>
-<p>The note beside the cursor works on every image of the render there, so you can read the frame while looking at B or C.</p>
+<p>The depth controls, the crosshair and the note beside the cursor are there while one of the panes shows <b>depth</b>, and are gone when both panes show other images. With the depth map in one pane, the note works on the other pane's image too, so you can read the frame while looking at B or C.</p>
+<figure class="shot" data-img="compare_depth_layer" data-marks="view;view 2;status bar">
+  <ol class="legend">
+    <li>The held layer marked on B: these are the pixels B took from that frame.</li>
+    <li>The same layer on the depth map; its label names the frame.</li>
+    <li>The status bar gives the layer's share of the image.</li>
+  </ol>
+  <figcaption>A layer held in the two-up viewer.</figcaption>
+</figure>
+<p>A layer is held and stepped here as in the main window: <b>click</b> on either pane to hold the layer under the cursor, the <b>arrow keys</b> or <kbd>PgUp</kbd> / <kbd>PgDn</kbd> for the next layer, <kbd>Esc</kbd> or a click on the held layer to let go. While a layer is held it takes the place of the Overlay and of the Difference highlight.</p>
 </section>
 
 <section id="sweep" data-k="sweep variants parameter search try settings soft labels refine background compare change">

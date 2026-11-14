@@ -98,11 +98,11 @@ CompareWindow::CompareWindow(QWidget* parent) : QMainWindow(parent) {
     connect(vertical, &QAction::toggled, this, [this](bool on) { split_->setOrientation(on ? Qt::Vertical : Qt::Horizontal); });
     QAction* next = new QAction(this);
     next->setShortcut(QKeySequence("PgDown"));
-    connect(next, &QAction::triggered, this, [this] { step(1, 1); });
+    connect(next, &QAction::triggered, this, [this] { if (heldFrame_ >= 0) stepLayer(1); else step(1, 1); });   // a held layer: the next layer
     addAction(next);
     QAction* prev = new QAction(this);
     prev->setShortcut(QKeySequence("PgUp"));
-    connect(prev, &QAction::triggered, this, [this] { step(1, -1); });
+    connect(prev, &QAction::triggered, this, [this] { if (heldFrame_ >= 0) stepLayer(-1); else step(1, -1); });
     addAction(prev);
 
     // ---- retouch
@@ -218,6 +218,16 @@ CompareWindow::CompareWindow(QWidget* parent) : QMainWindow(parent) {
             syncing_ = true; view_[b]->syncFrom(view_[a]); syncing_ = false;
         });
         connect(view_[a], &ImageView::hovered, this, [this, a](int x, int y) { depthHover(a, x, y); });
+        connect(view_[a], &ImageView::clicked, this, [this, a](int x, int y) {
+            if (!depthShown() || rt_.on || sel_[a] < 0) return;
+            const auto& R = depth_->result;
+            if (x < 0 || y < 0 || x >= R.w || y >= R.h || entries_[sel_[a]].image.size() != QSize(R.w, R.h)) return;
+            const int k = std::clamp((int)std::lround(R.depth[(size_t)y * R.w + x]), 0, (int)depth_->align.paths.size() - 1);
+            holdLayer(k == heldFrame_ ? -1 : k);
+        });
+        connect(view_[a], &ImageView::stepKey, this, [this](int d) { stepLayer(d); });
+        connect(view_[a], &ImageView::escapePressed, this, [this] { if (heldFrame_ >= 0) holdLayer(-1); });
+        connect(view_[a], &ImageView::viewChanged, this, [this] { if (heldFrame_ >= 0) markLayer(); });
         connect(view_[a], &ImageView::measuresChanged, this, [this, a, b] { view_[b]->setMeasures(view_[a]->measures()); });
         connect(view_[a], &ImageView::measured, this, [this](QString len) { statusBar()->showMessage(QString("Measured: %1").arg(len), 10000); });
     }
@@ -474,15 +484,18 @@ void CompareWindow::refresh(int pane) {
     syncing_ = false;
     view_[pane]->setLabel(e.name);
     applyScale(pane);
+    updateDepthTools();
     status_->setText(QString("%1  |  %2").arg(sel_[0] >= 0 ? entries_[sel_[0]].name : "—", sel_[1] >= 0 ? entries_[sel_[1]].name : "—"));
     trimCache();
     updateOverlay();
+    if (heldFrame_ >= 0 && depthShown()) holdLayer(heldFrame_);   // the pane's label names the held layer again
     if (rt_.on && pane == 1 && i != rt_.source) retouchSetSource(i);
 }
 
 // |luma(left) - luma(right)| as an orange tint: transparent up to the chosen level, opaque at four times it.
 // Both panes get the same overlay, so the highlight sits on the pixels in question whichever image is under it.
 void CompareWindow::updateOverlay() {
+    if (markLayer()) return;   // a held layer is what the panes show over their images
     if (!diffAct_->isChecked() && depthOverlay()) { overlayFor_[0] = overlayFor_[1] = -1; return; }
     depthOv_[0] = depthOv_[1] = false;   // from here on the overlays are the difference's, or none
     if (!diffAct_->isChecked() || sel_[0] < 0 || sel_[1] < 0 || entries_[sel_[0]].image.isNull() || entries_[sel_[1]].image.isNull()) {
@@ -538,8 +551,10 @@ void CompareWindow::setDepth(std::shared_ptr<JobResultData> r, const DepthStyle&
     const int keep = depthStyle_.overlay;   // the overlay belongs to this window
     depthStyle_ = st;
     depthStyle_.overlay = keep;
-    depthTb_->setVisible(depth_ != nullptr);
-    for (ImageView* v : view_) { v->setPrecise(depth_ != nullptr); if (!depth_) v->setCursorNote({}); }   // a crosshair: the pixel under the cursor is plain
+    depthIdx_.clear();
+    depthHas_.clear();
+    heldFrame_ = -1;
+    updateDepthTools();
     if (!depth_) { updateOverlay(); return; }
     depthBar_->setFrames((int)depth_->align.paths.size());
     depthBar_->setStyle(depthStyle_);
@@ -567,8 +582,82 @@ void CompareWindow::recolourDepth() {
     updateOverlay();
 }
 
+bool CompareWindow::depthShown() const {
+    const int di = depth_ ? indexOf("depth") : -1;
+    return di >= 0 && (sel_[0] == di || sel_[1] == di);
+}
+
+// The Depth toolbar, the crosshair, the note beside the cursor and the arrow keys' stepping: with the depth map in
+// a pane. With two other images on show they were controls for something that is not there.
+void CompareWindow::updateDepthTools() {
+    const bool on = depthShown();
+    depthTb_->setVisible(on);
+    for (ImageView* v : view_) {
+        v->setPrecise(on);
+        v->setStepKeys(on);
+        if (!on) v->setCursorNote({});
+    }
+    if (!on && heldFrame_ >= 0) holdLayer(-1);
+}
+
+void CompareWindow::holdLayer(int k) {
+    if (k >= 0 && !depthShown()) return;
+    heldFrame_ = k;
+    const int di = indexOf("depth");
+    if (k < 0) {
+        layerMarked_ = false;
+        for (int p = 0; p < 2; ++p) { view_[p]->setOverlay(QImage()); depthOv_[p] = false; if (sel_[p] >= 0) view_[p]->setLabel(entries_[sel_[p]].name); }
+        overlayFor_[0] = overlayFor_[1] = -1;
+        updateOverlay();   // the difference or the depth overlay, when one is on
+        statusBar()->showMessage("Layer let go.", 4000);
+        return;
+    }
+    const auto& R = depth_->result;
+    const int K = (int)depth_->align.paths.size();
+    if (depthIdx_.size() != R.depth.size()) {
+        depthIdx_.resize(R.depth.size());
+        depthHas_.assign(K, 0);
+        for (size_t i = 0; i < R.depth.size(); ++i) { depthIdx_[i] = (uint16_t)std::clamp((int)std::lround(R.depth[i]), 0, K - 1); depthHas_[depthIdx_[i]] = 1; }
+    }
+    markLayer();
+    const QString name = QString::fromStdWString(depth_->align.paths[k].filename().wstring());
+    size_t px = 0;
+    for (uint16_t v : depthIdx_) px += v == (uint16_t)k;
+    for (int p = 0; p < 2; ++p) if (sel_[p] == di) view_[p]->setLabel(QString("depth  ·  frame %1 of %2  ·  %3").arg(k + 1).arg(K).arg(name));
+    statusBar()->showMessage(QString("Layer held: frame %1 of %2 (%3), %4 % of the image. Arrow keys or PgUp / PgDn step through the layers; Esc or a click on it lets go.")
+                                 .arg(k + 1).arg(K).arg(name).arg(100.0 * px / std::max<size_t>(1, depthIdx_.size()), 0, 'f', 2));
+}
+
+void CompareWindow::stepLayer(int delta) {
+    if (!depthShown() || rt_.on || delta == 0) return;
+    const int K = (int)depth_->align.paths.size();
+    if (heldFrame_ < 0) { holdLayer(delta > 0 ? 0 : K - 1); if (heldFrame_ >= 0 && depthHas_[heldFrame_]) return; }
+    int n = heldFrame_;
+    for (int i = heldFrame_ + (delta > 0 ? 1 : -1); i >= 0 && i < K; i += delta > 0 ? 1 : -1) if (depthHas_[i]) { n = i; break; }
+    if (n == heldFrame_) { statusBar()->showMessage(delta > 0 ? "This is the last layer the depth map uses." : "This is the first layer the depth map uses.", 4000); return; }
+    holdLayer(n);
+}
+
+// The held layer over every pane that shows an image on the render's grid, for what each pane shows, at the
+// screen's resolution (as the main window draws it).
+bool CompareWindow::markLayer() {
+    if (heldFrame_ < 0 || !depthShown() || depthIdx_.empty()) return false;
+    const auto& R = depth_->result;
+    for (int p = 0; p < 2; ++p) {
+        depthOv_[p] = false;
+        if (sel_[p] < 0 || entries_[sel_[p]].image.size() != QSize(R.w, R.h)) { view_[p]->setOverlay(QImage()); continue; }
+        const QRect vis = view_[p]->visibleSceneRect().toAlignedRect().intersected(QRect(0, 0, R.w, R.h));
+        if (vis.isEmpty()) continue;
+        const int s = std::max(1, (int)std::floor(1.0 / std::max(view_[p]->zoom(), 1e-3)));
+        view_[p]->setOverlayAt(depthLayerMark(depthIdx_.data(), R.w, heldFrame_, vis, s, depthStyle_.palette), vis.topLeft(), s);
+    }
+    overlayFor_[0] = overlayFor_[1] = -1;
+    layerMarked_ = true;
+    return true;
+}
+
 bool CompareWindow::depthOverlay() {
-    const int di = depth_ && depthStyle_.overlay > 0 && !rt_.on ? indexOf("depth") : -1;
+    const int di = depth_ && depthStyle_.overlay > 0 && !rt_.on && depthShown() ? indexOf("depth") : -1;
     if (di < 0 || entries_[di].image.isNull()) return false;
     const QImage& map = entries_[di].image;
     const double op = depthStyle_.overlay / 100.0;
@@ -583,7 +672,7 @@ bool CompareWindow::depthOverlay() {
 
 // the frame the depth map chose under the cursor, for any image on the render's pixel grid
 void CompareWindow::depthHover(int pane, int x, int y) {
-    if (!depth_ || sel_[pane] < 0) { view_[pane]->setCursorNote({}); return; }
+    if (!depthShown() || sel_[pane] < 0) { view_[pane]->setCursorNote({}); return; }
     const auto& R = depth_->result;
     if (x < 0 || y < 0 || x >= R.w || y >= R.h || entries_[sel_[pane]].image.size() != QSize(R.w, R.h)) { view_[pane]->setCursorNote({}); return; }
     // "within" a patch of about 8 screen pixels around the cursor

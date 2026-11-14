@@ -108,6 +108,30 @@ QString depthFrameText(const float* depth, int w, int h, const std::vector<std::
     return s;
 }
 
+QImage depthLayerMark(const uint16_t* idx, int w, int k, const QRect& vis, int s, int palette) {
+    const int ow = (vis.width() + s - 1) / s, oh = (vis.height() + s - 1) / s;
+    // a colour the palette does not hold: white on Turbo, cyan on the others
+    const QRgb on = palette == 4 ? qRgba(255, 255, 255, 255) : qRgba(0, 255, 255, 255);
+    const QRgb off = qRgba(0, 0, 0, 120);
+    const uint16_t kk = (uint16_t)k;
+    QImage ov(ow, oh, QImage::Format_ARGB32_Premultiplied);
+    std::vector<uint8_t> hit(ow);
+    for (int oy = 0; oy < oh; ++oy) {
+        std::fill(hit.begin(), hit.end(), (uint8_t)0);
+        const int y1 = std::min(vis.y() + (oy + 1) * s, vis.y() + vis.height());
+        for (int y = vis.y() + oy * s; y < y1; ++y) {
+            const uint16_t* p = idx + (size_t)y * w + vis.x();
+            for (int ox = 0; ox < ow; ++ox) {
+                const int x1 = std::min((ox + 1) * s, vis.width());
+                for (int x = ox * s; x < x1; ++x) hit[ox] |= (uint8_t)(p[x] == kk);
+            }
+        }
+        QRgb* row = reinterpret_cast<QRgb*>(ov.scanLine(oy));
+        for (int ox = 0; ox < ow; ++ox) row[ox] = hit[ox] ? on : off;
+    }
+    return ov;
+}
+
 QImage depthImage(const float* depth, int w, int h, int K, const DepthStyle& st) {
     QRgb lut[kLut];
     for (int i = 0; i < kLut; ++i) {

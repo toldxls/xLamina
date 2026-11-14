@@ -147,6 +147,12 @@ ManualShots::ManualShots(MainWindow& w, const QString& dir) : w_(w), dir_(dir) {
         [this, tab, dock] { w_.twoUp(); w_.twoUp_->select(0, "B"); w_.twoUp_->select(1, "depth"); },
         [this, tab, dock] { if (QSlider* s = w_.twoUp_->findChildren<QSlider*>().value(2)) s->setValue(50); },
         [this, tab, dock] { grab(w_.twoUp_, "compare_depth"); },
+        // a layer held there: the click that holds it, one step on, the overlay off so that B shows under the marks
+        [this, tab, dock] {
+            if (QSlider* s = w_.twoUp_->findChildren<QSlider*>().value(2)) s->setValue(0);
+            if (ImageView* v = w_.twoUp_->findChildren<ImageView*>().value(0)) { emit v->clicked(v->image().width() / 2, (int)(v->image().height() * 0.6)); emit v->stepKey(1); }
+        },
+        [this, tab, dock] { grab(w_.twoUp_, "compare_depth_layer"); if (ImageView* v = w_.twoUp_->findChildren<ImageView*>().value(0)) emit v->escapePressed(); },
         // the dust map's window, when the run names a dust map (XLAMINA_MANUAL_DUST: any white-background frame): as it
         // opens, and with the sensitivity raised to 1.5 %. Dismissed without setting the map.
         [this, tab, dock] {
