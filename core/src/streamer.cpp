@@ -210,12 +210,12 @@ StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, con
     for (size_t di = 0; di < devs.size(); ++di)
         workers.emplace_back([&, di] {
             const int S = S_dev[di];
+            std::vector<cudaStream_t> streams(S, nullptr);
+            std::vector<cudaEvent_t> uploaded(S, nullptr);
+            std::vector<uint8_t*> dbuf(S, nullptr);
+            std::vector<uint8_t*> pending(S, nullptr);
             try {
                 CK(cudaSetDevice(devs[di]));
-                std::vector<cudaStream_t> streams(S);
-                std::vector<cudaEvent_t> uploaded(S);
-                std::vector<uint8_t*> dbuf(S);
-                std::vector<uint8_t*> pending(S, nullptr);
                 for (int j = 0; j < S; ++j) {
                     CK(cudaStreamCreateWithFlags(&streams[j], cudaStreamNonBlocking));
                     CK(cudaEventCreateWithFlags(&uploaded[j], cudaEventDisableTiming));
@@ -246,15 +246,31 @@ StreamerStats stream_frames(const std::vector<std::filesystem::path>& paths, con
                         wait_upload(uploaded[j], failed);
                     }
                     if (pending[j]) pool.release(pending[j]);
-                    CK(cudaFree(dbuf[j]));
-                    CK(cudaEventDestroy(uploaded[j]));
-                    CK(cudaStreamDestroy(streams[j]));
+                    pending[j] = nullptr;
+                    cudaError_t e1 = cudaFree(dbuf[j]); dbuf[j] = nullptr;
+                    cudaError_t e2 = cudaEventDestroy(uploaded[j]); uploaded[j] = nullptr;
+                    cudaError_t e3 = cudaStreamDestroy(streams[j]); streams[j] = nullptr;
+                    CK(e1); CK(e2); CK(e3);
                 }
             } catch (const std::exception& e) {
                 worker_errors[di] = e.what();
                 // out of memory is not survivable for the pass (the caller renders again with less); another kind of
                 // failure leaves the other cards to finish the frames
-                if (strstr(e.what(), "memory")) failed = true;
+                if (strstr(e.what(), "memory") || dynamic_cast<const std::bad_alloc*>(&e)) {
+                    failed = true;
+                    if (dynamic_cast<const std::bad_alloc*>(&e)) worker_errors[di] = "out of host memory (bad_alloc)";
+                }
+                // what this card holds for the pass goes back, or the render that follows with less starts short by
+                // it (max_px per stream, on the card that had just run out). The work in flight ends first.
+                cudaSetDevice(devs[di]);
+                cudaDeviceSynchronize();
+                for (int j = 0; j < S; ++j) {
+                    if (dbuf[j]) cudaFree(dbuf[j]);
+                    if (uploaded[j]) cudaEventDestroy(uploaded[j]);
+                    if (streams[j]) cudaStreamDestroy(streams[j]);
+                    if (pending[j]) pool.release(pending[j]);
+                }
+                cudaGetLastError();
                 // other GPUs take over this one's frames; only the last worker standing
                 // has to drain the queue so readers never block on a full pool
                 if (--live_workers == 0) {

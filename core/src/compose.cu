@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <stdexcept>
 
 #include "stackcore/depth.h"
@@ -749,8 +750,11 @@ bool write_tiff_rgb16(const std::string& path, const std::vector<float>& rgb, in
     FILE* g = f;
     f = nullptr;
     if (fclose(g) != 0) return fail(sys("cannot write the file"));
-    remove(path.c_str());   // (rename does not replace a file on Windows; a target that cannot be removed fails the rename)
-    if (rename(tmp.c_str(), path.c_str()) != 0) return fail(sys("cannot replace the file (is it open in another program?)"));
+    // one step that replaces the target (the C rename does not on Windows, and removing the target first lost the
+    // previous file as well when the rename then failed)
+    std::error_code ec;
+    std::filesystem::rename(std::filesystem::path(tmp), std::filesystem::path(path), ec);
+    if (ec) return fail("cannot replace the file (is it open in another program?): " + ec.message());
     shut.keep = true;
     return true;
 }

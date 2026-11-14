@@ -15,6 +15,7 @@
 #include <QSettings>
 #include <QSysInfo>
 
+#include <algorithm>
 #include <thread>
 
 #include "prefs.h"
@@ -67,7 +68,27 @@ namespace DiagLog {
 QString dir() { return g_dir; }
 QString path() { return g_file.fileName(); }
 
+// folders named by a run (hideFolder), longest first, so that a folder inside another goes whole
+static QMutex g_hide_m;
+static QStringList g_hide;
+
+void hideFolder(const QString& folder) {
+    const QString f = QDir::toNativeSeparators(QDir::cleanPath(folder));
+    if (f.size() <= 3) return;   // a drive's root says nothing
+    QMutexLocker lk(&g_hide_m);
+    if (g_hide.contains(f, Qt::CaseInsensitive)) return;
+    g_hide << f;
+    std::sort(g_hide.begin(), g_hide.end(), [](const QString& a, const QString& b) { return a.size() > b.size(); });
+}
+
 QString redact(QString text) {
+    {
+        QMutexLocker lk(&g_hide_m);
+        for (const QString& f : g_hide) {
+            text.replace(f, "<folder>", Qt::CaseInsensitive);
+            text.replace(QDir::fromNativeSeparators(f), "<folder>", Qt::CaseInsensitive);
+        }
+    }
     // the profile folder in both spellings, and the bare user name where a path was cut
     const QString home = QDir::toNativeSeparators(QDir::homePath());
     if (home.size() > 3) {

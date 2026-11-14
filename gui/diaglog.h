@@ -17,7 +17,8 @@ void write(const QString& line);             // any thread; on the disk before i
 QString dir();
 QString path();                              // this session's file
 QString systemDetails();                     // the header's lines: version, Windows, CPU, RAM, GPUs, driver
-QString redact(QString text);                // the user's profile folder -> %USERPROFILE%
+QString redact(QString text);                // the user's profile folder -> %USERPROFILE%, a run's folders -> <folder>
+void hideFolder(const QString& folder);      // a folder whose path is taken out of everything logged from now on (its last name's children stay)
 
 // a render (or sweep, or benchmark run): its settings at the start, the stage as it moves, how it ended
 void runStart(const QString& what, const QStringList& settings);

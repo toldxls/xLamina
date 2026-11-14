@@ -93,22 +93,29 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     worker_.setViewWindowProvider([this](int W, int H) {
         QRectF f;
         int vw;
+        size_t maxPx;
         {
             std::lock_guard<std::mutex> lk(viewWinM_);
             f = viewFrac_;
             vw = viewportW_;
+            maxPx = viewMaxPx_;
         }
         stackcore::ViewWindow w;
-        // a margin of a fifth around the visible part, so a small pan does not show the edge of the crop
-        double mx = f.width() * 0.2, my = f.height() * 0.2;
-        double x0 = std::max(0.0, f.x() - mx), y0 = std::max(0.0, f.y() - my);
-        double x1 = std::min(1.0, f.x() + f.width() + mx), y1 = std::min(1.0, f.y() + f.height() + my);
-        w.x0 = (int)std::floor(x0 * W);
-        w.y0 = (int)std::floor(y0 * H);
-        w.w = std::max(1, (int)std::ceil((x1 - x0) * W));
-        w.h = std::max(1, (int)std::ceil((y1 - y0) * H));
         // the screen shows the visible part over the viewport's width: sample every down-th pixel to match it
         w.down = std::max(1, (int)std::floor(f.width() * W / std::max(1, vw)));
+        // a margin of a fifth around the visible part, so a small pan does not show the edge of the crop; without it
+        // when the two together are more than the buffer holds (the engine then samples coarser: on a large or a
+        // scaled display that showed a view at 100 % with every second pixel)
+        for (double m : {0.2, 0.0}) {
+            double mx = f.width() * m, my = f.height() * m;
+            double x0 = std::max(0.0, f.x() - mx), y0 = std::max(0.0, f.y() - my);
+            double x1 = std::min(1.0, f.x() + f.width() + mx), y1 = std::min(1.0, f.y() + f.height() + my);
+            w.x0 = (int)std::floor(x0 * W);
+            w.y0 = (int)std::floor(y0 * H);
+            w.w = std::max(1, (int)std::ceil((x1 - x0) * W));
+            w.h = std::max(1, (int)std::ceil((y1 - y0) * H));
+            if ((size_t)std::max(1, w.w / w.down) * std::max(1, w.h / w.down) <= maxPx) break;
+        }
         return w;
     });
     connect(&worker_, &Worker::logLine, this, &MainWindow::onLog);
@@ -1435,7 +1442,23 @@ void MainWindow::updateViewWindow() {
     QRectF vis = view_->fitted() ? scene : view_->visibleSceneRect();
     std::lock_guard<std::mutex> lk(viewWinM_);
     viewFrac_ = QRectF(vis.x() / scene.width(), vis.y() / scene.height(), vis.width() / scene.width(), vis.height() / scene.height());
-    viewportW_ = std::max(1, view_->viewport()->width());
+    viewportW_ = std::max(1, (int)std::lround(view_->viewport()->width() * view_->devicePixelRatioF()));
+}
+
+// The live view's buffer for the run that is about to start: what this screen can show (its own pixels, so a 4K
+// display scaled 150 % counts as 4K), between 4 and 9 Mpx. A fixed 4 Mpx was less than a large window shows.
+void MainWindow::prepareLiveView() {
+    updateViewWindow();
+    size_t px = 4000000;
+    if (QScreen* sc = screen()) {
+        const QSize s = sc->size() * sc->devicePixelRatio();
+        px = std::clamp<size_t>((size_t)s.width() * s.height(), 4000000, 9000000);
+    }
+    {
+        std::lock_guard<std::mutex> lk(viewWinM_);
+        viewMaxPx_ = px;
+    }
+    worker_.setViewMaxPx(px);
 }
 
 // the live view: the player's next frame of the sweep, already 8-bit and in sRGB (LivePlayer, its own thread);
@@ -1576,6 +1599,7 @@ void MainWindow::runSweep() {
     listTick_.start();
     int live = liveRes_->currentData().toInt();
     logRunStart(QString("sweep of %1 variants").arg(vars.size()), jo);
+    prepareLiveView();
     worker_.startSweep(jo, vars, dlg.outDir(), live > 0 ? live : 12);
 }
 
@@ -1703,6 +1727,7 @@ void MainWindow::render() {
                                                  QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Yes);
             if (a != QMessageBox::Yes) return;
             jo.dust.reset();
+            jobTag_.remove("_dust");
         }
     }
     // more frames than the depth stage takes: said now, not after the alignment and the first pass
@@ -1730,6 +1755,7 @@ void MainWindow::render() {
     lastView_.invalidate();
     listTick_.start();
     int live = liveRes_->currentData().toInt();
+    prepareLiveView();
     worker_.start(jo, live > 0 ? live : 12, live == 0);
 }
 
@@ -1768,7 +1794,18 @@ bool MainWindow::setDustMap(const QString& path, bool quiet) {
         std::string why;
         const bool ok = stackcore::build_dust_fix(path.toStdWString(), *f, &why, dustDarker_, dustMargin_);
         QApplication::restoreOverrideCursor();
-        if (!ok) { DiagLog::write("dust map refused: " + QString::fromStdString(why)); show(); return false; }
+        if (!ok) {
+            // said where it is seen, and the map let go: left named, every render read it again and went ahead without it
+            DiagLog::write("dust map refused: " + QString::fromStdString(why));
+            const QString name = QFileInfo(path).fileName();
+            dust_.reset();
+            dustPath_.clear();
+            show();
+            dustLabel_->setText(QString("none (%1 could not be used)").arg(name));
+            dustLabel_->setToolTip(QString::fromStdString(why));
+            statusBar()->showMessage(QString("The dust map %1 is not used: %2").arg(name, QString::fromStdString(why)), 15000);
+            return false;
+        }
         fix = f;
     } else {       // the window that shows what is found, with its two settings
         DustDialog dlg(path, dustDarker_, dustMargin_, this);
@@ -1795,6 +1832,10 @@ bool MainWindow::setDustMap(const QString& path, bool quiet) {
 // A run's block in the session's log (diaglog.h): what is rendered and under which settings, so a log sent by
 // someone else says what their render was. The folder by its name only.
 void MainWindow::logRunStart(const QString& what, const stackcore::JobOptions& jo) {
+    // where the frames, the outputs and the dust map are stays out of the log: the engine's lines carry whole paths
+    DiagLog::hideFolder(QFileInfo(folder_).absolutePath());
+    if (!jo.out.empty()) DiagLog::hideFolder(QFileInfo(QString::fromStdString(jo.out)).absolutePath());
+    if (!dustPath_.isEmpty()) DiagLog::hideFolder(QFileInfo(dustPath_).absolutePath());
     QStringList l;
     const QString first = jo.align.paths.empty() ? QString() : QString::fromStdWString(jo.align.paths.front().wstring());
     TiffInfo info = first.isEmpty() ? TiffInfo() : tiff_probe(first.toStdWString());

@@ -6,6 +6,7 @@
 // fit the memory budget go through the streaming ring as before.
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -59,7 +60,7 @@ public:
     const Entry* insert(const std::filesystem::path& p, uint8_t* buf, size_t cap, size_t offset, size_t bytes);
     void unreserve(uint8_t* buf, size_t cap);              // the read failed: give the buffer back
 
-    size_t bytes() { std::lock_guard<std::mutex> lk(m_); size_t b = resident_; for (auto& s : spare_) b += s.second; return b; }   // everything pinned: resident, reserved and spare
+    size_t bytes();   // everything pinned: resident, reserved and spare (never waits for the lock: the last figure then)
     int count() const { return (int)entries_.size(); }
     size_t budget() const { return budget_; }
     size_t spare_bytes() { std::lock_guard<std::mutex> lk(m_); size_t b = 0; for (auto& s : spare_) b += s.second; return b; }
@@ -70,6 +71,7 @@ private:
     std::vector<std::pair<uint8_t*, size_t>> spare_;   // pinned buffers waiting for a frame (buffer, capacity)
     size_t resident_ = 0;   // bytes pinned: resident entries plus reserved buffers (the spares are not counted)
     size_t budget_ = 0;
+    std::atomic<size_t> last_bytes_{0};
 };
 
 }  // namespace stackcore

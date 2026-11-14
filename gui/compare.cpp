@@ -857,6 +857,7 @@ void CompareWindow::retouchReset() {
     if (!rt_.on) return;
     std::fill(rt_.mask.begin(), rt_.mask.end(), 0);
     rt_.undo.clear();
+    rt_.dropped = false;   // (no stroke is left that Undo could not take back)
     composite(QRect(0, 0, rt_.w, rt_.h));
     view_[0]->patch(QRect(0, 0, rt_.w, rt_.h));
     undoAct_->setEnabled(false);

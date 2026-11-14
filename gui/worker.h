@@ -61,6 +61,7 @@ public:
     LivePlayer* player() { return player_; }
     // the live view's window (0.6.33): asked by the engine's threads for each view, when the live view is "Full"
     void setViewWindowProvider(std::function<stackcore::ViewWindow(int, int)> f) { viewWindow_ = std::move(f); }
+    void setViewMaxPx(size_t px) { viewMaxPx_ = px; }   // the largest such view, set before a run
 
 signals:
     void progress(QString stage, double fraction);
@@ -77,6 +78,7 @@ private:
     std::atomic<bool> cancel_{false};
     LivePlayer* player_ = nullptr;
     std::function<stackcore::ViewWindow(int, int)> viewWindow_;
+    size_t viewMaxPx_ = 4000000;
     std::mutex poolMutex_;
     std::vector<FloatImage> pool_;
     bool running_ = false;

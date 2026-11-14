@@ -96,6 +96,7 @@ private slots:
     void onPreview(QString name, QImage image);
     void onLiveView(int k, QImage image, QRect win, QSize full);
     void updateViewWindow();                   // the viewer's visible part, as fractions, for the engine's frame views
+    void prepareLiveView();                    // before a run: the live view's buffer sized for this screen
     void onThumbnail(int index, QImage image);
     void onFullFrame(int index, QImage image);
     void onComparison(int index, QImage image);
@@ -235,7 +236,8 @@ private:
     // read by the engine's threads (under the mutex) to render each frame view at the screen's resolution
     std::mutex viewWinM_;
     QRectF viewFrac_{0, 0, 1, 1};
-    int viewportW_ = 1600;
+    int viewportW_ = 1600;                     // in the screen's own pixels (a display scaled 150 % has 1.5 per unit)
+    size_t viewMaxPx_ = 4000000;               // the largest live view the engine's buffers hold (set for each run)
     QDockWidget* hwDock_ = nullptr;
     QGroupBox* perfGroup_ = nullptr;   // the hardware settings, built with the Render column, shown in Preferences
     bool updateManual_ = false;        // the running check came from the menu: report its result either way

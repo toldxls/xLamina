@@ -77,7 +77,12 @@ DustDialog::DustDialog(const QString& path, float darker, int margin, QWidget* p
     QDialogButtonBox* bb = new QDialogButtonBox(QDialogButtonBox::Cancel);
     use_ = bb->addButton("Use this dust map", QDialogButtonBox::AcceptRole);
     use_->setDefault(true);
-    connect(bb, &QDialogButtonBox::accepted, this, &QDialog::accept);
+    // accepted with what the controls say now: a click inside the moment the marks wait for would hand back the spots
+    // of the setting before, beside the new numbers
+    connect(bb, &QDialogButtonBox::accepted, this, [this] {
+        if (timer_.isActive()) { timer_.stop(); detect(); }
+        if (fix_) accept();
+    });
     connect(bb, &QDialogButtonBox::rejected, this, &QDialog::reject);
     l->addWidget(bb);
 

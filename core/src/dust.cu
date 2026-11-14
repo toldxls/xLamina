@@ -147,6 +147,13 @@ bool detect_dust(const DustMapData& M, float darker, int margin, DustFix& out, s
                     if (!m) m = 2;
                 }
         }
+    // with their margins as well: scattered seeds (noise taken for dust at a sensitive setting) grow to far more than
+    // they are, and every masked pixel costs memory per frame of the stack when its depth is measured
+    {
+        size_t grown = 0;
+        for (size_t i = 0; i < n; ++i) grown += mask[i] != 0;
+        if (grown > n / 50) return fail(std::to_string(100 * grown / n) + " % of the image is in a spot or its margin: too much for dust (a less sensitive setting, or a smaller margin)");
+    }
     // the spots, counted as connected groups of the grown mask
     {
         std::vector<uint8_t> seen(n, 0);

@@ -85,9 +85,16 @@ FailInfo take_fail() {
 // worker that died ("device 0: ..."). A pass with an error has not seen every frame and its result is not used.
 static int stream_fail(const StreamerStats& st) {
     if (st.errors.empty()) return 0;
+    for (auto& e : st.errors)
+        if (strstr(e.c_str(), "cudaHostAlloc")) { note_fail(Fail::HostMemory, "page-locking the frames' buffers"); return 1; }
     for (auto& e : st.errors) if (strstr(e.c_str(), "out of memory")) return 4;
+    // the PC's own memory in a reader or a card's worker ("reader: bad allocation", "device 0: out of host memory")
+    for (auto& e : st.errors)
+        if (strstr(e.c_str(), "bad allocation") || strstr(e.c_str(), "bad_alloc")) { note_fail(Fail::HostMemory, "reading the frames"); return 1; }
+    // a card's worker by its prefix, not by a word in the text: a frame's error begins with its file name, which may
+    // well hold "cuda"
     const std::string& e = st.errors.front();
-    const bool gpu = e.rfind("device ", 0) == 0 || e.find("cuda") != std::string::npos || e.find("CUDA") != std::string::npos;
+    const bool gpu = e.rfind("device ", 0) == 0 || (e.rfind("reader: ", 0) == 0 && (e.find("cuda") != std::string::npos || e.find("CUDA") != std::string::npos));
     note_fail(gpu ? Fail::GpuFault : Fail::FileRead, e);
     return 1;
 }
@@ -838,6 +845,8 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
     for (auto& e : st.errors) logf("  error: %s\n", e.c_str());
     // a card ran out of memory part-way: the pass is not used (the caller renders again in strips or at 1/4), and
     // the streams are left as they are, since after the driver's page-locked ceiling they never finish
+    for (auto& e : st.errors)   // the PC's memory, not the cards': strips would page-lock the same buffers again
+        if (strstr(e.c_str(), "cudaHostAlloc")) { note_fail(Fail::HostMemory, "page-locking the frames' buffers"); return 1; }
     for (auto& e : st.errors) if (strstr(e.c_str(), "out of memory")) return 4;
     for (int d : devs) {
         CK(cudaSetDevice(d));
@@ -896,7 +905,12 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         CK(cudaSetDevice(d0));
         cudaStream_t s0 = ctx[d0].fold_s;
         std::vector<const float*> d_coef(P.dst.c_coef.begin(), P.dst.c_coef.end());   // the merged state's levels, in place
-        float *d_base, *d_coll, *d_t1, *d_t2, *d_guide, *d_ga;
+        float *d_base = nullptr, *d_coll = nullptr, *d_t1 = nullptr, *d_t2 = nullptr, *d_guide = nullptr, *d_ga = nullptr;
+        // three of these are whole frames (390 MB each at full resolution): a card that runs short part-way through
+        // them gives back the ones it got, before the render is tried again in strips
+        struct GuideFree { float*& a; float*& b; float*& c; float*& d; float*& e; float*& f;
+                           ~GuideFree() { cudaFree(a); cudaFree(b); cudaFree(c); cudaFree(d); cudaFree(e); cudaFree(f); a = b = c = d = e = f = nullptr; } }
+            guide_free{d_base, d_coll, d_t1, d_t2, d_guide, d_ga};
         CK(cudaMalloc(&d_base, (size_t)P.dst.shapes.back().w * P.dst.shapes.back().h * 3 * sizeof(float)));
         fold_base_f32(P.dst, d_base, s0);
         CK(cudaMalloc(&d_coll, npx_out * 3 * sizeof(float)));
@@ -917,6 +931,7 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         CK(cudaStreamSynchronize(s0));
         rz.free();
         cudaFree(d_base); cudaFree(d_coll); cudaFree(d_t1); cudaFree(d_t2); cudaFree(d_guide); cudaFree(d_ga);
+        d_base = d_coll = d_t1 = d_t2 = d_guide = d_ga = nullptr;   // (freed here, before the slices' buffers are taken)
 
         // every GPU aggregates its own slices against the shared guide; the host collects plane-major volumes
         // in page-locked memory, so the copies stream behind the kernels instead of staging one slice at a
@@ -937,7 +952,12 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
             auto& D = ctx[d];
             CK(cudaSetDevice(d));
             cudaStream_t s = D.fold_s;
-            float *d_g, *d_V;
+            float *d_g = nullptr, *d_V = nullptr, *d_T = nullptr, *d_flat = nullptr, *d_Vb = nullptr, *d_T2 = nullptr;
+            // a card that runs short in this stage gives these back before the render is tried again with less
+            struct SliceFree { cudaStream_t s; float*& a; float*& b; float*& c; float*& d; float*& e; float*& f;
+                               ~SliceFree() { if (a || b || c || d || e || f) cudaStreamSynchronize(s);
+                                              cudaFree(a); cudaFree(b); cudaFree(c); cudaFree(d); cudaFree(e); cudaFree(f); cudaGetLastError(); } }
+                slice_free{s, d_g, d_V, d_T, d_flat, d_Vb, d_T2};
             CK(cudaMalloc(&d_g, nd * sizeof(float)));
             CK(cudaMemcpyAsync(d_g, ga_h.data(), nd * sizeof(float), cudaMemcpyHostToDevice, s));
             CK(cudaMalloc(&d_V, nd * sizeof(float)));
@@ -947,12 +967,10 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
             // claims the band beside it (the edge-aware aggregation stops at the edge, which is exactly
             // where the defocus rims of far frames win otherwise; FINDINGS 25)
             DevGaussian gb;
-            float* d_T = nullptr;
             bool b_blur = po.b_radius_px > 0;
             if (b_blur) { gb.build(std::max(0.5, po.b_radius_px * po.depth_fraction)); CK(cudaMalloc(&d_T, nd * sizeof(float))); }
             // flat regions (no texture in the guide within flat_reach_px): every slice box-blurred over flat_blur_px
             // there, so defocused background gets one consistent focus curve instead of a noisy one per pixel
-            float *d_flat = nullptr, *d_Vb = nullptr, *d_T2 = nullptr;
             DevGaussian gr1, gr2;   // the flat mask's two kernels (freed after the stage's sync)
             int rbox = 0;
             if (po.flat_blur_px > 0) {
@@ -1026,10 +1044,10 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
             }
             CK(cudaStreamSynchronize(s));
             if (vp.agg_r > 0) gs.free();
-            if (b_blur) { gb.free(); cudaFree(d_T); }
-            if (d_flat) { cudaFree(d_flat); cudaFree(d_Vb); cudaFree(d_T2); gr1.free(); gr2.free(); }
-            cudaFree(d_g);
-            cudaFree(d_V);
+            if (b_blur) gb.free();
+            if (d_flat) { gr1.free(); gr2.free(); }
+            cudaFree(d_g); cudaFree(d_V); cudaFree(d_T); cudaFree(d_flat); cudaFree(d_Vb); cudaFree(d_T2);
+            d_g = d_V = d_T = d_flat = d_Vb = d_T2 = nullptr;
         }
         for (int k = 0; k < K; ++k)
             if (!filled[k]) {
@@ -1412,6 +1430,9 @@ static void trim_pools(const std::vector<int>& devs) {   // the job's cards (emp
 // instead of failing (FINDINGS 32).
 // one attempt at the fusion; running out of GPU memory comes back as 4, whichever way it surfaced
 static int try_stack(StackOptions& so, int strips) {
+    // each attempt's cause is its own: one noted by an attempt that the next recovers from (the PC's memory at full
+    // size, say) would otherwise stand for whatever ends the job later (a file that cannot be written)
+    take_fail();
     try {
         return strips >= 2 ? run_stack_strips(so, strips) : run_stack_once(so, nullptr);
     } catch (const std::bad_alloc&) {
@@ -1480,6 +1501,25 @@ int run_stack(StackOptions& so) {
         trim_pools(so.po.opt.devices);
         so.po.depth_fraction = 0.25;
         rc = try_stack(so, so.strips >= 2 ? so.strips : 1);
+        // still short: strips at 1/4 as well (they were only tried at the finer volume), and at the very last the whole
+        // frame without the rule that stops a pass which cannot hold every frame's slice (it runs on one slot then,
+        // slowly, as 1.0.5 did, where the rule had ended the job)
+        if (rc == 4 && so.strips == 0 && !dead() && !so.hooks.cancelled()) {
+            for (int n = 2; n <= 16 && rc == 4 && !so.hooks.cancelled(); n *= 2) {
+                logf("GPU memory ran short at 1/4 too: rendering it in %d strips", n);
+                trim_pools(so.po.opt.devices);
+                rc = try_stack(so, n);
+                if (rc == 5) { rc = 4; break; }
+                if (rc == 4 && dead()) return 1;
+            }
+            if (rc == 4 && !so.hooks.cancelled()) {
+                logf("GPU memory still short: one last attempt on the whole frame, a frame at a time");
+                trim_pools(so.po.opt.devices);
+                so.strips = 1;   // never strips: the pass goes on with what fits
+                rc = try_stack(so, 1);
+                so.strips = 0;
+            }
+        }
     }
     trim_pools(so.po.opt.devices);
     return rc;
@@ -1499,6 +1539,9 @@ static int run_stack_strips(StackOptions& so, int n) {
     // 2.0003), the depth grid slides against the output grid across the frame, and a strip, cut at even px, has
     // another grid than the whole frame. With odd sides the confidence was the same as the unstripped render's in
     // 45 % of the pixels, with even sides in 96 % (FINDINGS 55).
+    // (the caller's rectangle comes back as it was: an attempt in strips that does not work out is followed by a render
+    // of the whole frame, which needs no such sides and lost up to 3 px to the trim)
+    struct KeepRect { Grid& g; const int x1, y1; ~KeepRect() { g.x1 = x1; g.y1 = y1; } } keep_rect{po.g, po.g.x1, po.g.y1};
     {
         const int cut_x = (po.g.x1 - po.g.x0 + 1) % 4, cut_y = (po.g.y1 - po.g.y0 + 1) % 4;
         if (cut_x || cut_y) {
@@ -1568,7 +1611,7 @@ static int run_stack_strips(StackOptions& so, int n) {
             ne = NoiseEstimate{};
         }
     } catch (const std::exception& e) {
-        if (!strstr(e.what(), "memory")) throw;
+        if (!strstr(e.what(), "memory") && !dynamic_cast<const std::bad_alloc*>(&e)) throw;
         logf("strips: no room to measure the noise on the whole frame; the first strip's estimate is used");
         ne = NoiseEstimate{};
     }
@@ -1584,8 +1627,11 @@ static int run_stack_strips(StackOptions& so, int n) {
         // were 2.4 % and 1.1 % under the full-size ones on the 261-frame stack, where strips ranking their own
         // differed by a fifth (FINDINGS 55)
         int r = 4;
-        for (double sc : {g.scale, 0.5}) {
-            if (r == 0 || (sc == 0.5 && g.scale != 1.0)) break;
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            // the second attempt, at half size, only for a full-size render whose first did not fit (a half-size render's
+            // first attempt is at 0.5 already: the old test on the scale alone skipped it, and its strips ranked their own)
+            if (attempt == 1 && (r == 0 || g.scale != 1.0)) break;
+            const double sc = attempt == 0 ? g.scale : 0.5;
             r = 4;
             try {
                 Pass1Options pp = po;
@@ -1604,7 +1650,7 @@ static int run_stack_strips(StackOptions& so, int n) {
                     else r = flat_limits(P.dst, po, volume_params(po, P.g), P.g.out_w(), P.g.out_h(), s, flat_lo, flat_hi);
                 }
             } catch (const std::exception& e) {
-                if (!strstr(e.what(), "memory")) throw;
+                if (!strstr(e.what(), "memory") && !dynamic_cast<const std::bad_alloc*>(&e)) throw;
                 r = 4;
             }
             if (hooks.cancelled()) return 3;
@@ -2073,7 +2119,9 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
         for (int d : P.devs) {
             CK(cudaSetDevice(d));
             for (auto& sc : rsc[d]) sc.free();
+            rsc[d].clear();
             cudaFree(d_depth[d]);
+            d_depth[d] = nullptr;   // (the guard above frees what is not null on a way out after this)
         }
         CK(cudaSetDevice(prim));
         refine_depth(R.depth_s, R.conf, R.spill, P.vp.dw, P.vp.dh, rst[prim], ow, oh, P.g.scale, s);
@@ -2160,6 +2208,8 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
             CK(cudaSetDevice(d));
             for (auto& sc : csc[d]) sc.free();
             cudaFree(d_D[d]); cudaFree(d_Ds[d]); cudaFree(d_W[d]);
+            csc[d].clear();
+            d_D[d] = d_Ds[d] = d_W[d] = nullptr;
         }
         CK(cudaSetDevice(prim));
         b_img = compose_mix(cst[prim], R.conf, ow, oh, P.g.scale, s);
@@ -2771,6 +2821,8 @@ int run_align(AlignOptions& ao, AlignOut& A) {
         // from that goes into the passes that follow. The alignment itself reads the frames as they are.
         std::vector<DevDustProbe> dd(ndev);
         const size_t dn = ao.dust && ao.dust->w == W && ao.dust->h == H ? ao.dust->px.size() : 0;
+        if (ao.dust && !ao.dust->px.empty() && !dn)
+            logf("dust map %s is %d x %d, the frames are %d x %d: it is not applied", ao.dust->name.c_str(), ao.dust->w, ao.dust->h, W, H);
         std::vector<float> dust_ratios(dn * (size_t)N, 1.f);
         StreamerOptions opt;
         opt.devices = devs;
@@ -3121,13 +3173,10 @@ void write_report(const AlignOptions& ao, const AlignOut& A, const fs::path& od)
 // would put its specks' positions in the wrong places, so it is left out and that is said.
 static std::shared_ptr<const DustFix> use_dust(const JobOptions& jo, const AlignOptions& ao) {
     if (!jo.dust || jo.dust->px.empty()) return nullptr;
-    fs::path first = !ao.paths.empty() ? ao.paths.front() : fs::path();
-    if (first.empty()) {   // a folder: its first frame file
-        std::error_code ec;
-        for (auto& e : fs::directory_iterator(ao.dir, ec)) if (e.is_regular_file() && is_frame_file(e.path())) { first = e.path(); break; }
-    }
-    TiffInfo t = first.empty() ? TiffInfo() : tiff_probe(first);
-    if (t.ok() && ((int)t.width != jo.dust->w || (int)t.height != jo.dust->h)) {
+    // (a folder's frames are chosen by the alignment, by prefix and by the size most of its files have: the map's
+    // size is compared there, with the frames it picked, and not here with whichever file the folder lists first)
+    TiffInfo t = ao.paths.empty() ? TiffInfo() : tiff_probe(ao.paths.front());
+    if (!ao.paths.empty() && t.ok() && ((int)t.width != jo.dust->w || (int)t.height != jo.dust->h)) {
         logf("dust map %s is %d x %d, the frames are %u x %u: it is not applied", jo.dust->name.c_str(), jo.dust->w, jo.dust->h, t.width, t.height);
         return nullptr;
     }

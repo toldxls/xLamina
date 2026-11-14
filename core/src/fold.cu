@@ -442,14 +442,33 @@ CrossCopier::CrossCopier(int dst_dev, int src_dev, size_t chunk) : dst_(dst_dev)
         g_cross_out = true;
         shared_ = true;
     } else {
-        for (int b = 0; b < 2; ++b) CK(cudaHostAlloc((void**)&pin_[b], chunk_, cudaHostAllocPortable));
+        // (a second chunk that cannot be pinned gives the first back: the destructor does not run for a constructor
+        // that throws)
+        void* p[2] = {nullptr, nullptr};
+        for (int b = 0; b < 2; ++b) {
+            cudaError_t e = cudaHostAlloc(&p[b], chunk_, cudaHostAllocPortable);
+            if (e != cudaSuccess) { if (p[0]) cudaFreeHost(p[0]); CK(e); }
+        }
+        pin_[0] = (decltype(pin_[0]))p[0]; pin_[1] = (decltype(pin_[1]))p[1];
         if (!g_cross_pin[0]) { g_cross_pin[0] = pin_[0]; g_cross_pin[1] = pin_[1]; g_cross_bytes = chunk_; g_cross_out = true; shared_ = true; }
     }
-    CK(cudaSetDevice(src_));
-    CK(cudaStreamCreateWithFlags(&ss_, cudaStreamNonBlocking));
-    CK(cudaSetDevice(dst_));
-    CK(cudaStreamCreateWithFlags(&ds_, cudaStreamNonBlocking));
-    for (int b = 0; b < 2; ++b) CK(cudaEventCreateWithFlags(&ev_[b], cudaEventDisableTiming));
+    // a stream or event that cannot be made: the shared pair is handed back (left marked as out, every later merge
+    // pinned a pair of its own) and what was made here is released
+    try {
+        CK(cudaSetDevice(src_));
+        CK(cudaStreamCreateWithFlags(&ss_, cudaStreamNonBlocking));
+        CK(cudaSetDevice(dst_));
+        CK(cudaStreamCreateWithFlags(&ds_, cudaStreamNonBlocking));
+        for (int b = 0; b < 2; ++b) CK(cudaEventCreateWithFlags(&ev_[b], cudaEventDisableTiming));
+    } catch (...) {
+        for (int b = 0; b < 2; ++b) { if (ev_[b]) cudaEventDestroy(ev_[b]); if (!shared_) cudaFreeHost(pin_[b]); }
+        if (shared_) g_cross_out = false;
+        if (ds_) { cudaSetDevice(dst_); cudaStreamDestroy(ds_); }
+        if (ss_) { cudaSetDevice(src_); cudaStreamDestroy(ss_); }
+        cudaSetDevice(dst_);
+        cudaGetLastError();
+        throw;
+    }
 }
 CrossCopier::~CrossCopier() {
     cudaSetDevice(dst_);

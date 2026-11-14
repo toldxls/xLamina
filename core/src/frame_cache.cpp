@@ -23,12 +23,28 @@ static void file_identity(const fs::path& p, uint64_t& size, int64_t& mtime) {
 FrameCache::~FrameCache() { clear(); }
 
 void FrameCache::clear() {
-    std::lock_guard<std::mutex> lk(m_);
-    for (auto& [k, e] : entries_) cudaFreeHost(e.buf);
-    for (auto& s : spare_) cudaFreeHost(s.first);
-    entries_.clear();
-    spare_.clear();
-    resident_ = 0;
+    // the buffers are taken out under the lock and unpinned outside it: unpinning tens of GB takes seconds, and the
+    // window's memory readout asks for bytes() meanwhile
+    std::vector<uint8_t*> go;
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        for (auto& [k, e] : entries_) go.push_back(e.buf);
+        for (auto& s : spare_) go.push_back(s.first);
+        entries_.clear();
+        spare_.clear();
+        resident_ = 0;
+    }
+    for (uint8_t* b : go) cudaFreeHost(b);
+}
+
+size_t FrameCache::bytes() {
+    // never waits: a pass that is unpinning under the lock gets the last figure instead of holding the window up
+    std::unique_lock<std::mutex> lk(m_, std::try_to_lock);
+    if (!lk.owns_lock()) return last_bytes_.load();
+    size_t b = resident_;
+    for (auto& s : spare_) b += s.second;
+    last_bytes_ = b;
+    return b;
 }
 
 void FrameCache::prepare(const std::vector<fs::path>& paths, size_t budget_bytes) {
@@ -64,7 +80,11 @@ void FrameCache::prepare(const std::vector<fs::path>& paths, size_t budget_bytes
     uint64_t frames_bytes = 0;
     for (auto& k : keep) { uint64_t sz = 0; int64_t mt = 0; file_identity(fs::path(k), sz, mt); frames_bytes += sz; }
     const size_t reserve = std::max<size_t>((size_t)8 << 30, (size_t)(frames_bytes / 2) + ((size_t)4 << 30));
-    size_t by_free = ms.ullAvailPhys > reserve ? (size_t)ms.ullAvailPhys - reserve + resident_ : resident_;
+    // what this cache holds already is not "free" to Windows but is this job's to use: the resident frames and the
+    // spare buffers kept for it (left out, a stack reopened after an edit to its files got a budget short by them)
+    size_t ours = resident_;
+    for (auto& s : spare_) ours += s.second;
+    size_t by_free = ms.ullAvailPhys > reserve ? (size_t)ms.ullAvailPhys - reserve + ours : ours;
     size_t by_total = (size_t)(ms.ullTotalPhys * 0.6);
     budget_ = std::min(by_free, by_total);
 }
