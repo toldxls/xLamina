@@ -89,6 +89,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(worker_.player(), &LivePlayer::previewReady, this, &MainWindow::onPreview);   // converted off the GUI thread
     connect(worker_.player(), &LivePlayer::view, this, &MainWindow::onLiveView);   // paced, in stack order (0.6.32)
     connect(view_, &ImageView::viewChanged, this, &MainWindow::updateViewWindow);
+    connect(view_, &ImageView::measured, this, [this](QString len) {
+        statusBar()->showMessage(QString("Measured: %1 (%2 line%3 on the image; View > Clear measurements removes them)").arg(len).arg(view_->measureCount()).arg(view_->measureCount() == 1 ? "" : "s"), 10000);
+    });
+    connect(fov_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double) { applyViewScale(); });
+    view_->setScaleBar(appSettings().value("ui/scaleBar", true).toBool());
+    liveView_->setScaleBar(appSettings().value("ui/scaleBar", true).toBool());
     // the engine asks, from its threads, what part of the frame to render for each live view (0.6.33)
     worker_.setViewWindowProvider([this](int W, int H) {
         QRectF f;
@@ -258,6 +264,29 @@ void MainWindow::buildMenus() {
     view->addAction("&Fit", QKeySequence("Ctrl+0"), this, [this] { view_->fit(); });
     view->addAction("&1:1", QKeySequence("Ctrl+1"), this, [this] { view_->actualSize(); });
     view->addSeparator();
+    {
+        QAction* bar = view->addAction("&Scale bar");
+        bar->setCheckable(true);
+        bar->setChecked(appSettings().value("ui/scaleBar", true).toBool());
+        bar->setStatusTip("A scale bar in the corner of the image, from the Field of view setting. Nothing is drawn while that is unknown.");
+        connect(bar, &QAction::toggled, this, [this](bool on) {
+            appSettings().setValue("ui/scaleBar", on);
+            view_->setScaleBar(on);
+            liveView_->setScaleBar(on);
+        });
+        measureAct_ = view->addAction("&Measure");
+        measureAct_->setCheckable(true);
+        measureAct_->setShortcut(QKeySequence("M"));
+        measureAct_->setToolTip("Measure: drag a line on the image and its length is written beside it (M).\n"
+                                "Shift keeps the line level, upright or at 45°. The middle or right button pans.");
+        connect(measureAct_, &QAction::toggled, this, [this](bool on) {
+            view_->setMeasure(on);
+            if (on) statusBar()->showMessage(fov_->value() > 0 ? "Measure: drag a line on the image. Shift keeps it level or upright; the right button pans; Backspace removes the last line."
+                                                              : "Measure: lengths are in pixels until Field of view is set in the Render panel.", 10000);
+        });
+        view->addAction("&Clear measurements", this, [this] { view_->clearMeasures(); });
+    }
+    view->addSeparator();
     view->addAction("&Next image", QKeySequence("PgDown"), this, [this] { stepOutput(1); });
     view->addAction("&Previous image", QKeySequence("PgUp"), this, [this] { stepOutput(-1); });
     view->addSeparator();
@@ -345,6 +374,7 @@ void MainWindow::buildUi() {
     tb->addSeparator();
     tb->addAction("Fit", [this] { view_->fit(); })->setToolTip("Fit the image in the view (Ctrl+0, or double-click)");
     tb->addAction("1:1", [this] { view_->actualSize(); })->setToolTip("One image pixel per screen pixel (Ctrl+1)");
+    tb->addAction(measureAct_);
     tb->addSeparator();
     tb->addAction(dropShifted_);
     tb->addAction(dropSoft_);
@@ -1178,6 +1208,8 @@ void MainWindow::openFolder(const QString& dir, const QStringList& only) {
         statusBar()->showMessage("A render is running; open the folder when it has finished.", 4000);
         return;
     }
+    view_->clearMeasures();   // lines drawn on another stack's image
+    outFovFrac_ = 0;
     QDir d(dir);
     QStringList files = frameFilesIn(dir);   // TIFF, JPEG (raw too in a build with LibRaw)
     if (!only.isEmpty()) {   // chosen files: the stack is these, the rest of the folder is not listed
@@ -1445,6 +1477,19 @@ void MainWindow::updateViewWindow() {
     viewportW_ = std::max(1, (int)std::lround(view_->viewport()->width() * view_->devicePixelRatioF()));
 }
 
+void MainWindow::setViewScale(double frac) {
+    viewFovFrac_ = frac;
+    applyViewScale();
+}
+
+// Field of view is the width of one whole frame at the reference depth; an image that shows a share of that width
+// (an output after the crop) stands for that share of it. The right pane always shows the outputs' grid.
+void MainWindow::applyViewScale() {
+    const double um = fov_->value() * 1000.0;
+    view_->setSceneWidthUm(um > 0 ? um * viewFovFrac_ : 0);
+    liveView_->setSceneWidthUm(um > 0 ? um * outFovFrac_ : 0);
+}
+
 // The live view's buffer for the run that is about to start: what this screen can show (its own pixels, so a 4K
 // display scaled 150 % counts as 4K), between 4 and 9 Mpx. A fixed 4 Mpx was less than a large window shows.
 void MainWindow::prepareLiveView() {
@@ -1473,6 +1518,13 @@ void MainWindow::onLiveView(int k, QImage image, QRect win, QSize full) {
     depthBar_->hide();
     if (full.isValid() && win.isValid() && (win.size() != full || image.size() != full)) view_->setLiveWindow(image, win, full);
     else view_->setImage(image, true);
+    // a frame as it was read is the whole field of view; one warped onto the output's grid is the crop's share of it
+    if (full.isValid() && jobFrameW_ > 0) {
+        const bool raw = full.width() == jobFrameW_;
+        const double frac = raw ? 1.0 : full.width() / jobScale_ / jobFrameW_;
+        if (!raw) outFovFrac_ = frac;
+        setViewScale(frac);
+    } else setViewScale(0);
     // the count is the progress signal's (progressStatus_); the view only says which frame is on screen
     QString name = k >= 0 && k < frames_.size() ? QFileInfo(frames_[k]).fileName() : QString();
     statusBar()->showMessage(name.isEmpty() ? progressStatus_ : QString("%1 — on screen: %2").arg(progressStatus_, name));
@@ -1487,7 +1539,7 @@ void MainWindow::showFrame(int listRow) {
     // frame-to-frame comparison impossible); only an empty view gets the thumbnail
     pendingFrame_ = row;
     QIcon icon = frameList_->item(listRow)->icon();
-    if (view_->image().isNull() && !icon.isNull()) { current_ = "frame"; view_->setImage(icon.pixmap(icon.availableSizes().value(0)).toImage(), false); }
+    if (view_->image().isNull() && !icon.isNull()) { current_ = "frame"; view_->setImage(icon.pixmap(icon.availableSizes().value(0)).toImage(), false); setViewScale(1.0); }
     statusBar()->showMessage(QString("%1 — loading at full resolution…").arg(QFileInfo(frames_[row]).fileName()));
     frameLoader_.start({frames_[row]}, 1 << 20);
 }
@@ -1506,6 +1558,7 @@ void MainWindow::onFullFrame(int index, QImage image) {
     view_->setOverlay(QImage());
     highlightOn_ = false;
     view_->setImage(forDisplay(image), true);
+    setViewScale(1.0);   // a source frame: the whole field of view
     view_->setLabel(QFileInfo(frames_[pendingFrame_]).fileName());
     statusBar()->showMessage(QString("%1 — %2 x %3 (full resolution)").arg(QFileInfo(frames_[pendingFrame_]).fileName()).arg(image.width()).arg(image.height()));
 }
@@ -1839,6 +1892,8 @@ void MainWindow::logRunStart(const QString& what, const stackcore::JobOptions& j
     QStringList l;
     const QString first = jo.align.paths.empty() ? QString() : QString::fromStdWString(jo.align.paths.front().wstring());
     TiffInfo info = first.isEmpty() ? TiffInfo() : tiff_probe(first.toStdWString());
+    jobFrameW_ = first.isEmpty() ? 0 : (int)info.width;   // (for the live view's scale bar)
+    jobScale_ = jo.stack.po.g.scale > 0 ? jo.stack.po.g.scale : 1.0;
     qint64 bytes = 0;
     for (const auto& p : jo.align.paths) bytes += QFileInfo(QString::fromStdWString(p.wstring())).size();
     l << QString("folder \"%1\": %2 frames, %3 x %4, %5-bit, %6 sample%7, %8, %9 GB on disk")
@@ -1962,6 +2017,7 @@ void MainWindow::onPreview(QString name, QImage image) {
             view_->fit();
         }
         liveView_->setImage(image, true);
+        applyViewScale();
         liveView_->setToolTip(name);
         liveView_->setLabel(name);
         return;
@@ -1969,6 +2025,7 @@ void MainWindow::onPreview(QString name, QImage image) {
     current_ = name;
     depthBar_->hide();
     view_->setImage(image, true);
+    setViewScale(outFovFrac_);
     view_->setLabel(name + "  (preview)");
     statusBar()->showMessage(QString("Preview: %1").arg(name));
 }
@@ -2229,6 +2286,7 @@ void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
                           .arg(QString::fromStdString(data->fail.detail), data->stage, data->error));
     if (unwritten) data->rc = 0;
     result_ = data;
+    if (result_->align.W > 0) outFovFrac_ = (double)(result_->align.rect[2] - result_->align.rect[0] + 1) / result_->align.W;
     // the render's finish time first: B_2026-11-08_14-15-27_bicubic_s2_c32_b0
     result_->settingsTag = QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss") + "_" + jobTag_;
     // the output's field of view after the crop, last: the panel's FOV is the sensor width's at
@@ -2474,6 +2532,16 @@ void MainWindow::showOutput(int tab) {
     hoverFrame_ = -1;
     updateDepthHighlight();
     view_->setImage(img, true);   // the zoomed area carries over from the live view / the other outputs
+    // an output stands for the crop's share of the field of view; a comparison image only when it is the same size
+    // as the render's outputs (another program's stack of these frames may be cropped differently: no scale then)
+    {
+        bool same = !compare_.contains(name);
+        if (!same && result_ && result_->rc == 0 && !result_->result.names.empty()) {
+            const QImage o = outputImage(QString::fromStdString(result_->result.names.front()));
+            same = !o.isNull() && o.size() == img.size();
+        }
+        setViewScale(same ? outFovFrac_ : 0);
+    }
     view_->setLabel(compare_.contains(name) ? name + "  (comparison)" : name);
     statusBar()->showMessage(QString("%1 — %2 x %3%4").arg(name).arg(img.width()).arg(img.height()).arg(compare_.contains(name) ? " (comparison image)" : ""));
 }

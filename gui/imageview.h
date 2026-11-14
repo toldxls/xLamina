@@ -48,8 +48,21 @@ public:
     // brush mode: the left button paints (signals below, image coordinates), the middle button pans
     void setBrush(bool on, double radius, double hardness);
     double brushRadius() const { return brushRadius_; }
+    // the width the whole image stands for, in micrometres (0 = not known): gives the scale bar its length and the
+    // measured lines theirs
+    void setSceneWidthUm(double um);
+    void setScaleBar(bool on);
+    // measure mode: the left button draws a line whose length is written beside it (Shift keeps it level, upright or
+    // at 45 degrees), the middle or right button pans, Backspace takes the last line away. The lines stay, at their
+    // places in the image, until clearMeasures().
+    void setMeasure(bool on);
+    bool measuring() const { return measure_; }
+    void clearMeasures();
+    void addMeasure(const QLineF& frac);  // a line by its ends as fractions of the image (what a drag makes)
+    int measureCount() const { return (int)lines_.size(); }
 
 signals:
+    void measured(QString length);        // a line was drawn: its length in words
     void zoomChanged(double z);
     void viewChanged();                   // zoom, scroll or size: what the viewport shows has changed
     void hovered(int x, int y);           // image coordinates under the cursor; (-1, -1) when it leaves the view
@@ -85,6 +98,15 @@ private:
     QPoint lastPan_;
     QPointF cursor_;   // viewport position of the mouse, for the brush circle
     bool cursorIn_ = false;
+    double sceneUm_ = 0;
+    bool scaleBar_ = true, measure_ = false, drawing_ = false;
+    std::vector<QLineF> lines_;           // as fractions of the image's width and height, so they hold for any size of it
+    QLineF cur_;                          // the line being drawn
+    bool hasImage() const;
+    QPointF toFrac(QPointF scene) const;
+    QPointF fromFrac(QPointF frac) const; // -> viewport
+    QString lengthText(const QLineF& frac) const;
+    void drawMeasure(QPainter* p, const QLineF& frac, bool live) const;
 };
 
 // float RGB (interleaved, [0, 1]) -> 8-bit QImage; `gain` brightens previews

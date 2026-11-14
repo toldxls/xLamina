@@ -253,6 +253,26 @@ li.aside { list-style:none; color:var(--dim); }
 </ul>
 </section>
 
+<section id="measuring" data-k="measure scale bar length distance micron micrometre um mm size line ruler field of view fov draw">
+<h2>Scale bar and measuring</h2>
+<figure class="shot" data-img="measure" data-cursor="Measure" data-marks="Measure;@0.49,0.335;@0.31,0.72;row Field of view">
+  <ol class="legend">
+    <li><b>Measure</b> (<kbd>M</kbd>, or View &gt; Measure): while it is on, dragging on the image draws a line instead of panning.</li>
+    <li>Each line carries its length. The lines stay at their places in the image when you zoom, pan or change tabs.</li>
+    <li>The <b>scale bar</b>: a round length near a fifth of the view's width. It follows the zoom, and is shown in the live view while rendering as well. View &gt; Scale bar hides it.</li>
+    <li>Both come from <b>Field of view</b>: the width of one whole frame. While it is "unknown" there is no scale bar and lengths are in pixels.</li>
+  </ol>
+  <figcaption>Two lines measured on output B.</figcaption>
+</figure>
+<ul>
+  <li><b>Shift</b> while dragging keeps the line level, upright or at 45°.</li>
+  <li>The <b>middle or right button</b> pans while Measure is on; the wheel zooms as always.</li>
+  <li><kbd>Backspace</kbd> removes the last line; View &gt; Clear measurements removes them all. Opening another folder clears them too.</li>
+  <li>Lengths are in the plane of the reference frame. A stack whose scale changes with depth (see the geometry report's µm/px range) is off by that much at its ends.</li>
+  <li>The lines and the bar are drawn on the screen only: they are not saved into the output files.</li>
+</ul>
+</section>
+
 <section id="saving" data-k="save as export tiff jpeg png 16-bit file name output folder report.json list.txt stack.txt written files">
 <h2>Saving and the files written</h2>
 <p><b>Save as…</b> (<kbd>Ctrl+S</kbd>) writes the image on show:</p>

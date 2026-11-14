@@ -88,6 +88,9 @@ ManualShots::ManualShots(MainWindow& w, const QString& dir) : w_(w), dir_(dir) {
         // an output at 1:1
         [this, tab, dock] { tab("C"); w_.view_->actualSize(); w_.view_->centerOn(w_.view_->image().width() * 0.50, w_.view_->image().height() * 0.44); },
         [this, tab, dock] { grab(&w_, "main_1to1"); w_.view_->fit(); tab("B"); },
+        // measuring: two lines drawn across crystals, as the mouse would draw them
+        [this, tab, dock] { w_.measureAct_->setChecked(true); w_.view_->addMeasure(QLineF(0.36, 0.32, 0.47, 0.41)); w_.view_->addMeasure(QLineF(0.22, 0.66, 0.34, 0.60)); },
+        [this, tab, dock] { grab(&w_, "measure"); w_.view_->clearMeasures(); w_.measureAct_->setChecked(false); },
         // preferences: General and Performance (System names this machine's folders, so it is described, not shown)
         [this, tab, dock] { w_.preferences(); },
         [this, tab, dock] { grab(w_.prefsDlg_, "prefs_general"); if (auto* t = w_.prefsDlg_->findChild<QTabWidget*>()) t->setCurrentIndex(1); },

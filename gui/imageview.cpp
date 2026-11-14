@@ -173,6 +173,102 @@ void ImageView::setBrush(bool on, double radius, double hardness) {
     viewport()->update();
 }
 
+// ----------------------------------------------------------------------------- scale bar and measuring
+
+bool ImageView::hasImage() const { return (!image_.isNull() || live_->img) && !scene_.sceneRect().isEmpty(); }
+
+void ImageView::setSceneWidthUm(double um) {
+    if (sceneUm_ == um) return;
+    sceneUm_ = um;
+    viewport()->update();
+}
+
+void ImageView::setScaleBar(bool on) {
+    scaleBar_ = on;
+    viewport()->update();
+}
+
+void ImageView::setMeasure(bool on) {
+    if (measure_ == on) return;
+    measure_ = on;
+    drawing_ = panning_ = false;
+    if (!brush_) {
+        setDragMode(on ? QGraphicsView::NoDrag : QGraphicsView::ScrollHandDrag);
+        viewport()->setCursor(on || precise_ ? Qt::CrossCursor : Qt::OpenHandCursor);
+    }
+    viewport()->update();
+}
+
+void ImageView::addMeasure(const QLineF& frac) {
+    lines_.push_back(frac);
+    emit measured(lengthText(frac));
+    viewport()->update();
+}
+
+void ImageView::clearMeasures() {
+    lines_.clear();
+    drawing_ = false;
+    viewport()->update();
+}
+
+QPointF ImageView::toFrac(QPointF s) const {
+    const QRectF r = scene_.sceneRect();
+    return QPointF((s.x() - r.x()) / r.width(), (s.y() - r.y()) / r.height());
+}
+
+QPointF ImageView::fromFrac(QPointF f) const {
+    const QRectF r = scene_.sceneRect();
+    return QPointF(mapFromScene(QPointF(r.x() + f.x() * r.width(), r.y() + f.y() * r.height())));
+}
+
+// a length in the unit that reads best; in image pixels when the field of view is not known
+static QString umText(double um) {
+    if (um >= 1000) return QString("%1 mm").arg(um / 1000, 0, 'f', um >= 10000 ? 2 : 3);
+    return QString("%1 µm").arg(um, 0, 'f', um >= 100 ? 0 : um >= 10 ? 1 : 2);
+}
+
+QString ImageView::lengthText(const QLineF& f) const {
+    const QRectF r = scene_.sceneRect();
+    const double px = std::hypot(f.dx() * r.width(), f.dy() * r.height());
+    if (sceneUm_ > 0 && r.width() > 0) return umText(px * sceneUm_ / r.width());
+    return QString("%1 px").arg(px, 0, 'f', 1);
+}
+
+void ImageView::drawMeasure(QPainter* p, const QLineF& f, bool live) const {
+    const QPointF a = fromFrac(f.p1()), b = fromFrac(f.p2());
+    const QColor ink = live ? QColor(255, 230, 80) : QColor(255, 255, 255);
+    p->setRenderHint(QPainter::Antialiasing);
+    for (int pass = 0; pass < 2; ++pass) {   // a dark edge under a bright line: plain on any image
+        p->setPen(pass == 0 ? QPen(QColor(0, 0, 0, 190), 4, Qt::SolidLine, Qt::RoundCap) : QPen(ink, 1.6, Qt::SolidLine, Qt::RoundCap));
+        p->drawLine(a, b);
+        const QLineF l(a, b);
+        if (l.length() > 1) {   // a tick across each end
+            QLineF n = l.normalVector();
+            n.setLength(6);
+            const QPointF d = n.p2() - n.p1();
+            p->drawLine(a - d, a + d);
+            p->drawLine(b - d, b + d);
+        }
+    }
+    const QString text = lengthText(f);
+    QFont font = p->font();
+    font.setPointSize(10);
+    font.setBold(true);
+    p->setFont(font);
+    const QFontMetrics fm(font);
+    QRectF plate(0, 0, fm.horizontalAdvance(text) + 14, fm.height() + 6);
+    QPointF at = (a + b) / 2 + QPointF(10, -plate.height() - 8);
+    const QRect vp = viewport()->rect();
+    at.setX(std::clamp(at.x(), 4.0, std::max(4.0, vp.width() - plate.width() - 4)));
+    at.setY(std::clamp(at.y(), 4.0, std::max(4.0, vp.height() - plate.height() - 4)));
+    plate.moveTopLeft(at);
+    p->setPen(Qt::NoPen);
+    p->setBrush(QColor(0, 0, 0, 190));
+    p->drawRoundedRect(plate, 4, 4);
+    p->setPen(ink);
+    p->drawText(plate, Qt::AlignCenter, text);
+}
+
 void ImageView::syncFrom(const ImageView* o) {
     if (!o || o == this) return;
     setTransform(o->transform());
@@ -221,6 +317,38 @@ void ImageView::drawForeground(QPainter* p, const QRectF&) {
         p->drawRoundedRect(r, 5, 5);
         p->setPen(QColor(240, 240, 240));
         p->drawText(r.adjusted(9, 6, -9, -6), Qt::AlignLeft | Qt::AlignTop, note_);
+    }
+    if (hasImage()) {
+        for (const QLineF& l : lines_) drawMeasure(p, l, false);
+        if (drawing_) drawMeasure(p, cur_, true);
+    }
+    // the scale bar, bottom left: a round length (1, 2 or 5 times a power of ten) near a fifth of the view's width
+    if (scaleBar_ && sceneUm_ > 0 && hasImage() && zoom() > 0) {
+        const QRect vp = viewport()->rect();
+        const double umPerPx = sceneUm_ / scene_.sceneRect().width() / zoom();   // per pixel of the view
+        const double target = 0.22 * vp.width() * umPerPx;
+        double nice = std::pow(10.0, std::floor(std::log10(target)));
+        if (5 * nice <= target) nice *= 5; else if (2 * nice <= target) nice *= 2;
+        const double w = nice / umPerPx;
+        if (w >= 20 && vp.height() > 80) {
+            const QString text = umText(nice);
+            QFont f = p->font();
+            f.setPointSize(11);
+            f.setBold(true);
+            p->setFont(f);
+            const QFontMetrics fm(f);
+            const double x0 = 18, y0 = vp.height() - 22;
+            p->setRenderHint(QPainter::Antialiasing, false);
+            p->setPen(Qt::NoPen);
+            p->setBrush(QColor(0, 0, 0, 150));
+            p->drawRoundedRect(QRectF(x0 - 10, y0 - fm.height() - 12, std::max(w, (double)fm.horizontalAdvance(text)) + 20, fm.height() + 26), 6, 6);
+            p->setBrush(QColor(0, 0, 0));
+            p->drawRect(QRectF(x0 - 1, y0 - 1, w + 2, 7));
+            p->setBrush(QColor(245, 245, 245));
+            p->drawRect(QRectF(x0, y0, w, 5));
+            p->setPen(QColor(245, 245, 245));
+            p->drawText(QRectF(x0, y0 - fm.height() - 6, std::max(w, (double)fm.horizontalAdvance(text)), fm.height()), Qt::AlignLeft | Qt::AlignVCenter, text);
+        }
     }
     if (brush_ && cursorIn_) {
         double rr = brushRadius_ * zoom();
@@ -283,6 +411,21 @@ void ImageView::mousePressEvent(QMouseEvent* e) {
             return;
         }
     }
+    if (measure_ && !brush_) {
+        if (e->button() == Qt::LeftButton && hasImage()) {
+            drawing_ = true;
+            const QPointF f = toFrac(mapToScene(e->pos()));
+            cur_ = QLineF(f, f);
+            viewport()->update();
+            return;
+        }
+        if (e->button() == Qt::MiddleButton || e->button() == Qt::RightButton) {
+            panning_ = true;
+            lastPan_ = e->pos();
+            viewport()->setCursor(Qt::ClosedHandCursor);
+            return;
+        }
+    }
     QGraphicsView::mousePressEvent(e);
 }
 
@@ -295,6 +438,24 @@ void ImageView::mouseMoveEvent(QMouseEvent* e) {
         QGraphicsView::mouseMoveEvent(e);
         if (painting_) emit strokeTo(mapToScene(e->pos()));
         else if (panning_) {
+            QPoint d = e->pos() - lastPan_;
+            lastPan_ = e->pos();
+            horizontalScrollBar()->setValue(horizontalScrollBar()->value() - d.x());
+            verticalScrollBar()->setValue(verticalScrollBar()->value() - d.y());
+        }
+        viewport()->update();
+    } else if (measure_) {
+        QGraphicsView::mouseMoveEvent(e);
+        if (drawing_) {
+            QPointF end = e->position();
+            if (e->modifiers() & Qt::ShiftModifier) {   // level, upright or at 45 degrees
+                const QPointF a = fromFrac(cur_.p1()), d = end - a;
+                const double len = std::hypot(d.x(), d.y()), step = 3.14159265358979 / 4;
+                const double ang = std::round(std::atan2(d.y(), d.x()) / step) * step;
+                end = a + QPointF(len * std::cos(ang), len * std::sin(ang));
+            }
+            cur_.setP2(toFrac(mapToScene(end.toPoint())));
+        } else if (panning_) {
             QPoint d = e->pos() - lastPan_;
             lastPan_ = e->pos();
             horizontalScrollBar()->setValue(horizontalScrollBar()->value() - d.x());
@@ -314,12 +475,25 @@ void ImageView::mouseReleaseEvent(QMouseEvent* e) {
         if (painting_ && e->button() == Qt::LeftButton) { painting_ = false; emit strokeEnd(); return; }
         if (panning_ && (e->button() == Qt::MiddleButton || e->button() == Qt::RightButton)) { panning_ = false; viewport()->setCursor(Qt::BlankCursor); return; }
     }
+    if (measure_ && !brush_) {
+        if (drawing_ && e->button() == Qt::LeftButton) {
+            drawing_ = false;
+            const QPointF a = fromFrac(cur_.p1()), b = fromFrac(cur_.p2());
+            if (std::hypot(b.x() - a.x(), b.y() - a.y()) >= 3) {   // (a click is not a line)
+                lines_.push_back(cur_);
+                emit measured(lengthText(cur_));
+            }
+            viewport()->update();
+            return;
+        }
+        if (panning_ && (e->button() == Qt::MiddleButton || e->button() == Qt::RightButton)) { panning_ = false; viewport()->setCursor(Qt::CrossCursor); return; }
+    }
     QGraphicsView::mouseReleaseEvent(e);
-    if (precise_ && !brush_) viewport()->setCursor(Qt::CrossCursor);
+    if ((precise_ || measure_) && !brush_) viewport()->setCursor(Qt::CrossCursor);
 }
 
 void ImageView::mouseDoubleClickEvent(QMouseEvent* e) {
-    if (brush_) return;   // a double click would be a stroke
+    if (brush_ || measure_) return;   // a double click would be a stroke, or two lines
     QGraphicsView::mouseDoubleClickEvent(e);
     fit();
 }
@@ -328,6 +502,11 @@ void ImageView::keyPressEvent(QKeyEvent* e) {
     if (brush_ && (e->key() == Qt::Key_BracketLeft || e->key() == Qt::Key_BracketRight)) {
         brushRadius_ = std::clamp(brushRadius_ * (e->key() == Qt::Key_BracketRight ? 1.25 : 0.8), 2.0, 2000.0);
         emit brushResized(brushRadius_);
+        viewport()->update();
+        return;
+    }
+    if (measure_ && !lines_.empty() && (e->key() == Qt::Key_Backspace || e->key() == Qt::Key_Delete)) {
+        lines_.pop_back();
         viewport()->update();
         return;
     }

@@ -97,6 +97,10 @@ private slots:
     void onLiveView(int k, QImage image, QRect win, QSize full);
     void updateViewWindow();                   // the viewer's visible part, as fractions, for the engine's frame views
     void prepareLiveView();                    // before a run: the live view's buffer sized for this screen
+    // the scale of what the viewers show, from the Field of view setting: `frac` is the share of a frame's width the
+    // image on show stands for (1 = a whole frame, the crop's share for an output, 0 = not known)
+    void setViewScale(double frac);
+    void applyViewScale();
     void onThumbnail(int index, QImage image);
     void onFullFrame(int index, QImage image);
     void onComparison(int index, QImage image);
@@ -238,6 +242,11 @@ private:
     QRectF viewFrac_{0, 0, 1, 1};
     int viewportW_ = 1600;                     // in the screen's own pixels (a display scaled 150 % has 1.5 per unit)
     size_t viewMaxPx_ = 4000000;               // the largest live view the engine's buffers hold (set for each run)
+    double viewFovFrac_ = 0;                   // the share of a frame's width the main view's image stands for
+    double outFovFrac_ = 0;                    // ... and the outputs' (the crop), known once a pass or a render says
+    int jobFrameW_ = 0;                        // the running job's frames' width, in pixels
+    double jobScale_ = 1.0;                    // ... and its output scale (1 or 0.5)
+    QAction* measureAct_ = nullptr;
     QDockWidget* hwDock_ = nullptr;
     QGroupBox* perfGroup_ = nullptr;   // the hardware settings, built with the Render column, shown in Preferences
     bool updateManual_ = false;        // the running check came from the menu: report its result either way
