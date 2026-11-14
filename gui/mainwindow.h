@@ -73,6 +73,7 @@ private slots:
     void batchNext();      // open and render the queue's next folder, or finish
     void preferences();                        // File > Preferences: General, Performance, System
     void about();
+    void openManual();                         // Help > Manual (F1): manual\index.html beside the program, in the browser
     void checkForUpdates();                    // Help > Check for updates: the result in a box
     void showUpdate();                         // the dialog: what changed, Update and restart / Skip / Later
     void onUpdateAvailable(const ReleaseInfo& r);
@@ -98,6 +99,7 @@ private slots:
     void sortFrames(bool byTime);   // the list (= the stack order) by file name, or by the capture time (EXIF; file time when absent)
 
 private:
+    friend class ManualShots;   // developer aid: the manual's screen grabs (manualshots.h)
     void buildMenus();
     void buildUi();
     void loadSettings();

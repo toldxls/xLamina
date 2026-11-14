@@ -261,6 +261,9 @@ void MainWindow::buildMenus() {
     devOutMenu_->setStatusTip("A (focus-weighted average) and B0 (raw argmax): developer outputs, rendered when ticked.");
 
     QMenu* help = menuBar()->addMenu("&Help");
+    QAction* man = help->addAction("&Manual", QKeySequence::HelpContents, this, [this] { openManual(); });
+    man->setStatusTip("The illustrated manual, in the browser: every panel and control, searchable (F1).");
+    help->addSeparator();
     QAction* chk = help->addAction("Check for &updates…", this, &MainWindow::checkForUpdates);
     chk->setStatusTip("Ask GitHub for the latest release; a newer one can be installed from here and xLamina restarts.");
     autoUpdateAct_ = help->addAction("Check for updates at &start");
@@ -2317,6 +2320,20 @@ void MainWindow::preferences() {
     connect(bb, &QDialogButtonBox::rejected, d, &QDialog::hide);
     l->addWidget(bb);
     d->show();
+}
+
+// Help > Manual: manual\index.html beside the program (the release zip holds it), in the default browser; a build
+// run from the source tree finds docs\manual instead
+void MainWindow::openManual() {
+    const QString app = QCoreApplication::applicationDirPath();
+    for (const QString& p : {app + "/manual/index.html", app + "/../../docs/manual/index.html"}) {
+        if (!QFileInfo::exists(p)) continue;
+        QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(p).canonicalFilePath()));
+        statusBar()->showMessage("The manual opens in the browser.", 4000);
+        return;
+    }
+    QMessageBox::information(this, "xLamina", QString("The manual was not found: %1 is missing.\nIt comes with the release zip.")
+                                                  .arg(QDir::toNativeSeparators(app + "/manual/index.html")));
 }
 
 void MainWindow::about() {

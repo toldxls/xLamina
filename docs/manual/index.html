@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xLamina manual</title>
+<style>
+:root { --bg:#1e1e1e; --panel:#262626; --text:#e2e2e2; --dim:#a0a0a0; --line:#3a3a3a; --accent:#a56be8; --accent2:#7a2fc9; --mark:#ffd54a; --code:#2e2e2e; }
+@media (prefers-color-scheme: light) { :root { --bg:#fafafa; --panel:#f0f0f0; --text:#1c1c1c; --dim:#5c5c5c; --line:#d6d6d6; --accent:#6a25b8; --accent2:#7a2fc9; --mark:#ffe36e; --code:#e9e9e9; } }
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 12px; }
+body { margin:0; background:var(--bg); color:var(--text); font:15px/1.55 "Segoe UI", system-ui, sans-serif; }
+nav { position:fixed; inset:0 auto 0 0; width:270px; background:var(--panel); border-right:1px solid var(--line); overflow-y:auto; padding:14px 12px 30px; }
+nav h1 { font-size:18px; margin:0 0 2px; }
+nav .ver { color:var(--dim); font-size:12px; margin-bottom:10px; }
+#q { width:100%; padding:7px 9px; border:1px solid var(--line); border-radius:5px; background:var(--bg); color:var(--text); font:inherit; }
+#q:focus { outline:2px solid var(--accent2); border-color:transparent; }
+#count { color:var(--dim); font-size:12px; min-height:18px; margin:4px 2px 8px; }
+nav a { display:block; padding:3px 6px; border-radius:4px; color:var(--text); text-decoration:none; font-size:14px; }
+nav a:hover { background:var(--accent2); color:#fff; }
+nav a.sub { padding-left:18px; color:var(--dim); font-size:13px; }
+nav a.hide { display:none; }
+main { margin-left:270px; padding:22px 34px 80px; max-width:1180px; }
+section { border-bottom:1px solid var(--line); padding:6px 0 18px; }
+section.hide { display:none; }
+h2 { font-size:23px; margin:22px 0 8px; }
+h3 { font-size:17px; margin:20px 0 6px; }
+p { margin:8px 0; }
+a { color:var(--accent); }
+code, kbd { background:var(--code); border-radius:3px; padding:1px 5px; font:13px Consolas, monospace; }
+kbd { border:1px solid var(--line); }
+table { border-collapse:collapse; margin:10px 0; width:100%; }
+th, td { border:1px solid var(--line); padding:5px 9px; text-align:left; vertical-align:top; }
+th { background:var(--panel); }
+td:first-child { white-space:nowrap; }
+mark { background:var(--mark); color:#000; border-radius:2px; padding:0 1px; }
+.tip { border-left:3px solid var(--accent2); background:var(--panel); padding:7px 12px; margin:10px 0; }
+.dev { display:inline-block; font-size:11px; border:1px solid var(--accent); color:var(--accent); border-radius:3px; padding:0 5px; vertical-align:middle; margin-left:6px; }
+figure.shot { margin:14px 0 18px; }
+figure.shot.narrow .wrap { max-width:420px; }
+figure.shot.mid .wrap { max-width:820px; }
+.wrap { position:relative; display:inline-block; max-width:100%; border:1px solid var(--line); border-radius:4px; overflow:hidden; line-height:0; cursor:zoom-in; }
+.wrap.big { max-width:none !important; cursor:zoom-out; }
+.wrap img { max-width:100%; height:auto; display:block; }
+.pin { position:absolute; width:18px; height:18px; margin:-13px 0 0 -13px; border-radius:50%; background:var(--accent2); color:#fff; font:bold 11px/18px "Segoe UI", sans-serif; text-align:center; box-shadow:0 0 0 1.5px #fff, 0 1px 4px #000; pointer-events:none; }
+.box { position:absolute; border:2px solid var(--mark); border-radius:3px; box-shadow:0 0 0 2000px rgba(0,0,0,.45); opacity:0; pointer-events:none; transition:opacity .12s; }
+.box.on { opacity:1; }
+.cursor { position:absolute; width:26px; height:26px; pointer-events:none; filter:drop-shadow(0 1px 2px #000); }
+figcaption { color:var(--dim); font-size:13px; margin-top:5px; line-height:1.45; }
+ol.legend { margin:8px 0 0; padding-left:0; list-style:none; counter-reset:n; columns:2; column-gap:28px; }
+ol.legend li { counter-increment:n; position:relative; padding:2px 4px 2px 32px; break-inside:avoid; border-radius:4px; }
+ol.legend li::before { content:counter(n); position:absolute; left:4px; top:3px; width:20px; height:20px; border-radius:50%; background:var(--accent2); color:#fff; font:bold 11px/20px "Segoe UI", sans-serif; text-align:center; }
+ol.legend li:hover { background:var(--panel); }
+@media (max-width: 900px) { nav { position:static; width:auto; border-right:0; } main { margin-left:0; padding:16px; } ol.legend { columns:1; } }
+@media print { nav { display:none; } main { margin:0; max-width:none; } .wrap { break-inside:avoid; } }
+</style>
+</head>
+<body>
+<nav>
+  <h1>xLamina manual</h1>
+  <div class="ver">GPU focus stacker</div>
+  <input id="q" type="search" placeholder="Search the manual  ( / )" autocomplete="off">
+  <div id="count"></div>
+  <div id="toc"></div>
+</nav>
+<main>
+
+<section id="quick" data-k="start begin first steps tutorial how to stack">
+<h2>Quick start</h2>
+<p>xLamina stacks a folder of focus-bracketed frames into one image that is sharp throughout. It needs 64-bit Windows and an NVIDIA GPU.</p>
+<ol>
+  <li><b>Open the folder</b> that holds the frames: <b>Open folder</b> in the toolbar (<kbd>Ctrl+O</kbd>), or drop the folder onto the window.</li>
+  <li><b>Tick the outputs</b> you want in the Render panel. <b>B</b> and <b>C</b> are ticked by default.</li>
+  <li>Press <b>Render</b> (<kbd>F5</kbd>). The viewer splits in two while it works and shows the stack being built.</li>
+  <li><b>Look at the results</b>: the tabs under the viewer switch between the outputs. Wheel to zoom, drag to pan.</li>
+  <li><b>Save as…</b> (<kbd>Ctrl+S</kbd>) writes the image on screen. Every output is also written to <code>&lt;folder&gt;_stacker</code> beside the frames.</li>
+</ol>
+<figure class="shot" data-img="main" data-cursor="Render" data-marks="Open folder;Render;panel Frames;view;tab B;group Outputs;group Settings;Compare;Save as;panel Geometry report">
+  <ol class="legend">
+    <li><b>Open folder</b>: choose the folder of frames.</li>
+    <li><b>Render</b>: align and stack the ticked frames. The cursor in the picture is on it.</li>
+    <li><b>Frames</b>: the stack, in order. Untick a frame to leave it out.</li>
+    <li><b>Viewer</b>: the image on show, named in its top-left corner.</li>
+    <li><b>Output tabs</b>: one per rendered output; the purple one is on show.</li>
+    <li><b>Outputs</b>: the stacking methods to render.</li>
+    <li><b>Settings</b>: resolution, reference frame, live view, smoothing, field of view, output folder.</li>
+    <li><b>Compare</b> and <b>Retouch</b>: two images side by side; paint one into the other.</li>
+    <li><b>Save as…</b>: write the image on show.</li>
+    <li><b>Geometry report</b>, <b>Log</b> and <b>Hardware</b> panels.</li>
+  </ol>
+  <figcaption>The main window after a render. Click any picture in this manual to see it at full size; point at a line of its list to see where that item is.</figcaption>
+</figure>
+</section>
+
+<section id="frames-in" data-k="tiff jpeg jpg raw dng lzw zip file format input 8-bit 16-bit greyed profile icc adobe rgb drop">
+<h2>Frames: what xLamina reads</h2>
+<ul>
+  <li><b>TIFF</b>, 8-bit or 16-bit, uncompressed or compressed (LZW, ZIP, PackBits), and <b>JPEG</b>. Uncompressed TIFF reads fastest.</li>
+  <li><b>Camera raw files and DNG are not read.</b> Export TIFFs from a raw converter first.</li>
+  <li>Every image of the stack's size is a frame. Other images in the folder are listed greyed out and left alone.</li>
+  <li>The frames' colour profile (for example Adobe RGB) is kept in the outputs and used for display.</li>
+  <li>Frames smaller than 64 x 64 px are refused.</li>
+</ul>
+<p>Frames are read once and kept in memory while they fit (up to 60 % of the machine's RAM), so a second render of the same folder starts at once. A fast SSD is enough; a RAM disk gives no extra speed.</p>
+</section>
+
+<section id="frame-list" data-k="frame list order reorder drag tick untick wobble shift sharp sharpness soft blurred warp band rolling shutter red amber violet drop sort name time exif duplicate reverse">
+<h2>The frame list</h2>
+<figure class="shot narrow" data-img="frames" data-cursor="first row@0.03,0.5" data-marks="All frames;first row@0.03,0.5;first row@0.67,0.2;first row@0.9,0.5;first row@0.82,0.84;flagged row@0.9,0.5">
+  <ol class="legend">
+    <li><b>All frames</b>: tick or untick every frame at once.</li>
+    <li><b>The tick</b>: only ticked frames are stacked. The cursor is on one.</li>
+    <li>The file name.</li>
+    <li><b>Δ</b>: the shift from the previous frame in pixels and the change of scale in %, then <b>sharp</b>: the frame's focus energy against the five frames around it (1.00 = as expected).</li>
+    <li><b>warp</b>: rolling-shutter displacement between bands of sensor rows (px). <b>band</b>: the brightness ripple LED flicker left across the rows (% peak to peak).</li>
+    <li>A frame in colour is flagged: red, amber or violet (see the table below).</li>
+  </ol>
+  <figcaption>The list after a render. The second and third lines appear once a render has measured the frames.</figcaption>
+</figure>
+<p>The list is the stack order. Click a frame to see it at full resolution.</p>
+<table>
+  <tr><th>Colour</th><th>Meaning</th><th>What to do</th></tr>
+  <tr><td>Red</td><td>The shift from the previous frame is an outlier: the stage or the specimen moved.</td><td>Render &gt; Drop shifted frames, then Render again.</td></tr>
+  <tr><td>Amber</td><td>Soft: the focus energy fell under its neighbours' (blurred during the exposure). The cutoff is 0.90; change it in File &gt; Preferences &gt; General &gt; Soft frame below.</td><td>Render &gt; Drop soft frames.</td></tr>
+  <tr><td>Violet</td><td>Warped far beyond the rest of the stack: shaken while the sensor was being read out.</td><td>Render &gt; Drop warped frames.</td></tr>
+</table>
+<p>The three Drop buttons are also in the toolbar; they untick the flagged frames and leave the files alone. <b>Render &gt; Tick all frames</b> puts every frame back.</p>
+<h3>Changing the order</h3>
+<ul>
+  <li><b>Drag</b> a row to move it.</li>
+  <li><b>Render &gt; Sort frames by name</b> or <b>by time taken</b> (the capture time in the file's EXIF; the file's modification time when there is none).</li>
+  <li><b>Right-click</b> a frame for: Add this frame again, Remove this copy, Move to top, Move to bottom, Reverse the whole order, Untick the frames above / below this one.</li>
+</ul>
+</section>
+
+<section id="outputs" data-k="methods B C Cn CBn Cx Cd Cg Cg2 H A B0 CB depth map pyramid laplacian which output helicon noise grain glow glare halo detail">
+<h2>Outputs: the stacking methods</h2>
+<p>Tick one or more in the Render panel. Each ticked output becomes a tab after the render. Start with <b>B</b> and <b>C</b>; the others appear when View &gt; Developer controls is on.</p>
+<table>
+  <tr><th>Output</th><th>What it does</th><th>Use it for</th></tr>
+  <tr><td><b>B</b></td><td>Depth map. Finds one smooth depth per pixel and takes each pixel from the frame at that depth, with soft transitions.</td><td>The cleanest tones and backgrounds.</td></tr>
+  <tr><td><b>C</b></td><td>Laplacian pyramid. Takes every detail, at every scale, from the frame where it is strongest.</td><td>The most detail and overlapping structures. Noisier, and bright highlights can glow.</td></tr>
+  <tr><td><b>Cn</b> <span class="dev">developer</span></td><td>C where the detail is above the noise, B elsewhere.</td><td>C's detail without its grain in flat areas.</td></tr>
+  <tr><td><b>CBn</b> <span class="dev">developer</span></td><td>Cn that also falls back to B where C's choice disagrees with the depth map.</td><td>Fewer artefacts from frames far from the true depth.</td></tr>
+  <tr><td><b>Cx</b> <span class="dev">developer</span></td><td>CBn with a stricter test: a disputed choice stays only if the next finer scale chose the same frame.</td><td>Glow around defocused highlights.</td></tr>
+  <tr><td><b>Cd</b> <span class="dev">developer</span></td><td>Pyramid with its fine scales locked to B's depth.</td><td>Glints picked up from other depths.</td></tr>
+  <tr><td><b>Cg</b>, <b>Cg2</b> <span class="dev">developer</span></td><td>Pyramid with its coarsest scales (one more in Cg2) taken from B.</td><td>Glare from defocused highlights.</td></tr>
+  <tr><td><b>H</b> <span class="dev">developer</span></td><td>Brightness from CBn, colour from B.</td><td>C's detail with B's colour.</td></tr>
+  <tr><td><b>A</b>, <b>B0</b>, <b>CB</b> <span class="dev">developer</span></td><td>Focus-weighted average; B's raw depth, unsmoothed; CBn without the noise rule. Ticked under Tools &gt; Developer outputs.</td><td>Diagnosis.</td></tr>
+</table>
+<div class="tip">Cn equals C at smoothing 3. With Smoothing (C) at its default of 2 the two differ on about 3 % of pixels, so tick Cn only when C's smoothing is lower.</div>
+</section>
+
+<section id="settings" data-k="render panel settings output resolution half full reference frame middle first last lock scale telecentric live view smoothing field of view fov um/px micron output folder radius">
+<h2>Render settings</h2>
+<figure class="shot narrow" data-img="render_panel" data-cursor="row Smoothing (C)" data-marks="group Outputs;row Output;row Reference;Lock scale (telecentric optics);row Live view;row Smoothing (C);row Field of view;row Output folder">
+  <ol class="legend">
+    <li><b>Outputs</b>: see <a href="#outputs">Outputs</a>.</li>
+    <li><b>Output</b>: Full resolution, or Half resolution for a fast preview.</li>
+    <li><b>Reference</b>: the frame whose pixel grid the output uses. Middle frame (the default) keeps the largest warp smallest; First and Last are the alternatives.</li>
+    <li><b>Lock scale</b>: checked = no change of scale is applied between frames. Use it with telecentric objectives.</li>
+    <li><b>Live view</b>: the resolution of the two panes shown while rendering. See <a href="#rendering">While it renders</a>.</li>
+    <li><b>Smoothing (C)</b>: how much of C's weak detail is taken from B instead. 0 = the raw selection (noisiest), 2 = the default, 3 = the same as Cn.</li>
+    <li><b>Field of view</b>: the width of one frame in mm. Optional; it gives the geometry report its µm/px and the saved file name its field of view.</li>
+    <li><b>Output folder</b>: where the files are written. Empty = <code>&lt;folder&gt;_stacker</code> beside the frames.</li>
+  </ol>
+</figure>
+<p><b>Render &gt; Reset settings to defaults</b> puts the panel back as installed. With <a href="#developer">Developer controls</a> on, the panel also shows Radius (C), Radius (B) and the Advanced group.</p>
+</section>
+
+<section id="rendering" data-k="render progress live view split pane pass detail map depth map composition cancel esc speed">
+<h2>While it renders</h2>
+<figure class="shot" data-img="live_depth" data-cursor="Cancel" data-marks="left pane;right pane;progress;Cancel;row Live view;status bar">
+  <ol class="legend">
+    <li><b>Left pane</b>: each frame as it is processed. Raw while reading, so the stack's wobble is visible, then warped onto the output grid.</li>
+    <li><b>Right pane</b>: what is being built. First the detail map (forwards through the stack), then the depth map (backwards), then the composition (forwards).</li>
+    <li><b>Progress</b>: the stage and the time so far.</li>
+    <li><b>Cancel</b> (<kbd>Esc</kbd>) stops the render.</li>
+    <li><b>Live view</b>: Off (fastest), Low, Medium (default), High, or Full. Full shows only the part the view is zoomed on, at the screen's resolution.</li>
+    <li>The status bar names the frame on screen.</li>
+  </ol>
+  <figcaption>Pass 2: the depth map building in the right pane.</figcaption>
+</figure>
+<p>Zoom and pan stay put as the frames change, so you can watch one spot through the whole stack. Each live image costs the GPUs a little time; choose Off when you only want the result.</p>
+</section>
+
+<section id="viewing" data-k="view zoom pan fit 1:1 actual size wheel double-click tabs pgup pgdn next previous output inspect">
+<h2>Viewing the results</h2>
+<figure class="shot" data-img="main_1to1" data-cursor="tab C" data-marks="tab B;tab C;Fit;1:1;@0.105,0.13;status bar">
+  <ol class="legend">
+    <li><b>Output tabs</b>: one per rendered output.</li>
+    <li>Click a tab, or step with <kbd>PgDn</kbd> / <kbd>PgUp</kbd>. The zoom and position stay the same, so outputs can be flipped against each other. The cursor is on C.</li>
+    <li><b>Fit</b> (<kbd>Ctrl+0</kbd>, or double-click the image).</li>
+    <li><b>1:1</b> (<kbd>Ctrl+1</kbd>): one image pixel per screen pixel.</li>
+    <li>The name of the image on show.</li>
+    <li>The image's size, and the zoom at the right end.</li>
+  </ol>
+  <figcaption>Output C at 1:1.</figcaption>
+</figure>
+<ul>
+  <li><b>Wheel</b>: zoom about the cursor. <b>Drag</b>: pan. <b>Double-click</b>: fit.</li>
+  <li>Clicking a frame in the list shows that frame; clicking a tab goes back to the output.</li>
+</ul>
+</section>
+
+<section id="saving" data-k="save as export tiff jpeg png 16-bit file name output folder report.json list.txt stack.txt written files">
+<h2>Saving and the files written</h2>
+<p><b>Save as…</b> (<kbd>Ctrl+S</kbd>) writes the image on show:</p>
+<ul>
+  <li><b>16-bit TIFF</b> with the frames' colour profile,</li>
+  <li><b>JPEG</b> at 100 % quality, or <b>PNG</b>: the image as displayed (sRGB, 8 bits).</li>
+</ul>
+<p>The suggested name carries the render's finish time and settings, for example <code>B_2026-11-08_14-15-27_bicubic_s2_c32_b0_1.49mm.tif</code>: output, date and time, interpolation, smoothing, C radius, B radius, and the output's field of view. <code>_rs</code> or <code>_band</code> is added while a rolling-shutter correction is on.</p>
+<p>Every render also writes to the output folder (<code>&lt;folder&gt;_stacker</code> unless you set another):</p>
+<table>
+  <tr><th>File</th><th>Holds</th></tr>
+  <tr><td><code>B.tif</code>, <code>C.tif</code>, …</td><td>Each ticked output as a 16-bit TIFF.</td></tr>
+  <tr><td><code>report.json</code></td><td>The geometry report: every frame's transform, the reference frame, the crop, µm/px.</td></tr>
+  <tr><td><code>list.txt</code>, <code>stack.txt</code></td><td>The frame list with its transforms and the render's settings, for the command line.</td></tr>
+</table>
+<p><b>File &gt; Open output folder</b> (<kbd>Ctrl+Shift+O</kbd>) opens it in Explorer.</p>
+</section>
+
+<section id="compare" data-k="compare two-up side by side flip space difference highlight orange comparison image helicon zerene other stacker stack vertically">
+<h2>Compare: two images side by side</h2>
+<p>Press <b>Compare</b> above the viewer (<kbd>Ctrl+2</kbd>). The two panes share one pan and zoom, so the same spot is always on show in both.</p>
+<figure class="shot" data-img="compare" data-cursor="Flip" data-marks="table@0.5,0.25;view;view 2;Flip;Difference;Add image;Open sweep;Stack vertically;Retouch">
+  <ol class="legend">
+    <li><b>The list</b> of images: this render's outputs, comparison images, sweep variants. Click = show in the right pane, double-click = show in the left pane.</li>
+    <li><b>Left pane</b>, with its own picker above it.</li>
+    <li><b>Right pane</b>. <kbd>PgUp</kbd> / <kbd>PgDn</kbd> step it through the list.</li>
+    <li><b>Flip</b> (<kbd>Space</kbd> or <kbd>F</kbd>): swap the panes, so the image changes under your eye. The cursor is on it.</li>
+    <li><b>Difference</b> (<kbd>D</kbd>): see below.</li>
+    <li><b>Add image…</b>: any TIFF, JPEG or PNG, for example another stacker's output. Files can also be dropped onto the window.</li>
+    <li><b>Open sweep…</b>: a folder written by a <a href="#sweep">sweep</a>.</li>
+    <li><b>Stack vertically</b>: the right pane goes under the left one, for wide crops.</li>
+    <li><b>Retouch</b>: see <a href="#retouch">Retouch</a>.</li>
+  </ol>
+</figure>
+<h3>Difference</h3>
+<figure class="shot" data-img="compare_difference" data-cursor="Difference" data-marks="Difference;@0.25,0.019;status bar">
+  <ol class="legend">
+    <li><b>Difference</b> tints the pixels where the two panes differ: orange, stronger where the difference is larger.</li>
+    <li>The level from which a pixel is tinted: above 0.5, 1, 2, 5 or 10 % of full scale.</li>
+    <li>The status bar gives the share of pixels that differ.</li>
+  </ol>
+  <figcaption>B against C at 1:1 with Difference on.</figcaption>
+</figure>
+<h3>Comparison images in the main window</h3>
+<p><b>File &gt; Add comparison image…</b> (<kbd>Ctrl+I</kbd>), or dropping an image file onto a finished render, adds another stacker's output as a tab beside xLamina's. Close such a tab with the middle mouse button.</p>
+</section>
+
+<section id="retouch" data-k="retouch paint brush clone source mask undo hardness size save result fix artefact">
+<h2>Retouch: paint one image into another</h2>
+<p>Press <b>Retouch</b> above the viewer, or <kbd>R</kbd> in the two-up viewer. The left pane becomes the result; the brush paints the right pane's image into it. Typical use: B as the base, with C painted in where B lost detail (or the other way round).</p>
+<figure class="shot" data-img="compare_retouch" data-cursor="@0.42,0.5" data-marks="Retouch;@0.42,0.019;@0.49,0.019;Show mask;Undo;Reset;Save result;view;view 2">
+  <ol class="legend">
+    <li><b>Retouch</b> on.</li>
+    <li><b>Size</b>: the brush radius in image pixels. Also <kbd>[</kbd> and <kbd>]</kbd>, or <kbd>Ctrl</kbd> + wheel.</li>
+    <li><b>Hardness</b>: the share of the radius painted at full strength; the rest fades out.</li>
+    <li><b>Show mask</b> (<kbd>M</kbd>): tints the painted pixels green.</li>
+    <li><b>Undo</b> (<kbd>Ctrl+Z</kbd>): the last stroke.</li>
+    <li><b>Reset</b>: drop every stroke.</li>
+    <li><b>Save result…</b> (<kbd>Ctrl+S</kbd>): a 16-bit TIFF with the frames' colour profile, which also joins the list.</li>
+    <li><b>Result</b> (left): the left button paints, the middle or right button pans. The cursor shows where a stroke would start.</li>
+    <li><b>Source</b> (right): pick another image here at any time to paint from it.</li>
+  </ol>
+</figure>
+<p>Hold <kbd>Space</kbd> to see the source in the result pane. The painting is done on the 16-bit data, not on the screen image.</p>
+</section>
+
+<section id="batch" data-k="batch queue several folders multiple stacks overnight unattended subfolders">
+<h2>Batch render</h2>
+<p><b>File &gt; Batch render…</b> (<kbd>Ctrl+Shift+B</kbd>) renders several folders one after the other with the Render panel's current settings. Dropping several folders onto the window opens the same dialog with them queued.</p>
+<figure class="shot mid" data-img="batch" data-cursor="Start" data-marks="list;Add folder;Add subfolders of;Remove;Start">
+  <ol class="legend">
+    <li>The queue.</li>
+    <li><b>Add folder…</b>: one stack.</li>
+    <li><b>Add subfolders of…</b>: every folder directly inside the chosen one that holds at least two image files. Folders named <code>…_stacker</code> are left out.</li>
+    <li><b>Remove</b> the selected folders; <b>Clear</b> empties the queue.</li>
+    <li><b>Start</b>.</li>
+  </ol>
+</figure>
+<p>Each folder's outputs go to <code>&lt;folder&gt;_stacker</code>. A folder that fails or holds no stack is skipped and listed in the log at the end.</p>
+</section>
+
+<section id="prefs" data-k="preferences options theme dark light interpolation bicubic lanczos bilinear soft frame cutoff rolling shutter warp led banding flicker updates developer reset gpu streams reader threads resident memory performance system">
+<h2>Preferences</h2>
+<p><b>File &gt; Preferences…</b> (<kbd>Ctrl+,</kbd>).</p>
+<figure class="shot mid" data-img="prefs_general" data-cursor="Correct rolling-shutter warp" data-marks="row Theme;row Interpolation;row Soft frame below;Correct rolling-shutter warp;Correct LED banding;row Updates;row Developer;Reset all settings to the defaults">
+  <ol class="legend">
+    <li><b>Theme</b>: Dark, Light, or the system's.</li>
+    <li><b>Interpolation</b>: how frames are resampled when aligned. Bicubic is the default. Lanczos 3 keeps about 1 % more fine detail, Lanczos 8 about 3 % for a few seconds more. Bilinear is softest and fastest.</li>
+    <li><b>Soft frame below</b>: a frame is flagged soft (amber) when its focus energy is under this share of its neighbours'. Default 0.90. Changing it re-flags the last render at once.</li>
+    <li><b>Correct rolling-shutter warp</b>: checked (default) = each frame's rows are shifted back by the displacement the alignment measured, which removes doubled edges. Unchecked = no correction.</li>
+    <li><b>Correct LED banding</b>: checked = each frame's rows are divided by the brightness ripple LED flicker left across them. Unchecked (default) = no correction.</li>
+    <li><b>Updates</b>: see <a href="#updates">Updates</a>.</li>
+    <li><b>Developer controls</b>: see <a href="#developer">Developer controls</a>.</li>
+    <li><b>Reset all settings</b>.</li>
+  </ol>
+</figure>
+<h3>Performance</h3>
+<p>Hardware settings. They change the speed, never the result.</p>
+<figure class="shot mid" data-img="prefs_performance" data-cursor="Benchmark" data-marks="row GPUs;row Streams per GPU;row Reader threads;row Pairs in flight;Keep the frames resident in host memory;Benchmark">
+  <ol class="legend">
+    <li><b>GPUs</b>: untick a card to leave it out.</li>
+    <li><b>Streams per GPU</b>: more overlaps transfers with computing but costs GPU memory.</li>
+    <li><b>Reader threads</b>: matters when frames come from the drive.</li>
+    <li><b>Pairs in flight</b>: alignment pairs solved at once per GPU.</li>
+    <li><b>Keep the frames resident</b>: checked (default) = frames are read once and kept in memory for every pass and the next render. Unchecked = read from the drive every pass.</li>
+    <li><b>Benchmark…</b> tries these settings and can apply the fastest.</li>
+  </ol>
+</figure>
+<p>The <b>System</b> tab lists the xLamina version, the GPUs, the RAM, the program folder and the settings file.</p>
+</section>
+
+<section id="benchmark" data-k="benchmark speed test timing fastest settings quick thorough single run synthetic sample">
+<h2>Benchmark</h2>
+<p><b>Tools &gt; Benchmark…</b> (<kbd>Ctrl+B</kbd>) times the engine under different hardware settings.</p>
+<figure class="shot" data-img="benchmark" data-cursor="Start" data-marks="row Stack;row Mode;table;Start;Apply fastest settings;Save report">
+  <ol class="legend">
+    <li><b>Stack</b>: the open folder, or a built-in synthetic stack (used when no folder is open, or to compare machines).</li>
+    <li><b>Mode</b>: Quick (about 20 s), Thorough, or Single run.</li>
+    <li>One row per run, with the time of each stage.</li>
+    <li><b>Start</b>.</li>
+    <li><b>Apply fastest settings</b> puts the winner into Preferences &gt; Performance.</li>
+    <li><b>Copy</b> or <b>Save report…</b>.</li>
+  </ol>
+</figure>
+<table>
+  <tr><th>Mode</th><th>What it runs</th></tr>
+  <tr><td>Quick</td><td>Up to 40 frames at half resolution: the current settings, each GPU alone, and frames streamed instead of resident.</td></tr>
+  <tr><td>Thorough</td><td>The whole stack with every setting varied in turn, then the best of each combined.</td></tr>
+  <tr><td>Single run</td><td>The whole stack once on the current settings. Each run stays in the table, to compare the machine against itself (a new driver, an overclock).</td></tr>
+</table>
+</section>
+
+<section id="panels" data-k="geometry report log hardware panel gpu temperature memory pcie um/px micron crop scale wobble ncc copy">
+<h2>Geometry report, Log and Hardware</h2>
+<p>Three panels share the bottom of the window; click a tab to bring one forward. View lists every panel so a closed one can be shown again.</p>
+<figure class="shot" data-img="geometry">
+  <figcaption><b>Geometry report</b>: frame count and size, the crop, the reference frame, the spread of scale over the stack, µm/px at the reference depth and over the stack depth (when Field of view is set), the output's field of view, the wobble and sharpness summary, and where the time went. Tools &gt; Copy geometry report copies it; Tools &gt; Copy report.json copies the full report.</figcaption>
+</figure>
+<figure class="shot" data-img="hardware">
+  <figcaption><b>Hardware</b>: per GPU its load, memory, temperature and PCIe link with the transfer rate; then the host RAM and how much of it holds frames. It comes forward when a render starts.</figcaption>
+</figure>
+<p><b>Log</b> holds the engine's messages; when a render fails the reason is here. Tools &gt; Copy log copies it.</p>
+</section>
+
+<section id="developer" data-k="developer controls advanced radius depth resolution focus window power volume aggregation refine soft labels halo prior dark reach flat smoothing developer outputs">
+<h2>Developer controls <span class="dev">developer</span></h2>
+<p><b>View &gt; Developer controls</b> (also in Preferences &gt; General) shows the tuning controls: the outputs beyond B and C, Radius (C), Radius (B), the Advanced group, Tools &gt; Developer outputs, and the <a href="#depth">depth map</a> tab. Turning it off changes nothing about a render except that the extra outputs are not rendered.</p>
+<figure class="shot narrow" data-img="render_panel_developer" data-cursor="row Radius (C)" data-marks="group Outputs;row Radius (C);row Radius (B);group Advanced">
+  <ol class="legend">
+    <li>All the <a href="#outputs">outputs</a>.</li>
+    <li><b>Radius (C)</b>, default 32 px: each frame's detail is gathered over this distance before the sharpest frame is chosen, so the frame of a strong edge also wins the band beside it. Stops ghost outlines beside edges. 0 = raw selection. It also changes B.</li>
+    <li><b>Radius (B)</b>, default 0 = off: the same idea applied before B's depth map is solved.</li>
+    <li><b>Advanced</b>: unticked = the defaults are used. Tick it to change them.</li>
+  </ol>
+</figure>
+<h3>Advanced (depth and composition)</h3>
+<p>Change one value at a time and judge at 1:1; a <a href="#sweep">sweep</a> does this for you. <b>Defaults</b> restores them all.</p>
+<table>
+  <tr><th>Setting</th><th>Default</th><th>What it does</th></tr>
+  <tr><td>Focus window</td><td>6 px</td><td>The window of the focus measure.</td></tr>
+  <tr><td>Focus power</td><td>4</td><td>The exponent on the focus measure when frames compete.</td></tr>
+  <tr><td>Depth resolution</td><td>1/2 of the sensor</td><td>The resolution the depth is solved at. 1/4 is faster but doubles the edges of bright plates; Full is for small stacks only (about 25 GB of GPU memory for 200 frames).</td></tr>
+  <tr><td>Depth window</td><td>6 px</td><td>The focus window inside the depth volume.</td></tr>
+  <tr><td>Volume aggregation</td><td>32 px</td><td>Edge-aware smoothing of the depth volume, against ghost lines beside edges.</td></tr>
+  <tr><td>Refine range</td><td>12 frames</td><td>The fine focus search around the coarse depth, in frames either way. 0 skips it.</td></tr>
+  <tr><td>Refine window</td><td>9 px</td><td>The window of that fine search.</td></tr>
+  <tr><td>Soft labels</td><td>3 px</td><td>How soft the seams between frames are when B is composed. Lower = more fine detail but visible seams.</td></tr>
+  <tr><td>Halo prior</td><td>2</td><td>B's preference for darker frames beside bright objects.</td></tr>
+  <tr><td>Dark prior</td><td>1</td><td>B's preference for darker frames in featureless background.</td></tr>
+  <tr><td>Dark reach</td><td>24 px</td><td>How far from sharp content the dark prior stays off.</td></tr>
+  <tr><td>Flat smoothing</td><td>256 px</td><td>Defocused background: a band this wide beside sharp detail takes that detail's frame; beyond it the background follows its own focus peak with soft transitions. 0 = off.</td></tr>
+</table>
+</section>
+
+<section id="depth" data-k="depth map colour color palette heat map inferno viridis magma turbo grey bands contour brightness contrast invert range fit frame popup highlight layer crosshair overlay which frame level">
+<h2>The depth map <span class="dev">developer</span></h2>
+<p>With Developer controls on, a <b>depth</b> tab sits after the outputs. It shows which frame each pixel of B comes from, in colour. It is a view only; it changes nothing about a render.</p>
+<figure class="shot" data-img="depth" data-cursor="view@0.5,0.6" data-cursor-kind="cross" data-marks="tab depth;depth bar;view@0.95,0.69;view@0.3,0.74;status bar">
+  <ol class="legend">
+    <li>The <b>depth</b> tab.</li>
+    <li>The colour controls, shown while the depth tab is on show.</li>
+    <li><b>The note beside the cursor</b>: the frame the map chose under the cursor (number and file name), and the range of frames within a few screen pixels around it.</li>
+    <li><b>The highlight</b>: every pixel taken from that same frame is marked across the image (cyan; white on Turbo) and the rest is dimmed.</li>
+    <li>The status bar says the same, on every output tab.</li>
+  </ol>
+  <figcaption>The cursor is a crosshair on the depth map, so the pixel being read is plain. Here it sits on frame 25 of 53.</figcaption>
+</figure>
+<figure class="shot" data-img="depth_bar" data-cursor="Fit" data-marks="@0.125,0.25;Invert;@0.3,0.25;Fit;All;@0.68,0.25;@0.85,0.25;slider 1;slider 2;Reset;Frame popup;Highlight frame">
+  <ol class="legend">
+    <li><b>Palette</b>: Grey, Viridis, Inferno (default), Magma, Turbo.</li>
+    <li><b>Invert</b>: checked = the palette runs from the last frame to the first.</li>
+    <li><b>Frames … to …</b>: the range of frames the palette spans. Frames outside it take its end colours.</li>
+    <li><b>Fit</b>: the range that holds 98 % of the map's pixels, so no colours are spent on frames the subject does not use.</li>
+    <li><b>All</b>: the whole stack again.</li>
+    <li><b>Bands</b>: the palette repeats every this many frames, like contour lines, so a step of a frame or two shows. off = one pass of the palette.</li>
+    <li><b>The legend</b>: the palette between the two frames it spans.</li>
+    <li><b>Brightness</b>: shifts the frames along the palette.</li>
+    <li><b>Contrast</b>: stretches the palette about its middle (up to 4 x), so a few frames' difference takes many colours.</li>
+    <li><b>Reset</b>: brightness and contrast back to the middle.</li>
+    <li><b>Frame popup</b>: checked = the note beside the cursor. Unchecked = the status bar only.</li>
+    <li><b>Highlight frame</b>: checked = the frame under the cursor is marked across the image.</li>
+  </ol>
+</figure>
+<figure class="shot mid" data-img="depth_bands">
+  <figcaption>Turbo with bands of 6 frames: each colour cycle is six frames of depth.</figcaption>
+</figure>
+<div class="tip">To check a feature: put the crosshair on it, read the frame name in the note, then click that frame in the list to see the source.</div>
+<h3>In the two-up viewer</h3>
+<figure class="shot" data-img="compare_depth" data-cursor="slider 3" data-marks="depth bar;slider 3;view;view 2">
+  <ol class="legend">
+    <li>The same colour controls; a change here also changes the main window's depth tab.</li>
+    <li><b>Overlay</b>: lays the depth map over the other image at this opacity. Left end = off.</li>
+    <li>B with the depth map over it.</li>
+    <li>The depth map itself, listed as <b>depth</b>.</li>
+  </ol>
+</figure>
+<p>The note beside the cursor works on every image of the render there, so you can read the frame while looking at B or C.</p>
+</section>
+
+<section id="sweep" data-k="sweep variants parameter search try settings soft labels refine background compare change">
+<h2>Sweeps: try several settings at once <span class="dev">tuning</span></h2>
+<p><b>Compare &gt; Run sweep…</b> (<kbd>Ctrl+Shift+R</kbd>) renders B several times, each with one setting changed from the Render panel's, over a single alignment. The two-up viewer then opens with the variants listed by how much they differ from the base, so the first rows are the ones worth looking at.</p>
+<figure class="shot mid" data-img="sweep" data-cursor="Run sweep" data-marks="group Set;@0.5,0.56;Run sweep">
+  <ol class="legend">
+    <li><b>Quick</b>: 7 variants. <b>Thorough</b>: 14.</li>
+    <li>The output folder. Each variant writes its own subfolder there.</li>
+    <li><b>Run sweep</b>.</li>
+  </ol>
+</figure>
+<p>In the viewer's list the <b>Change</b> column is the share of B's pixels that differ from the base by more than 2 %. <b>Compare &gt; Open sweep folder…</b> (<kbd>Ctrl+Shift+W</kbd>) reopens an earlier sweep.</p>
+</section>
+
+<section id="updates" data-k="update new version release download install github">
+<h2>Updates</h2>
+<p>A few seconds after it starts, xLamina asks GitHub for the latest release. A newer one lights an <b>Update to x.y.z</b> button at the right end of the toolbar. It shows what changed and, on <b>Update and restart</b>, downloads the release, swaps the files in the program's folder and restarts. Settings are kept.</p>
+<ul>
+  <li><b>Help &gt; Check for updates…</b> asks at any time.</li>
+  <li><b>Help &gt; Check for updates at start</b> turns the automatic check off or on.</li>
+</ul>
+</section>
+
+<section id="keys" data-k="keyboard shortcuts keys hotkeys mouse">
+<h2>Keyboard and mouse</h2>
+<table>
+  <tr><th>Main window</th><th></th></tr>
+  <tr><td><kbd>Ctrl+O</kbd></td><td>Open folder</td></tr>
+  <tr><td><kbd>F5</kbd> or <kbd>Ctrl+R</kbd></td><td>Render</td></tr>
+  <tr><td><kbd>Esc</kbd></td><td>Cancel the render</td></tr>
+  <tr><td><kbd>Ctrl+S</kbd></td><td>Save as…</td></tr>
+  <tr><td><kbd>Ctrl+Shift+O</kbd></td><td>Open output folder</td></tr>
+  <tr><td><kbd>PgDn</kbd> / <kbd>PgUp</kbd></td><td>Next / previous output tab</td></tr>
+  <tr><td><kbd>Ctrl+0</kbd> / <kbd>Ctrl+1</kbd></td><td>Fit / 1:1</td></tr>
+  <tr><td><kbd>Ctrl+2</kbd></td><td>Two-up viewer (Compare)</td></tr>
+  <tr><td><kbd>Ctrl+I</kbd></td><td>Add comparison image</td></tr>
+  <tr><td><kbd>Ctrl+Shift+B</kbd></td><td>Batch render</td></tr>
+  <tr><td><kbd>Ctrl+Shift+R</kbd> / <kbd>Ctrl+Shift+W</kbd></td><td>Run sweep / open sweep folder</td></tr>
+  <tr><td><kbd>Ctrl+B</kbd></td><td>Benchmark</td></tr>
+  <tr><td><kbd>Ctrl+,</kbd></td><td>Preferences</td></tr>
+  <tr><td><kbd>F1</kbd></td><td>This manual</td></tr>
+  <tr><td><kbd>Ctrl+Q</kbd></td><td>Quit</td></tr>
+</table>
+<table>
+  <tr><th>Two-up viewer</th><th></th></tr>
+  <tr><td><kbd>Space</kbd> or <kbd>F</kbd></td><td>Flip the panes (while retouching: hold Space to see the source)</td></tr>
+  <tr><td><kbd>D</kbd></td><td>Difference</td></tr>
+  <tr><td><kbd>PgDn</kbd> / <kbd>PgUp</kbd></td><td>Step the right pane through the list</td></tr>
+  <tr><td><kbd>R</kbd></td><td>Retouch</td></tr>
+  <tr><td><kbd>[</kbd> <kbd>]</kbd> or <kbd>Ctrl</kbd> + wheel</td><td>Brush size</td></tr>
+  <tr><td><kbd>M</kbd></td><td>Show mask</td></tr>
+  <tr><td><kbd>Ctrl+Z</kbd> / <kbd>Ctrl+S</kbd></td><td>Undo a stroke / save the result</td></tr>
+</table>
+<table>
+  <tr><th>Mouse in a viewer</th><th></th></tr>
+  <tr><td>Wheel</td><td>Zoom about the cursor</td></tr>
+  <tr><td>Drag</td><td>Pan</td></tr>
+  <tr><td>Double-click</td><td>Fit</td></tr>
+  <tr><td>Middle button on a comparison tab</td><td>Close it</td></tr>
+</table>
+</section>
+
+<section id="cli" data-k="command line stackcli cli script terminal settings file ini appdata">
+<h2>Command line and settings file</h2>
+<p>The same engine runs without the window:</p>
+<p><code>stackcli run &lt;folder&gt; [&lt;folder2&gt; ...] [--out DIR] [--outputs B,C,Cn] [--fov-mm X] [--scale 0.5] [--interp bicubic] [--smoothing 2]</code></p>
+<p><code>stackcli</code> with no arguments lists every command and option.</p>
+<p>All settings, the window layout, the theme and the recent folders are kept in <code>%APPDATA%\xLamina\xLamina.ini</code>.</p>
+</section>
+
+<section id="trouble" data-k="troubleshooting problem error fails no gpu cuda driver out of memory greyed strips slow blurry doubled edges ghost halo noise">
+<h2>Troubleshooting</h2>
+<table>
+  <tr><th>What you see</th><th>What to do</th></tr>
+  <tr><td>"No CUDA GPU found"</td><td>xLamina needs an NVIDIA GPU (Ampere or newer) and a current driver. Frames can still be opened and compared, but not rendered.</td></tr>
+  <tr><td>A file is greyed in the list</td><td>It is not the stack's image size, so it is not a frame. It is left alone.</td></tr>
+  <tr><td>Raw or DNG files do not open</td><td>Export TIFFs from a raw converter.</td></tr>
+  <tr><td>The render failed</td><td>The Log panel has the reason.</td></tr>
+  <tr><td>A very large stack renders in strips</td><td>Expected: when the depth volume does not fit the GPUs the image is rendered in overlapping strips and joined. It takes longer.</td></tr>
+  <tr><td>Renders are slower than they were</td><td>Check Preferences &gt; Performance (both GPUs ticked, frames resident) and set Live view to Off; run the Quick benchmark.</td></tr>
+  <tr><td>Doubled edges in the result</td><td>Keep Correct rolling-shutter warp checked; look for red or violet frames and drop them.</td></tr>
+  <tr><td>Soft patches in the result</td><td>Look for amber frames (soft) and drop them, then render again.</td></tr>
+  <tr><td>C is grainy in flat areas</td><td>Raise Smoothing (C), or use Cn or B.</td></tr>
+  <tr><td>Glow around bright highlights in C</td><td>Try Cx, Cg or B.</td></tr>
+  <tr><td>B lost fine detail that C has</td><td>Retouch: paint C into B there.</td></tr>
+</table>
+</section>
+
+</main>
+<script src="img/rects.js"></script>
+<script>
+(function () {
+  var RECTS = window.RECTS || {};
+  var ARROW = '<svg viewBox="0 0 26 26" xmlns="http://www.w3.org/2000/svg"><path d="M2 1 L2 20 L7 15.5 L10.5 23.5 L13.8 22 L10.4 14.3 L17 14.3 Z" fill="#fff" stroke="#000" stroke-width="1.4" stroke-linejoin="round"/></svg>';
+  var CROSS = '<svg viewBox="0 0 26 26" xmlns="http://www.w3.org/2000/svg"><path d="M13 1 V10 M13 16 V25 M1 13 H10 M16 13 H25" stroke="#000" stroke-width="3.4"/><path d="M13 1 V10 M13 16 V25 M1 13 H10 M16 13 H25" stroke="#fff" stroke-width="1.4"/></svg>';
+  function pct(v) { return (v * 100).toFixed(2) + '%'; }
+  // the figures: the grab, a numbered pin and a hover box per mark, and the cursor
+  document.querySelectorAll('figure.shot').forEach(function (fig) {
+    var shot = fig.dataset.img, R = RECTS[shot] || {};
+    var wrap = document.createElement('div');
+    wrap.className = 'wrap';
+    var img = new Image();
+    img.onerror = function () { img.onerror = null; img.src = 'img/' + shot + '.jpg'; };   // whole-window grabs are JPEG
+    img.src = 'img/' + shot + '.png';
+    img.alt = (fig.querySelector('figcaption') || {}).textContent || shot;
+    img.loading = 'lazy';
+    wrap.appendChild(img);
+    function rectOf(spec) {
+      spec = spec.trim();
+      var at = spec.indexOf('@');
+      if (at > 0) {   // name@fx,fy: a point inside a named control
+        var b = R[spec.slice(0, at)], f = spec.slice(at + 1).split(',');
+        return b ? [b[0] + b[2] * parseFloat(f[0]) - 0.012, b[1] + b[3] * parseFloat(f[1]) - 0.012, 0.024, 0.024, 1] : null;
+      }
+      if (at === 0) { var p = spec.slice(1).split(','); return [parseFloat(p[0]) - 0.012, parseFloat(p[1]) - 0.012, 0.024, 0.024, 1]; }
+      return R[spec];
+    }
+    var boxes = [];
+    (fig.dataset.marks || '').split(';').forEach(function (spec, i) {
+      if (!spec.trim()) return;
+      var r = rectOf(spec);
+      if (!r) { boxes.push(null); return; }
+      var box = document.createElement('div');
+      box.className = 'box';
+      box.style.cssText = 'left:' + pct(r[0]) + ';top:' + pct(r[1]) + ';width:' + pct(r[2]) + ';height:' + pct(r[3]);
+      wrap.appendChild(box);
+      boxes.push(box);
+      var pin = document.createElement('div');
+      pin.className = 'pin';
+      pin.textContent = i + 1;
+      // a point mark sits on the point; a control's pin sits on its top-left corner, clear of most of its text
+      var px = r[4] ? r[0] + r[2] / 2 + 0.004 : Math.max(0.012, r[0]);
+      var py = r[4] ? r[1] + r[3] / 2 + 0.006 : Math.max(0.018, r[1]);
+      pin.style.left = pct(px);
+      pin.style.top = pct(py);
+      wrap.appendChild(pin);
+    });
+    if (fig.dataset.cursor) {
+      var c = rectOf(fig.dataset.cursor);
+      if (c) {
+        var cur = document.createElement('div');
+        cur.className = 'cursor';
+        var cross = fig.dataset.cursorKind === 'cross';
+        cur.innerHTML = cross ? CROSS : ARROW;
+        cur.style.left = pct(c[0] + c[2] / 2);
+        cur.style.top = pct(c[1] + c[3] / 2);
+        cur.style.margin = cross ? '-13px 0 0 -13px' : '-1px 0 0 -2px';   // the hot spot: the centre, or the arrow's tip
+        wrap.appendChild(cur);
+      }
+    }
+    fig.insertBefore(wrap, fig.firstChild);
+    wrap.addEventListener('click', function () { wrap.classList.toggle('big'); });
+    fig.querySelectorAll('ol.legend > li').forEach(function (li, i) {
+      li.addEventListener('mouseenter', function () { if (boxes[i]) boxes[i].classList.add('on'); });
+      li.addEventListener('mouseleave', function () { if (boxes[i]) boxes[i].classList.remove('on'); });
+    });
+  });
+
+  // the contents
+  var toc = document.getElementById('toc'), sections = [].slice.call(document.querySelectorAll('main section'));
+  sections.forEach(function (s) {
+    var a = document.createElement('a');
+    a.href = '#' + s.id;
+    a.textContent = s.querySelector('h2').childNodes[0].textContent.trim();
+    toc.appendChild(a);
+    s._link = a;
+    s._text = (s.textContent + ' ' + (s.dataset.k || '')).toLowerCase();
+  });
+
+  // search: every word must be in the section (its text or its keywords); matches are marked
+  var q = document.getElementById('q'), count = document.getElementById('count');
+  function unmark() {
+    document.querySelectorAll('main mark').forEach(function (m) { var p = m.parentNode; p.replaceChild(document.createTextNode(m.textContent), m); p.normalize(); });
+  }
+  function markIn(node, words) {
+    var walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT, null), hits = [], n;
+    while ((n = walker.nextNode())) if (n.nodeValue.trim() && !/^(SCRIPT|STYLE)$/.test(n.parentNode.nodeName)) hits.push(n);
+    hits.forEach(function (t) {
+      var text = t.nodeValue, low = text.toLowerCase(), spans = [];
+      words.forEach(function (w) { var i = -1; while ((i = low.indexOf(w, i + 1)) >= 0) spans.push([i, i + w.length]); });
+      if (!spans.length) return;
+      spans.sort(function (a, b) { return a[0] - b[0]; });
+      var frag = document.createDocumentFragment(), at = 0;
+      spans.forEach(function (sp) {
+        if (sp[0] < at) return;
+        frag.appendChild(document.createTextNode(text.slice(at, sp[0])));
+        var m = document.createElement('mark');
+        m.textContent = text.slice(sp[0], sp[1]);
+        frag.appendChild(m);
+        at = sp[1];
+      });
+      frag.appendChild(document.createTextNode(text.slice(at)));
+      t.parentNode.replaceChild(frag, t);
+    });
+  }
+  function search() {
+    unmark();
+    var words = q.value.toLowerCase().split(/\s+/).filter(function (w) { return w.length > 1; });
+    var shown = 0;
+    sections.forEach(function (s) {
+      var ok = words.every(function (w) { return s._text.indexOf(w) >= 0; });
+      s.classList.toggle('hide', !ok);
+      s._link.classList.toggle('hide', !ok);
+      if (ok) { ++shown; if (words.length) markIn(s, words); }
+    });
+    count.textContent = words.length ? (shown ? shown + ' of ' + sections.length + ' sections match' : 'Nothing found. Try one word, e.g. "retouch" or "soft".') : '';
+  }
+  q.addEventListener('input', search);
+  q.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { var m = document.querySelector('main mark') || document.querySelector('main section:not(.hide)'); if (m) m.scrollIntoView({block: 'center'}); }
+    if (e.key === 'Escape') { q.value = ''; search(); }
+  });
+  document.addEventListener('keydown', function (e) { if (e.key === '/' && document.activeElement !== q) { e.preventDefault(); q.focus(); q.select(); } });
+  // xLamina opens the manual at a topic: index.html?q=depth+map
+  var m = /[?&]q=([^&#]*)/.exec(location.search);
+  if (m) { q.value = decodeURIComponent(m[1].replace(/\+/g, ' ')); search(); }
+})();
+</script>
+</body>
+</html>

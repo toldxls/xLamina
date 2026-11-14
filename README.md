@@ -57,6 +57,10 @@ Help > Check for updates asks at any time.
 
 ## Use
 
+Help > Manual (F1) opens the illustrated manual in the browser: every panel and control on annotated
+screen grabs, with a search box. It is [docs/manual/index.html](docs/manual/index.html) in this repository and
+`manual\index.html` in the release zip; `tools\manual.cmd <folder>` remakes its screen grabs from a render.
+
 Open a folder (or drop one onto the window). Every TIFF or JPEG of the stack's image
 size is a frame; other images in the folder are listed greyed out and left alone. Uncompressed
 TIFF reads fastest. Compressed TIFF (LZW, ZIP, PackBits) and JPEG are decoded as they are read,

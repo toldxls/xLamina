@@ -4,6 +4,7 @@
 #include <QTimer>
 
 #include "mainwindow.h"
+#include "manualshots.h"
 #include "prefs.h"
 #include "updater.h"
 
@@ -16,6 +17,8 @@
 //             write REPORT.txt and REPORT.txt.png, then quit
 //   --self-update       developer aid: install the latest release without asking and restart
 //   --updated-from V    passed by the updater to the new instance, which says so in the status bar
+//   --manual DIR        developer aid: with --render, save the manual's screen grabs and rects.js to DIR, then quit
+//                       (manualshots.h; tools\manual.cmd runs it off screen)
 //   --hover FX,FY       developer aid: after the render, show the last tab and move a synthetic cursor to that
 //                       fraction of the view (the depth map's note and highlight, for an unattended grab)
 int main(int argc, char** argv) {
@@ -28,11 +31,12 @@ int main(int argc, char** argv) {
     for (int s : {16, 24, 32, 48, 64, 128, 256}) icon.addFile(QString(":/xlamina-%1.png").arg(s), QSize(s, s));
     app.setWindowIcon(icon);
     applyTheme(appSettings().value("ui/theme", "dark").toString());
+    for (int i = 1; i < argc; ++i) if (QString::fromLocal8Bit(argv[i]) == "--manual") ManualShots::keepOffScreen();
     MainWindow w;
     w.show();
     bool autoRender = false, sample = false, selfUpdate = false;
     QStringList batchDirs;
-    QString folder, shots, bench, updatedFrom, hover;
+    QString folder, shots, bench, updatedFrom, hover, manual;
     double every = 3, renderIn = -1;
     for (int i = 1; i < argc; ++i) {
         QString a = QString::fromLocal8Bit(argv[i]);
@@ -46,6 +50,7 @@ int main(int argc, char** argv) {
         else if (a == "--every" && i + 1 < argc) every = atof(argv[++i]);
         else if (a == "--updated-from" && i + 1 < argc) updatedFrom = QString::fromLocal8Bit(argv[++i]);
         else if (a == "--hover" && i + 1 < argc) hover = QString::fromLocal8Bit(argv[++i]);
+        else if (a == "--manual" && i + 1 < argc) manual = QString::fromLocal8Bit(argv[++i]);
         else folder = a;
     }
     if (!updatedFrom.isEmpty()) w.notifyUpdated(updatedFrom);
@@ -60,6 +65,7 @@ int main(int argc, char** argv) {
     }
     if (renderIn >= 0) QTimer::singleShot((int)(renderIn * 1000), &w, &MainWindow::render);
     if (!bench.isEmpty()) QMetaObject::invokeMethod(&w, [&w, sample, bench] { w.autoBenchmark(sample, bench); }, Qt::QueuedConnection);
+    if (!manual.isEmpty()) new ManualShots(w, manual);   // grabs for docs/manual, then quits (manualshots.h)
     if (hover.contains(',')) {   // once the render is done, and again every 2 s (the window may still be laying out)
         const double fx = hover.section(',', 0, 0).toDouble(), fy = hover.section(',', 1, 1).toDouble();
         QTimer* ht = new QTimer(&w);

@@ -35,6 +35,8 @@ if not "%REDIST%"=="" (
   copy /y "%REDIST%\msvcp140_1.dll" dist\%NAME%\ >nul
   copy /y "%REDIST%\msvcp140_2.dll" dist\%NAME%\ >nul
 ) else ( echo VC++ redist not found: the zip will need the runtime installed & exit /b 3 )
+rem the manual (Help > Manual opens manual\index.html beside the program)
+xcopy /e /q /y /i docs\manual dist\%NAME%\manual >nul
 copy /y README.md dist\%NAME%\ >nul
 copy /y LICENSE dist\%NAME%\ >nul
 rem the icon as a file: a shortcut that points at it keeps a sharp icon across updates (Explorer's cache serves a
