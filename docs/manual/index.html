@@ -150,7 +150,7 @@ li.aside { list-style:none; color:var(--dim); }
 </ul>
 </section>
 
-<section id="outputs" data-k="methods B C Cn CBn Cx Cd Cg Cg2 H A B0 CB depth map pyramid laplacian which output helicon noise grain glow glare halo detail">
+<section id="outputs" data-k="methods B C Cn CBn Cx Cd Cg Cg2 H A B0 CB depth map pyramid laplacian which output noise grain glow glare halo detail">
 <h2>Outputs: the stacking methods</h2>
 <p>Tick one or more in the Render panel. Each ticked output becomes a tab after the render. Start with <b>B</b> and <b>C</b>; the others appear when View &gt; Developer controls is on.</p>
 <table>
@@ -185,7 +185,26 @@ li.aside { list-style:none; color:var(--dim); }
 <p><b>Render &gt; Reset settings to defaults</b> puts the panel back as installed. With <a href="#developer">Developer controls</a> on, the panel also shows Radius (C), Radius (B) and the Advanced group.</p>
 </section>
 
-<section id="rendering" data-k="render progress live view split pane pass detail map depth map composition cancel esc speed">
+<section id="dust" data-k="dust map sensor dust spots specks trails white background flat field clean remove">
+<h2>Dust map: removing sensor dust</h2>
+<p>Dust on the sensor sits at the same pixels of every frame. Once the frames are aligned, each a little differently, one speck becomes a short dark trail in the stack. A dust map removes the specks from every frame before stacking.</p>
+<ol>
+  <li><b>Take the dust map:</b> a photograph of an evenly lit white background through the same optics, at the frames' size. Out of focus is fine; it must be bright and even.</li>
+  <li><b>File &gt; Set dust map…</b>, or the <b>…</b> button of the Dust map row in the Render panel, and choose it. xLamina says how many dust spots it found.</li>
+  <li>Render as usual. The map stays in use for every stack of that size, also after a restart, until you press <b>×</b> in the Dust map row.</li>
+</ol>
+<ul>
+  <li>The map shows <i>where</i> the dust is. <i>How dark</i> each speck is, is measured on the frames of each render, so the map does not have to match the frames' exposure.</li>
+  <li>Only the pixels in and around a speck are changed: they are brightened by what the speck took away, or filled in from their surroundings where almost no light is left. Everything else is untouched.</li>
+  <li>A dust map kept in the stack's folder is not stacked as a frame when "dust map" is in its file name, or when it is the map in use.</li>
+  <li>A map of another size than the frames cannot be used; xLamina asks before rendering without it.</li>
+  <li>Saved file names get <code>_dust</code> while a dust map is in use.</li>
+  <li>With fewer than 8 frames there is too little to measure on, and every speck is filled in from its surroundings.</li>
+</ul>
+<div class="tip">Dust moves. If trails come back, take a new dust map.</div>
+</section>
+
+<section id="rendering"data-k="render progress live view split pane pass detail map depth map composition cancel esc speed">
 <h2>While it renders</h2>
 <figure class="shot" data-img="live_depth" data-cursor="Cancel" data-marks="left pane;right pane;progress;Cancel;row Live view;status bar">
   <ol class="legend">
@@ -238,7 +257,7 @@ li.aside { list-style:none; color:var(--dim); }
 <p><b>File &gt; Open output folder</b> (<kbd>Ctrl+Shift+O</kbd>) opens it in Explorer.</p>
 </section>
 
-<section id="compare" data-k="compare two-up side by side flip space difference highlight orange comparison image helicon zerene other stacker stack vertically">
+<section id="compare" data-k="compare two-up side by side flip space difference highlight orange comparison image other stacker stack vertically">
 <h2>Compare: two images side by side</h2>
 <p>Press <b>Compare</b> above the viewer (<kbd>Ctrl+2</kbd>). The two panes share one pan and zoom, so the same spot is always on show in both.</p>
 <figure class="shot" data-img="compare" data-cursor="Flip" data-marks="table@0.5,0.25;view;view 2;Flip;Difference;Add image;Open sweep;Stack vertically;Retouch">
@@ -535,6 +554,7 @@ li.aside { list-style:none; color:var(--dim); }
   <tr><td>Out of memory on a smaller PC</td><td>Set Output to Half resolution, untick outputs you do not need, close other programs, and in Preferences &gt; Performance untick "Keep the frames resident in host memory".</td></tr>
   <tr><td>A very large stack renders in strips</td><td>Expected: when the depth volume does not fit the GPUs the image is rendered in overlapping strips and joined. It takes longer.</td></tr>
   <tr><td>Renders are slower than they were</td><td>Check Preferences &gt; Performance (both GPUs ticked, frames resident) and set Live view to Off; run the Quick benchmark.</td></tr>
+  <tr><td>Short dark trails or specks in the result</td><td>Sensor dust: see <a href="#dust">Dust map</a>.</td></tr>
   <tr><td>Doubled edges in the result</td><td>Keep Correct rolling-shutter warp checked; look for red or violet frames and drop them.</td></tr>
   <tr><td>Soft patches in the result</td><td>Look for amber frames (soft) and drop them, then render again.</td></tr>
   <tr><td>C is grainy in flat areas</td><td>Raise Smoothing (C), or use Cn or B.</td></tr>

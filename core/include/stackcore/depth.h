@@ -64,8 +64,8 @@ struct DepthParams {
     // what the background beyond the band takes (FINDINGS 40): 0 = the quiet end of the stack (0.6.4, the fewest
     // ghosts, a flat wax); 1 = the loud end, sliding between the ends where the end frames' coarse energies are
     // within flat_end_soft (relative) of each other; 2 = the frame where each pixel's focus measure (the aggregated
-    // slice, pooled over 24 px) peaks over the whole stack, energy-weighted and smoothed over 32 px (the blob-wise
-    // field Helicon's background follows, FINDINGS 37c); 3 = that field snapped to the ends over a transition of
+    // slice, pooled over 24 px) peaks over the whole stack, energy-weighted and smoothed over 32 px (a blob-wise
+    // field, FINDINGS 37c); 3 = that field snapped to the ends over a transition of
     // 2 x flat_end_soft (fraction of the stack).
     // 2 is the default since 0.6.16 (FINDINGS 40); 0 = --flat-end quiet, the 0.6.4 .. 0.6.15 depth-stage background
     // (the composition's flat blend, 0.6.18, is separate: --flat-blend 0 for the 0.6.15 B)

@@ -109,8 +109,12 @@ Render > Drop warped frames unticks it.
 The list is the stack order: Render > Sort frames by name or by time taken (the EXIF
 capture time) reorder it, Tick all frames puts every frame back into the render.
 
-Smoothing (C): 0 is the raw selection (in flat areas it picks the noisiest frame), 2 is about
-Helicon's Smoothing 1, 3 is Cn.
+File > Set dust map takes a photograph of an evenly lit white background (the frames' size, same optics): the dust
+it shows is taken out of every frame before stacking, so a speck on the sensor leaves no trail. The map says where
+the dust is; how dark each speck is, is measured on the frames of each render. `stackcli run ... --dust-map FILE`
+does the same.
+
+Smoothing (C): 0 is the raw selection (in flat areas it picks the noisiest frame), 2 is the
 
 File > Batch render… queues several folders (add them one by one, add every subfolder of a
 folder, or drop several folders onto the window) and renders them one after the other with the
@@ -130,7 +134,7 @@ a 1:1 comparison. The defaults in short: depth is estimated at 1/2 of the sensor
 detail's frame for about 256 px and beyond that follows its own focus peak with soft
 transitions; flat regions blend up to 32 frames so a depth ramp draws no rings. The warp's
 resampling filter is a choice (bicubic by default; Lanczos 3 or 8 for a little more fine
-detail; bilinear). docs/FINDINGS.md has the evidence behind each default.
+detail; bilinear).
 
 Cn is C at smoothing 3; with the panel's C smoothing at 2 the two differ on about 3 % of
 pixels, so tick Cn only when C's smoothing is lower.
@@ -172,11 +176,11 @@ newest Qt 6 found there; set `QT_DIR` to choose another.
     gui/      xLamina, the Qt application
     cli/      stackcli
     tools/    build and packaging scripts, the icon generator, the M0 hardware benchmark
-    docs/     DESIGN.md and FINDINGS.md (the evidence behind every decision)
+    docs/     the manual (docs/manual)
 
 The engine was ported stage by stage from a Python reference implementation and checked
 against it (bit-exact ingest, byte-identical fold across GPU splits, depth identical at
-99.999 %, end-to-end scores equal to the reference's); the record is in docs/FINDINGS.md.
+99.999 %, end-to-end scores equal to the reference's).
 
 ## License
 

@@ -4,6 +4,7 @@
 // preview); a cancel flag stops a job between frames.
 #pragma once
 
+#include <memory>
 #include <atomic>
 #include <complex>
 #include <cstring>
@@ -14,6 +15,7 @@
 #include <thread>
 #include <vector>
 
+#include "stackcore/dust.h"
 #include "stackcore/align.h"
 #include "stackcore/compose.h"
 #include "stackcore/fold.h"
@@ -119,6 +121,8 @@ struct Pass1Options {
     // empty = none. row_gain flattens the frame's brightness banding; rs_dx / rs_dy are the frame's rolling-shutter
     // displacement per sensor row (full-res px), added to the sample position
     std::vector<float> row_gain, rs_dx, rs_dy;
+    // the dust map's correction (dust.h), applied to every frame as it is read; null = none
+    std::shared_ptr<const DustFix> dust;
     Hooks hooks;
 };
 
@@ -264,7 +268,7 @@ struct StackOptions {
     double flat_end_soft = 0.3;
     // the composition's smooth-depth blend widened to this many frames in flat regions (FINDINGS 41): the background's
     // depth ramps through the stack there and a two-frame blend draws iso-frame rings; 0 = off (two frames everywhere,
-    // the 0.6.17 composition). 16 from 0.6.18 (8 already removes the rings, 16 and 32 look alike and nearer Helicon);
+    // the 0.6.17 composition). 16 from 0.6.18 (8 already removes the rings, 16 and 32 look alike);
     // 32 since 0.6.22, with flat_blur_px 256 (FINDINGS 44)
     double flat_blend = 32;
     // strips, for stacks whose depth volume does not fit the GPUs: the output rectangle is cut along its longer side
@@ -323,6 +327,7 @@ struct AlignOptions {
     bool lock_scale = false;
     double um_per_px = 0;             // 0 = unknown; negative = -FOV in mm, resolved once the width is known
     FrameCache* cache = nullptr;      // resident frames (pass 0 fills it); null = stream from disk
+    std::shared_ptr<const DustFix> dust;   // the dust map's correction: the alignment reads the frames without their dust too
     // rolling shutter (FINDINGS 51): the row bands per frame whose shift is solved against the neighbours (0 = off),
     // and the row-frequency range (cycles per frame height) taken as LED flicker in the brightness profiles
     int rs_bands = 8;
@@ -348,6 +353,7 @@ struct AlignOut {
     std::vector<float> rs_dx, rs_dy, rs_px;
     std::vector<float> band_pct, row_gain;
     int band_peak_cycles = 0;
+    std::shared_ptr<const DustFix> dust;   // the dust map with its depths measured on the frames (null without a dust map)
     double band_peak_power = 0, band_median_pct = 0, rs_median_px = 0;
 };
 int run_align(AlignOptions& ao, AlignOut& A);
@@ -360,6 +366,7 @@ struct JobOptions {
     AlignOptions align;
     StackOptions stack;
     std::string out;                  // empty = <dir>_stacker
+    std::shared_ptr<const DustFix> dust;   // the dust map's correction for the whole job (a map of another size than the frames is left out, and said)
     FrameCache* cache = nullptr;      // a caller-owned frame cache that outlives the job (the GUI keeps the stack resident
                                       // across runs); null = one for this job when stack.cache_frames is set
 };

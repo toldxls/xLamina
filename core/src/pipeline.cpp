@@ -212,7 +212,7 @@ static std::string source_note(const StreamerStats& st) {
 }
 
 // read FILE into a device float RGB frame; returns 0 and fills info/d_rgb on success
-static int load_frame_to_device(const fs::path& in, TiffInfo& info, float*& d_rgb, FrameCache* cache = nullptr) {
+static int load_frame_to_device(const fs::path& in, TiffInfo& info, float*& d_rgb, FrameCache* cache = nullptr, const DustFix* dust = nullptr) {
     info = tiff_probe(in);
     if (!info.ok()) { logf("%s: %s", in.string().c_str(), info.error.c_str()); return 1; }
     size_t cap = tiff_buffer_capacity(info.pixel_bytes());
@@ -246,6 +246,10 @@ static int load_frame_to_device(const fs::path& in, TiffInfo& info, float*& d_rg
     CK(cudaMalloc(&d_rgb, npx * 3 * sizeof(float)));
     CK(cudaMemcpy(d_src, src, bytes, cudaMemcpyHostToDevice));
     convert_to_rgb_f32(d_src, info, d_rgb, nullptr, 0);
+    DevDust dd;   // the dust map's correction, as in the passes
+    struct DustTidy { DevDust& d; ~DustTidy() { d.free(); } } dust_tidy{dd};
+    dd.upload(dust, (int)info.width, (int)info.height);
+    dd.apply(d_rgb, 0);
     CK(cudaGetLastError());
     CK(cudaDeviceSynchronize());
     tidy.ok = true;
@@ -456,6 +460,7 @@ struct FoldDev {
     std::vector<FoldSlot> slots;
     std::vector<void*> fm16, lum16;   // per frame index: this GPU's volume slices (null = not here)
     double* d_energy = nullptr;       // per frame index: the sum of the frame's focus measure (fold_energy_add), this GPU's frames
+    DevDust dust;      // the dust map's correction, when the options carry one (dust.h)
     DevRowCorr rc;                    // the per-row corrections of every frame (FINDINGS 51), when the options carry them
     AsyncPreview bp;                  // the detail map being built (first device only)
 };
@@ -637,6 +642,7 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
                 D.bp.free();
                 D.st.free();
                 D.rc.free();
+                D.dust.free();
                 cudaFree(D.d_energy);
                 D.d_energy = nullptr;
                 if (D.fold_s) cudaStreamDestroy(D.fold_s);
@@ -695,6 +701,7 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         CK(cudaStreamCreateWithFlags(&D.fold_s, cudaStreamNonBlocking));
         D.st.alloc(d, ow, oh, fp.levels, fp.with_a);
         D.rc.upload(po, g);
+        D.dust.upload(po.dust.get(), g.W, g.H);
         D.fm16.assign(K, nullptr);
         D.lum16.assign(K, nullptr);
         CK(cudaMalloc(&D.d_energy, (size_t)K * sizeof(double)));
@@ -737,6 +744,7 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
                 logf("GPU %d: left out of this job, not enough memory for the volume slices plus one slot (%.2f GB free)\n", d, fr / 1e9);
                 D.st.free();
                 D.rc.free();
+                D.dust.free();
                 cudaFree(D.d_energy);
                 D.d_energy = nullptr;
                 cudaStreamDestroy(D.fold_s);
@@ -788,6 +796,7 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         if (S.used) cudaStreamWaitEvent(f.stream, S.done, 0);   // the fold stream must be done with this slot
         S.fp.guard(f.stream);                                    // and the previous view's kernel with d_warp
         convert_to_rgb_f32(f.d_pixels(), *f.info, S.d_rgb, nullptr, f.stream);
+        D.dust.apply(S.d_rgb, f.stream);   // the frame without its dust, before anything else sees it
         int k = ks[f.k];
         load_aligned(S.d_rgb, g, T[k], S.d_scratch, S.d_warp, false, f.stream, D.rc.at(k));
         fold_measure(S.d_warp, fp, S.sc, f.stream);
@@ -1099,6 +1108,7 @@ struct PassDev {
     int dev = -1;
     cudaStream_t fold_s = nullptr;
     std::vector<PassSlot> slots;
+    DevDust dust;      // the dust map's correction, when the options carry one (dust.h)
     DevRowCorr rc;     // the per-row corrections of every frame (FINDINGS 51), when the options carry them
     AsyncPreview bp;   // the map being built (first device only); the accumulate stage enqueues into it
 };
@@ -1137,6 +1147,7 @@ static StreamerStats run_pass(const std::vector<fs::path>& run_paths, const std:
                 D.slots.clear();
                 D.bp.free();
                 D.rc.free();
+                D.dust.free();
                 if (D.fold_s) cudaStreamDestroy(D.fold_s);
                 D.fold_s = nullptr;
             }
@@ -1169,6 +1180,7 @@ static StreamerStats run_pass(const std::vector<fs::path>& run_paths, const std:
         CK_THROW(cudaSetDevice(d));
         CK_THROW(cudaStreamCreateWithFlags(&D.fold_s, cudaStreamNonBlocking));
         D.rc.upload(po, g);
+        D.dust.upload(po.dust.get(), g.W, g.H);
         D.slots.resize(opt.streams_by_device[di]);
         int idx = 0;
         for (auto& S : D.slots) {
@@ -1189,6 +1201,7 @@ static StreamerStats run_pass(const std::vector<fs::path>& run_paths, const std:
         if (S.used) cudaStreamWaitEvent(f.stream, S.done, 0);
         S.fp.guard(f.stream);
         convert_to_rgb_f32(f.d_pixels(), *f.info, S.d_rgb, nullptr, f.stream);
+        D.dust.apply(S.d_rgb, f.stream);   // the frame without its dust, before anything else sees it
         int k = ks[f.k];
         load_aligned(S.d_rgb, g, T[k], S.d_scratch, S.d_warp, false, f.stream, D.rc.at(k));
         slot_stage(f.dev, S, k, f.stream);
@@ -1833,7 +1846,7 @@ static int measure_noise(const StackOptions& so, const Pass1& P, cudaStream_t s,
     }
     for (int j = 0; j < 2; ++j) {
         TiffInfo info;
-        if (int r = load_frame_to_device(P.paths[std::min(K - 1, mid + j)], info, d_rgb, so.po.opt.cache)) return r;
+        if (int r = load_frame_to_device(P.paths[std::min(K - 1, mid + j)], info, d_rgb, so.po.opt.cache, so.po.dust.get())) return r;
         if (P.g.scale != 1.0 && !d_scr) CK(cudaMalloc(&d_scr, (size_t)P.g.work_w() * P.g.work_h() * 3 * sizeof(float)));
         CK(cudaMalloc(&d_pair[j], no * 3 * sizeof(float)));
         load_aligned(d_rgb, P.g, P.T[std::min(K - 1, mid + j)], d_scr, d_pair[j], false, s);
@@ -2668,6 +2681,11 @@ int run_align(AlignOptions& ao, AlignOut& A) {
     } else {
         for (auto& e : fs::directory_iterator(dir)) {
             auto name = e.path().filename().string();
+            std::string low = name;
+            for (char& ch : low) ch = (char)tolower((unsigned char)ch);
+            // a dust map (a photograph of a white background) kept beside the frames is not one of them
+            const bool dust_file = low.find("dust map") != std::string::npos || low.find("dustmap") != std::string::npos || low.find("dust_map") != std::string::npos || low.find("dust-map") != std::string::npos;
+            if (dust_file) { logf("  skipping %s (a dust map by its name)", name.c_str()); continue; }
             if (e.is_regular_file() && is_frame_file(e.path()) && name.rfind(prefix, 0) == 0) paths.push_back(e.path());
         }
         // by name as a person reads it: digits as numbers and without regard to case, so frame9 comes before frame10
@@ -2744,8 +2762,13 @@ int run_align(AlignOptions& ao, AlignOut& A) {
     std::vector<float> luma_stack((size_t)N * w * h);
     std::vector<float> rows_all((size_t)N * H);   // each frame's row-mean luma at full resolution (banding, FINDINGS 51)
     {
-        struct Slot { float *d_rgb = nullptr, *d_y = nullptr, *d_small = nullptr, *d_rows = nullptr; AreaResizer rz; AsyncPreview fp; };
+        struct Slot { float *d_rgb = nullptr, *d_y = nullptr, *d_small = nullptr, *d_rows = nullptr, *d_dust = nullptr; AreaResizer rz; AsyncPreview fp; };
         std::vector<std::vector<Slot>> slots(ndev);
+        // the dust map (dust.h): this pass measures how deep each speck's shadow is in every frame; the correction made
+        // from that goes into the passes that follow. The alignment itself reads the frames as they are.
+        std::vector<DevDustProbe> dd(ndev);
+        const size_t dn = ao.dust && ao.dust->w == W && ao.dust->h == H ? ao.dust->px.size() : 0;
+        std::vector<float> dust_ratios(dn * (size_t)N, 1.f);
         StreamerOptions opt;
         opt.devices = devs;
         opt.streams_per_gpu = 3;
@@ -2762,16 +2785,17 @@ int run_align(AlignOptions& ao, AlignOut& A) {
         std::atomic<int> done{0};
         // the slots go on every way out before the end of the pass (a card out of memory part-way through them)
         struct Tidy {
-            std::vector<std::vector<Slot>>& slots; const std::vector<int>& devs; bool done = false;
+            std::vector<std::vector<Slot>>& slots; const std::vector<int>& devs; std::vector<DevDustProbe>& dd; bool done = false;
             ~Tidy() {
                 if (done) return;
                 for (int d : devs) {
                     if (cudaSetDevice(d) != cudaSuccess) continue;
-                    for (auto& S : slots[d]) { cudaFree(S.d_rgb); cudaFree(S.d_y); cudaFree(S.d_small); cudaFree(S.d_rows); S.rz.free(); S.fp.free(); }
+                    for (auto& S : slots[d]) { cudaFree(S.d_rgb); cudaFree(S.d_y); cudaFree(S.d_small); cudaFree(S.d_rows); cudaFree(S.d_dust); S.rz.free(); S.fp.free(); }
+                    dd[d].free();
                 }
                 cudaGetLastError();
             }
-        } tidy{slots, devs};
+        } tidy{slots, devs, dd};
         // slots by the memory each card has free: a frame as float RGB and its luma per slot (16 bytes a pixel) beside
         // the streamer's copy of the file (up to 6). Three were taken whatever the card and the frame size, which a
         // 4 to 8 GB card with 60 to 100 Mpx frames does not hold.
@@ -2792,12 +2816,14 @@ int run_align(AlignOptions& ao, AlignOut& A) {
         for (size_t di = 0; di < devs.size(); ++di) {
             const int d = devs[di];
             CK(cudaSetDevice(d));
+            dd[d].upload(ao.dust.get(), W, H);
             slots[d].resize(opt.streams_by_device[di]);
             for (auto& S : slots[d]) {
                 CK(cudaMalloc(&S.d_rgb, (size_t)W * H * 3 * sizeof(float)));
                 CK(cudaMalloc(&S.d_y, (size_t)W * H * sizeof(float)));
                 CK(cudaMalloc(&S.d_small, (size_t)w * h * sizeof(float)));
                 CK(cudaMalloc(&S.d_rows, (size_t)H * sizeof(float)));
+                if (dn) CK(cudaMalloc(&S.d_dust, dn * sizeof(float)));
                 S.rz.build(W, H, w, h);
                 if (hooks.frame) S.fp.alloc_view(hooks, W, H);
             }
@@ -2807,6 +2833,10 @@ int run_align(AlignOptions& ao, AlignOut& A) {
             const bool view = view_due(hooks, S.fp);
             S.fp.guard(f.stream);
             convert_to_rgb_f32(f.d_pixels(), *f.info, S.d_rgb, nullptr, f.stream);
+            if (dn) {   // each speck's shadow in this frame, against its surroundings
+                dd[f.dev].measure(S.d_rgb, S.d_dust, f.stream);
+                cudaMemcpyAsync(dust_ratios.data() + (size_t)f.k * dn, S.d_dust, dn * sizeof(float), cudaMemcpyDeviceToHost, f.stream);
+            }
             if (view) enqueue_view(hooks, S.fp, f.stream, f.k, S.d_rgb, W, H);   // the frame as read (unaligned); delivered at the slot's next turn
             luma(S.d_rgb, S.d_y, (size_t)W * H, f.stream);
             S.rz.run(S.d_y, S.d_small, 1, f.stream);
@@ -2820,12 +2850,18 @@ int run_align(AlignOptions& ao, AlignOut& A) {
         for (int d : devs) {
             CK(cudaSetDevice(d));
             CK(cudaDeviceSynchronize());
-            for (auto& S : slots[d]) { S.fp.flush(hooks); cudaFree(S.d_rgb); cudaFree(S.d_y); cudaFree(S.d_small); cudaFree(S.d_rows); S.rz.free(); S.fp.free(); }
+            for (auto& S : slots[d]) { S.fp.flush(hooks); cudaFree(S.d_rgb); cudaFree(S.d_y); cudaFree(S.d_small); cudaFree(S.d_rows); cudaFree(S.d_dust); S.rz.free(); S.fp.free(); }
+            dd[d].free();
         }
         tidy.done = true;
         // a frame that could not be read has no luma: the alignment of zeros ended much later as "no usable pair",
         // or went through on garbage. The pass's errors end the job here, with the file named.
         if (!hooks.cancelled()) if (int r = stream_fail(st)) return r;
+        if (dn && !hooks.cancelled()) {
+            A.dust = calibrate_dust(*ao.dust, dust_ratios, N);
+            logf("dust map: measured on the %d frames: %zu pixels brightened, %zu filled in; the deepest shadow keeps %.0f %% of the light (%.0f %% in the map)\n",
+                 N, A.dust->idx.size(), A.dust->heal.size(), 100.0 * A.dust->deepest, 100.0 * A.dust->map_deepest);
+        }
         logf("align: %d frames %dx%d -> luma %dx%d in %.2f s%s\n", N, W, H, w, h, st.seconds, source_note(st).c_str());
         if (getenv("STACKER_MEM_DEBUG"))
             for (int d : devs) { size_t fr, tot; cudaSetDevice(d); cudaMemGetInfo(&fr, &tot); logf("  [mem] GPU %d after pass 0: %.2f GB free", d, fr / 1e9); }
@@ -3078,6 +3114,25 @@ void write_report(const AlignOptions& ao, const AlignOut& A, const fs::path& od)
     logf("  report.json + list.txt -> %s (rect %d,%d,%d,%d)\n", od.string().c_str(), rect[0], rect[1], rect[2], rect[3]);
 }
 
+// The job's dust map, when it fits the frames: a map of another size (another camera, a crop) corrects nothing and
+// would put its specks' positions in the wrong places, so it is left out and that is said.
+static std::shared_ptr<const DustFix> use_dust(const JobOptions& jo, const AlignOptions& ao) {
+    if (!jo.dust || jo.dust->px.empty()) return nullptr;
+    fs::path first = !ao.paths.empty() ? ao.paths.front() : fs::path();
+    if (first.empty()) {   // a folder: its first frame file
+        std::error_code ec;
+        for (auto& e : fs::directory_iterator(ao.dir, ec)) if (e.is_regular_file() && is_frame_file(e.path())) { first = e.path(); break; }
+    }
+    TiffInfo t = first.empty() ? TiffInfo() : tiff_probe(first);
+    if (t.ok() && ((int)t.width != jo.dust->w || (int)t.height != jo.dust->h)) {
+        logf("dust map %s is %d x %d, the frames are %u x %u: it is not applied", jo.dust->name.c_str(), jo.dust->w, jo.dust->h, t.width, t.height);
+        return nullptr;
+    }
+    logf("dust map %s: %d spot%s, %zu pixels in and around them", jo.dust->name.c_str(), jo.dust->spots,
+         jo.dust->spots == 1 ? "" : "s", jo.dust->px.size());
+    return jo.dust;
+}
+
 int run_job(JobOptions& jo, AlignOut& A, Hooks hooks) {
     AlignOptions& ao = jo.align;
     StackOptions& so = jo.stack;
@@ -3099,7 +3154,9 @@ int run_job(JobOptions& jo, AlignOut& A, Hooks hooks) {
     // an output folder that cannot be made is found now, not after the alignment and the whole fusion
     if (so.write_outputs && !make_out_dir(out)) return 1;
     ao.max_frames = kMaxFrames;
+    ao.dust = so.po.dust = use_dust(jo, ao);
     if (int r = run_align(ao, A)) return r;
+    if (A.dust) so.po.dust = A.dust;   // the dust map with its depths measured on these frames
     write_report(ao, A, out);
     so.po.paths = A.paths;
     so.po.T = A.T;
@@ -3130,7 +3187,9 @@ int run_sweep_job(JobOptions& jo, const std::vector<SweepVariant>& variants, con
     auto t_all = std::chrono::steady_clock::now();
     if (!make_out_dir(out_dir)) return 1;
     ao.max_frames = kMaxFrames;
+    ao.dust = so.po.dust = use_dust(jo, ao);
     if (int r = run_align(ao, A)) return r;
+    if (A.dust) so.po.dust = A.dust;
     write_report(ao, A, out_dir);   // report.json + list.txt beside the variants: `stackcli sweep` can continue from them
     so.po.paths = A.paths;
     so.po.T = A.T;

@@ -59,15 +59,15 @@ static int usage() {
             "usage:\n"
             "  stackcli run DIR [DIR2 ...] [--out DIR] [--prefix IMG_] [--scale 1|0.5] [--outputs B,C,Cn] [--ref middle] [--lock-scale 1]\n"
             "               [--fov-mm X | --um-per-px X] [--gpus 0,1] [--streams 2] [--align-scale 0.25] [--baselines 1,2,4,8] [--pair-threads 3]\n"
-            "               [--smoothing 0] [--c-radius 0]   align the frames in DIR (TIFF, JPEG; all of them, or those starting with --prefix) and fuse them:\n"
+            "               [--smoothing 0] [--c-radius 0] [--dust-map FILE]   align the frames in DIR (TIFF, JPEG; all of them, or those starting with --prefix) and fuse them:\n"
             "               report.json + 16-bit TIFFs in DIR_stacker (or --out). Outputs: A B B0 C CB Cn CBn Cx Cd Cg Cg2 H\n"
             "               Several DIRs are rendered one after the other (a batch): each into its own DIR_stacker, or --out\\<folder name>\n"
             "               Cx: CBn with the finer level's support in place of the dominance test (against the glow of defocused highlights)\n"
-            "               --smoothing S: C takes detail weaker than S x the noise from B (0 = raw selection, 2 ~ Helicon's 1, 3 = Cn)\n"
+            "               --smoothing S: C takes detail weaker than S x the noise from B (0 = raw selection, 2 = the window's default, 3 = Cn)\n"
             "               --strips N: render the frame as N overlapping strips, feathered together, for stacks whose depth volume does not\n"
             "                             fit the GPUs (0 = only when the memory runs short, the default; 1 = never); --strip-overlap 512 (sensor px)\n"
             "               --soft-cutoff 0.9: a frame is reported soft when its focus energy is under this share of its neighbours' (stack.txt, log)\n"
-            "               --rs-bands 8 (0 = off) / --band-cycles 3,12: the rolling-shutter probe (FINDINGS 51): each frame's displacement per\n"
+            "               --rs-bands 8 (0 = off) / --band-cycles 3,12: the rolling-shutter probe: each frame's displacement per\n"
             "               row band against its neighbours, and the LED flicker in its row brightness (cycles per frame height); report.json\n"
             "               --fix-rs 1 (default) / --fix-banding 0 (default): correct them in every warp (the measured row offsets, the row gains)\n"
             "               --c-radius R: C aggregates each frame's pyramid energy over R sensor px before choosing, so a strong\n"
@@ -91,7 +91,7 @@ static int usage() {
             "               --flat-band W: the band beside sharp detail that takes its frame, W sensor px (0 = the blur width)\n"
             "               --flat-keep S: a weak feature keeps S x (its focus contrast / conf-lo) of its own depth in flat regions (0 = none)\n"
             "               --flat-end argmax: what the background beyond the band takes: argmax = the frame where each pixel's focus measure\n"
-            "                             peaks (smoothed, blob by blob, as Helicon; the default since 0.6.16), quiet = the quiet end of the stack\n"
+            "                             peaks (smoothed, blob by blob; the default since 0.6.16), quiet = the quiet end of the stack\n"
             "                             (the 0.6.4 .. 0.6.15 depth stage; with --flat-blend 0 the 0.6.15 B), loud = the loud end, snap = the\n"
             "                             argmax field snapped to the ends; --flat-end-soft 0.3 = half the width of loud's / snap's transition\n"
             "               --flat-blend 32: in flat regions the composition blends the frames within W of the depth instead of two, so a\n"
@@ -676,6 +676,12 @@ static int cmd_run(int argc, char** argv) {
     for (; i + 1 < argc; i += 2) {
         std::string a = argv[i], v = argv[i + 1];
         if (a == "--out") jo.out = v;
+        else if (a == "--dust-map") {   // a photograph of a white background: its dust is taken out of every frame (dust.h)
+            auto fix = std::make_shared<DustFix>();
+            std::string why;
+            if (!build_dust_fix(v, *fix, &why)) { fprintf(stderr, "%s\n", why.c_str()); return 1; }
+            jo.dust = fix;
+        }
         else if (parse_align_option(a, v, jo.align)) continue;
         else if (parse_stack_option(a, v, jo.stack)) continue;
         else return usage();

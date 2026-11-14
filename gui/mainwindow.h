@@ -23,6 +23,7 @@
 #include <QSplitter>
 #include <QTabBar>
 #include <QTimer>
+#include <QToolButton>
 
 #include <memory>
 #include <mutex>
@@ -77,7 +78,10 @@ private slots:
     void batchNext();      // open and render the queue's next folder, or finish
     void preferences();                        // File > Preferences: General, Performance, System
     void about();
-    void reportProblem();                      // Help > Report a problem: the logs, the PC's details and the settings as one file
+    // the dust map (dust.h): a white-background frame whose dust is taken out of every frame before stacking
+    void chooseDustMap();                      // File > Set dust map
+    bool setDustMap(const QString& path, bool quiet);   // read it and find its dust; an empty path drops it
+    void reportProblem();                     // Help > Report a problem: the logs, the PC's details and the settings as one file
     void logRunStart(const QString& what, const stackcore::JobOptions& jo);   // the run's block in the session's log
     QString failureMessage(const JobResultData& d) const;                     // a failed job in words, with the next step
     void openManual();                         // Help > Manual (F1): manual\index.html beside the program, in the browser
@@ -107,6 +111,10 @@ private slots:
 
 private:
     friend class ManualShots;   // developer aid: the manual's screen grabs (manualshots.h)
+    std::shared_ptr<const stackcore::DustFix> dust_;   // the dust map in use (null: none, or not read yet)
+    QString dustPath_;
+    QLabel* dustLabel_ = nullptr;              // the Render panel's Dust map row
+    QToolButton* dustClear_ = nullptr;
     void buildMenus();
     void buildUi();
     void loadSettings();

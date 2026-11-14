@@ -11,6 +11,7 @@ add_library(stackcore STATIC
     src/volume.cu
     src/depth.cu
     src/compose.cu
+    src/dust.cu
     src/align.cu
     src/pipeline.cpp)
 target_include_directories(stackcore PUBLIC include)

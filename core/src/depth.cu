@@ -487,7 +487,7 @@ __global__ void k_keep(float* __restrict__ ov, const float* __restrict__ cont, i
 // Beyond the band each pixel takes an end of the stack from the coarse energies of the end frames (e0: frame 0,
 // e1: frame K-1, both averaged over the flat blur width). end_mode 0 (0.6.4): the QUIET end, where the defocused
 // background shows the fewest ghosts of nearby objects (a flat wax, FINDINGS 36). end_mode 1 (FINDINGS 40): the
-// LOUD end, where the blob's own bokeh is strongest: the first guess at Helicon's blob-by-blob background (FINDINGS
+// LOUD end, where the blob's own bokeh is strongest: the first guess at a blob-by-blob background (FINDINGS
 // 37b-c), rejected in FINDINGS 40 (it picks the near end almost everywhere: the end frames alone do not know where
 // the far matrix is in focus); where the two ends are within `soft` (relative) of each other the frame slides
 // between them, so neighbouring blobs meet in a wide continuous transition instead of a seam.
@@ -702,8 +702,8 @@ DepthResult depth_from_volume(const float* d_V_in, const uint16_t* h_lum, const 
         cudaFree(d_se);
     }
     // flat_end 2 / 3 (FINDINGS 40): the frame where each pixel's focus measure, pooled over 24 px, peaks over the
-    // whole stack, then spread by an energy-weighted 32 px blur: the blob-wise field Helicon's background follows
-    // (FINDINGS 37c: a 2-8 px band-pass argmax with that smoothing scored Spearman 0.88 / 0.96 against its map; the
+    // whole stack, then spread by an energy-weighted 32 px blur: a blob-wise field
+    // (FINDINGS 37c: a 2-8 px band-pass argmax with that smoothing was the closest of those tried; the
     // focus measure is that band at the depth grid). Built here, before k_cost overwrites V. Sensor px x fraction.
     float* kbg = nullptr;
     if (flat_fill && (p.flat_end == 2 || p.flat_end == 3)) {

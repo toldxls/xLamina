@@ -63,7 +63,7 @@ static const char* kOutputHelp[] = {
     "CB: pyramid, falling back to B where C's choice disagrees with the depth map (no noise rule: flat areas keep C's grain).",
     "CBn: CB plus the noise rule: pyramid detail only where it is above the noise, B elsewhere.",
     "Cx: CBn with the finer level's support in place of the dominance test: where C's choice disagrees with the depth map it\n"
-    "stays only if the level below chose the same frame. Against the glow of defocused highlights (FINDINGS 50).",
+    "stays only if the level below chose the same frame. Against the glow of defocused highlights.",
     "Cd: pyramid locked to B's depth at the fine levels (against glints from other depths).",
     "Cg: pyramid with coarse levels from B (against glare from defocused highlights).",
     "Cg2: Cg with one more coarse level from B.",
@@ -205,6 +205,9 @@ void MainWindow::buildMenus() {
     file->addSeparator();
     QAction* prefs = file->addAction("&Preferences…", QKeySequence("Ctrl+,"), this, &MainWindow::preferences);
     prefs->setStatusTip("Theme, updates, developer controls, the hardware settings, and this machine's details.");
+    file->addSeparator();
+    QAction* dustAct = file->addAction("Set &dust map…", this, [this] { chooseDustMap(); });
+    dustAct->setStatusTip("A photograph of a white background: the dust it shows is taken out of every frame before stacking (no dust trails).");
     file->addSeparator();
     QAction* cmp = file->addAction("Add &comparison image…", QKeySequence("Ctrl+I"), this, &MainWindow::addComparison);
     cmp->setStatusTip("Load another stacker's output (TIFF, JPEG, PNG) as a tab, to flip against xLamina's at the same zoom.");
@@ -558,13 +561,13 @@ void MainWindow::buildUi() {
                          "1:1, about 2 Mpx either way, so it sweeps as smoothly as High. Every image copied off a GPU costs its uploads\n"
                          "about 3 ms, so views are limited to 30 a second. Off shows only the finished outputs.");
     fl->addRow("Live view", liveRes_);
-    // the warp's resampling filter (Helicon's Preferences offer the same choice)
+    // the warp's resampling filter
     interp_ = new QComboBox;
     interp_->addItems({"Bilinear", "Bicubic", "Lanczos 3", "Lanczos 8"});   // the order of stackcore::Interp
     interp_->setCurrentIndex(1);
     interp_->setToolTip("How every frame is resampled onto the output grid when it is aligned.\n"
                         "Bicubic (the default, OpenCV's a = -0.75) is the reference the engine was validated with. Lanczos 3 keeps about\n"
-                        "1 % more fine detail for 0.3 s more per render; Lanczos 8 about 3 % more for 3.3 s more (about 150 frames, FINDINGS 39).\n"
+                        "1 % more fine detail for 0.3 s more per render; Lanczos 8 about 3 % more for 3.3 s more (about 150 frames).\n"
                         "Bilinear is softest and fastest (8 % less). Changing it changes every output.");
     // (not in the Render column: File > Preferences > General holds it; the setting is kept as before)
     // the soft-frame cutoff (FINDINGS 49)
@@ -587,7 +590,7 @@ void MainWindow::buildUi() {
     smoothing_->setDecimals(1);
     smoothing_->setValue(2);
     smoothing_->setToolTip("Smoothing of C: detail weaker than this many times the noise is taken from B instead of the sharpest frame.\n"
-                           "0 = raw selection (noisiest), 2 is about Helicon's Smoothing 1, 3 equals Cn.");
+                           "0 = raw selection (noisiest), 2 is the default, 3 equals Cn.");
     fl->addRow("Smoothing (C)", smoothing_);
     cradius_ = new QDoubleSpinBox;
     cradius_->setRange(0, 200);
@@ -641,6 +644,29 @@ void MainWindow::buildUi() {
         rl->addWidget(browse);
         fl->addRow("Output folder", row);
     }
+    {   // the dust map (File > Set dust map): its name, a button to choose one and one to drop it
+        QWidget* row = new QWidget;
+        QHBoxLayout* rl = new QHBoxLayout(row);
+        rl->setContentsMargins(0, 0, 0, 0);
+        rl->setSpacing(4);
+        dustLabel_ = new QLabel("none");
+        dustLabel_->setToolTip("A photograph of an evenly lit white background, taken through the same optics: the dust it shows is taken out of\n"
+                               "every frame before stacking, so a speck on the sensor leaves no trail. It must have the frames' size.\n"
+                               "How dark each speck is, is measured on the frames of every render (a white frame shows where, not how much).");
+        QToolButton* choose = new QToolButton;
+        choose->setText("…");
+        choose->setToolTip("Choose the dust map (File > Set dust map).");
+        connect(choose, &QToolButton::clicked, this, [this] { chooseDustMap(); });
+        dustClear_ = new QToolButton;
+        dustClear_->setText("×");
+        dustClear_->setToolTip("Stop using the dust map.");
+        dustClear_->setEnabled(false);
+        connect(dustClear_, &QToolButton::clicked, this, [this] { setDustMap({}, false); });
+        rl->addWidget(dustLabel_, 1);
+        rl->addWidget(choose);
+        rl->addWidget(dustClear_);
+        fl->addRow("Dust map", row);
+    }
     pl->addWidget(sg);
 
     // ---- advanced: the depth / composition parameters, at the validated defaults unless ticked
@@ -648,7 +674,7 @@ void MainWindow::buildUi() {
     advanced_->setCheckable(true);
     advanced_->setChecked(false);
     advanced_->setToolTip("The parameters of B's depth pipeline and the composition. Unticked, the validated defaults are used.\n"
-                          "They were tuned region by region against Helicon's output; change one at a time and compare at 1:1.");
+                          "They were tuned region by region on real stacks; change one at a time and compare at 1:1.");
     QFormLayout* al = new QFormLayout(advanced_);
     auto dspin = [](double lo, double hi, double step, double val, int dec, const QString& suffix, const QString& tip) {
         QDoubleSpinBox* s = new QDoubleSpinBox;
@@ -673,7 +699,7 @@ void MainWindow::buildUi() {
                           "left; it needs about 6 GB of GPU memory for 200 full frames and costs about 3 s. Full needs about 25 GB for such a stack.");
     al->addRow("Depth resolution", depthRes_);
     depthFmPx_ = dspin(1, 30, 1, 6, 0, " px", "Window of the normalised Laplacian in the depth volume, in depth-volume pixels. Default 6;\n"
-                                               "3 at 1/2 resolution gave the tightest edges on the synthetic stack (FINDINGS 31).");
+                                               "3 at 1/2 resolution gave the tightest edges on the synthetic stack.");
     al->addRow("Depth window", depthFmPx_);
     volAggPx_ = dspin(0, 128, 4, 32, 0, " px", "Edge-aware aggregation of the depth volume, in sensor pixels; against ghost lines beside edges. Default 32.");
     al->addRow("Volume aggregation", volAggPx_);
@@ -692,15 +718,15 @@ void MainWindow::buildUi() {
     al->addRow("Halo prior", haloPrior_);
     darkPrior_ = dspin(0, 10, 0.5, 1, 1, "", "B's preference for darker frames in featureless pixels (defocused background). Default 1. It is switched\n"
                                               "off within the dark reach of sharp content, where a featureless pixel is a gap between needles or the inside\n"
-                                              "of a rim and must follow its neighbours instead (FINDINGS 34).");
+                                              "of a rim and must follow its neighbours instead.");
     al->addRow("Dark prior", darkPrior_);
     darkReach_ = dspin(0, 200, 4, 24, 0, " px", "How far from sharp content the dark prior stays off, in sensor pixels. Default 24; 0 applies the prior to\n"
                                                  "every featureless pixel (the 0.5.x behaviour, which put far frames into the gaps of needle fans at 1/2 resolution).");
     al->addRow("Dark reach", darkReach_);
     flatBlur_ = dspin(0, 512, 16, 256, 0, " px", "Defocused background (no sharp detail within the dark reach): a band of about this width beside sharp detail\n"
                                                   "takes that detail's frame, beyond it each pixel takes the frame where its own focus measure peaks, smoothed\n"
-                                                  "blob by blob (FINDINGS 40), and the composition blends up to 32 frames there (FINDINGS 41); its focus curves\n"
-                                                  "are also smoothed over this width (FINDINGS 34). Default 256 (128 before 0.6.22; FINDINGS 44); 0 = off\n"
+                                                  "blob by blob, and the composition blends up to 32 frames there; its focus curves\n"
+                                                  "are also smoothed over this width. Default 256 (128 before 0.6.22); 0 = off\n"
                                                   "(the depth stage's own choice, which breaks the background into patches with visible seams).");
     al->addRow("Flat smoothing", flatBlur_);
     QPushButton* resetAdv = new QPushButton("Defaults");
@@ -843,6 +869,10 @@ void MainWindow::loadSettings() {
     cradius_->setValue(s.value("cradius", 32.0).toDouble());
     bradius_->setValue(s.value("bradius", 0.0).toDouble());
     fov_->setValue(s.value("fov", 0.0).toDouble());
+    dustPath_ = s.value("dustMap").toString();   // read at the first render (a second or two), not at every start
+    if (!dustPath_.isEmpty() && !QFileInfo::exists(dustPath_)) dustPath_.clear();
+    dustLabel_->setText(dustPath_.isEmpty() ? QString("none") : QFileInfo(dustPath_).fileName());
+    dustClear_->setEnabled(!dustPath_.isEmpty());
     s.endGroup();
     s.beginGroup("advanced");
     advanced_->setChecked(s.value("enabled", false).toBool());
@@ -888,6 +918,7 @@ void MainWindow::saveSettings() {
     s.setValue("cradius", cradius_->value());
     s.setValue("bradius", bradius_->value());
     s.setValue("fov", fov_->value());
+    s.setValue("dustMap", dustPath_);
     s.endGroup();
     s.beginGroup("advanced");
     s.setValue("enabled", advanced_->isChecked());
@@ -1206,7 +1237,11 @@ void MainWindow::openFolder(const QString& dir, const QStringList& only) {
     blankPx.fill(QColor(40, 40, 40));
     QIcon blank(blankPx);
     for (int i = 0; i < files.size(); ++i) {
-        bool ok = infos[i].ok() && infos[i].width == best.first && infos[i].height == best.second;
+        // the dust map is a photograph of a white background, not a frame: the one in use, or a file named as one
+        const QString lower = files[i].toLower();
+        const bool isDust = (!dustPath_.isEmpty() && QFileInfo(d.filePath(files[i])).absoluteFilePath().compare(QFileInfo(dustPath_).absoluteFilePath(), Qt::CaseInsensitive) == 0) ||
+                            lower.contains("dust map") || lower.contains("dustmap") || lower.contains("dust_map") || lower.contains("dust-map");
+        bool ok = !isDust && infos[i].ok() && infos[i].width == best.first && infos[i].height == best.second;
         QListWidgetItem* it = new QListWidgetItem(files[i]);
         it->setSizeHint(QSize(0, frameList_->iconSize().height() + 6));   // the same for every row (uniform sizes)
         if (ok) {
@@ -1222,7 +1257,8 @@ void MainWindow::openFolder(const QString& dir, const QStringList& only) {
         } else {
             it->setForeground(Qt::gray);
             it->setFlags(it->flags() & ~Qt::ItemIsSelectable);
-            it->setToolTip(infos[i].ok() ? QString("%1 x %2: not the stack's size, left out").arg(infos[i].width).arg(infos[i].height)
+            it->setToolTip(isDust ? QString("A dust map, not a frame: left out of the stack. File > Set dust map uses it.")
+                           : infos[i].ok() ? QString("%1 x %2: not the stack's size, left out").arg(infos[i].width).arg(infos[i].height)
                                          : QString::fromStdString(infos[i].error));
             ++skipped;
         }
@@ -1307,7 +1343,7 @@ void MainWindow::onThumbnail(int index, QImage image) {
         if (frameList_->item(r)->data(Qt::UserRole).toInt() == index) frameList_->item(r)->setIcon(icon);
 }
 
-// Right-click on a frame: add it to the stack again (Helicon's "add the same photo twice"), remove a
+// Right-click on a frame: add it to the stack again, remove a
 // copy, or move it; the list order is the stack order, so "move to top" makes it the first frame.
 void MainWindow::frameMenu(const QPoint& pos) {
     QListWidgetItem* it = frameList_->itemAt(pos);
@@ -1441,7 +1477,7 @@ void MainWindow::onFullFrame(int index, QImage image) {
 
 // ----------------------------------------------------------------------------- comparison images
 
-// Another stacker's output (Helicon's, say) as a tab beside xLamina's, so the two can be flipped at the
+// Another stacker's output as a tab beside xLamina's, so the two can be flipped at the
 // same zoom and position. Uncompressed TIFFs go through the engine's reader; anything else through Qt.
 void MainWindow::addComparison() {
     QString start = result_ ? result_->outDir : folder_;
@@ -1619,6 +1655,10 @@ bool MainWindow::buildJob(JobOptions& jo, bool interactive) {
         jo.stack.dark_reach_px = darkReach_->value();
         jo.stack.po.flat_blur_px = flatBlur_->value();
     }
+    // the dust map: one named in the settings is read at the first render that wants it
+    if (!dust_ && !dustPath_.isEmpty() && QFileInfo::exists(dustPath_)) setDustMap(dustPath_, true);
+    jo.dust = dust_;
+    if (dust_) jobTag_ += "_dust";
     jo.stack.outputs = selectedOutputs();
     jo.stack.diagnostics = false;   // no depth.f32 and friends in the output folder
     jo.out = outDir_->text().isEmpty() ? std::string() : outDir_->text().toStdString();
@@ -1641,6 +1681,17 @@ void MainWindow::render() {
         setStage("Cannot render: no usable NVIDIA GPU.");
         QMessageBox::warning(this, "xLamina", gp);
         return;
+    }
+    // a dust map of another size than the frames corrects nothing: asked before the render, not found in the log after it
+    if (jo.dust && !jo.align.paths.empty() && !batchRunning_) {
+        const TiffInfo t = tiff_probe(jo.align.paths.front());
+        if (t.ok() && ((int)t.width != jo.dust->w || (int)t.height != jo.dust->h)) {
+            const auto a = QMessageBox::question(this, "xLamina", QString("The dust map (%1) is %2 x %3; these frames are %4 x %5.\n\nIt cannot be used on them. Render without it?")
+                                                                      .arg(QString::fromStdString(jo.dust->name)).arg(jo.dust->w).arg(jo.dust->h).arg(t.width).arg(t.height),
+                                                 QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Yes);
+            if (a != QMessageBox::Yes) return;
+            jo.dust.reset();
+        }
     }
     // more frames than the depth stage takes: said now, not after the alignment and the first pass
     if ((int)jobItems_.size() > stackcore::kMaxFrames && !batchRunning_) {
@@ -1670,6 +1721,62 @@ void MainWindow::render() {
     worker_.start(jo, live > 0 ? live : 12, live == 0);
 }
 
+// ----------------------------------------------------------------------------- the dust map
+
+void MainWindow::chooseDustMap() {
+    if (worker_.running()) { statusBar()->showMessage("A render is running; set the dust map when it has finished.", 4000); return; }
+    const QString start = !dustPath_.isEmpty() ? QFileInfo(dustPath_).absolutePath() : folder_.isEmpty() ? recent_.value(0) : folder_;
+    const QString fn = QFileDialog::getOpenFileName(this, "Dust map: a photograph of an evenly lit white background", start,
+                                                    "Images (*.tif *.tiff *.jpg *.jpeg *.png);;All files (*)");
+    if (!fn.isEmpty()) setDustMap(fn, false);
+}
+
+// The dust map in use: read and searched for dust now (a second or two for a 45 Mpx frame), kept for every render
+// until it is dropped, and remembered between sessions by its path (read again at the first render then).
+// An empty path drops it. quiet: no boxes (the path from the settings).
+bool MainWindow::setDustMap(const QString& path, bool quiet) {
+    auto show = [this] {
+        dustClear_->setEnabled(!dustPath_.isEmpty());
+        if (dustPath_.isEmpty()) { dustLabel_->setText("none"); return; }
+        const QString name = QFileInfo(dustPath_).fileName();
+        dustLabel_->setText(dust_ ? QString("%1 (%2 spot%3)").arg(name).arg(dust_->spots).arg(dust_->spots == 1 ? "" : "s") : name);
+    };
+    if (path.isEmpty()) {
+        dust_.reset();
+        dustPath_.clear();
+        show();
+        if (!quiet) statusBar()->showMessage("The dust map is no longer used.", 5000);
+        return true;
+    }
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    auto fix = std::make_shared<stackcore::DustFix>();
+    std::string why;
+    const bool ok = stackcore::build_dust_fix(path.toStdWString(), *fix, &why);
+    QApplication::restoreOverrideCursor();
+    if (!ok) {
+        DiagLog::write("dust map refused: " + QString::fromStdString(why));
+        if (!quiet) QMessageBox::warning(this, "xLamina", QString("%1\n\n%2").arg(QDir::toNativeSeparators(path), QString::fromStdString(why)));
+        show();
+        return false;
+    }
+    dust_ = fix;
+    dustPath_ = path;
+    show();
+    DiagLog::write(QString("dust map %1: %2 x %3, %4 spots, %5 pixels in and around them").arg(QFileInfo(path).fileName()).arg(fix->w).arg(fix->h).arg(fix->spots).arg(fix->px.size()));
+    if (!quiet) {
+        if (fix->spots == 0)
+            QMessageBox::information(this, "Dust map", QString("%1\n\nNo dust was found in it (nothing 3 % darker than its surroundings), so it changes nothing.").arg(QFileInfo(path).fileName()));
+        else
+            QMessageBox::information(this, "Dust map",
+                                     QString("%1: %2 x %3\n\n%4 dust spot%5 found (%6 pixels in and around them; the darkest keeps %7 % of the light in this image).\n\n"
+                                             "From now on they are taken out of every frame of that size before stacking. How dark each one is in the frames "
+                                             "is measured on the frames of each render. The Dust map row of the Render panel shows it; × there stops using it.")
+                                         .arg(QFileInfo(path).fileName()).arg(fix->w).arg(fix->h).arg(fix->spots).arg(fix->spots == 1 ? "" : "s").arg(fix->px.size())
+                                         .arg(100.0 * fix->map_deepest, 0, 'f', 0));
+    }
+    return true;
+}
+
 // A run's block in the session's log (diaglog.h): what is rendered and under which settings, so a log sent by
 // someone else says what their render was. The folder by its name only.
 void MainWindow::logRunStart(const QString& what, const stackcore::JobOptions& jo) {
@@ -1688,6 +1795,7 @@ void MainWindow::logRunStart(const QString& what, const stackcore::JobOptions& j
              .arg(interp_->currentText()).arg(jo.stack.c_smoothing).arg(jo.stack.po.c_radius_px).arg(jo.stack.po.b_radius_px).arg(fov_->value());
     l << QString("rolling-shutter fix %1; banding fix %2; depth resolution %3; advanced %4; live view 1/%5")
              .arg(jo.stack.fix_rs).arg(jo.stack.fix_banding).arg(jo.stack.po.depth_fraction).arg(advanced_->isChecked()).arg(liveRes_->currentData().toInt());
+    l << (jo.dust ? QString("dust map %1: %2 x %3, %4 spots").arg(QString::fromStdString(jo.dust->name)).arg(jo.dust->w).arg(jo.dust->h).arg(jo.dust->spots) : QString("no dust map"));
     l << perfFromUi().summary();
     l << "now: " + hostSummary();
     DiagLog::runStart(what, l);
@@ -2065,7 +2173,7 @@ void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
                           .arg(QString::fromStdString(data->fail.detail), data->stage, data->error));
     if (unwritten) data->rc = 0;
     result_ = data;
-    // the render's finish time first, as Helicon names its files: B_2026-11-08_14-15-27_bicubic_s2_c32_b0
+    // the render's finish time first: B_2026-11-08_14-15-27_bicubic_s2_c32_b0
     result_->settingsTag = QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss") + "_" + jobTag_;
     // the output's field of view after the crop, last: the panel's FOV is the sensor width's at
     // the reference depth, so the output's is its share of the width, as the geometry report states it
