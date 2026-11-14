@@ -58,6 +58,26 @@ CompareWindow::CompareWindow(QWidget* parent) : QMainWindow(parent) {
     fit->setShortcut(QKeySequence("Ctrl+0"));
     QAction* one = tb->addAction("1:1", this, [this] { view_[0]->actualSize(); });
     one->setShortcut(QKeySequence("Ctrl+1"));
+    // measuring, as in the main window: a line drawn in one pane is shown at the same place in the other
+    measureAct_ = tb->addAction("Measure");
+    measureAct_->setCheckable(true);
+    measureAct_->setShortcut(QKeySequence("M"));
+    measureAct_->setToolTip("Measure: drag a line on either image and its length is written beside it, in both panes (M).\n"
+                            "Shift keeps the line level, upright or at 45°. The middle or right button pans.");
+    clearMeasuresAct_ = tb->addAction("Clear lines", this, [this] { view_[0]->clearMeasures(); view_[1]->clearMeasures(); });
+    clearMeasuresAct_->setToolTip("Remove the measured lines (Backspace removes the last one)");
+    clearMeasuresAct_->setVisible(false);
+    connect(measureAct_, &QAction::toggled, this, [this](bool on) {
+        if (on && rt_.on) {   // the left button paints while retouching
+            statusBar()->showMessage("Leave Retouch to measure.", 4000);
+            measureAct_->blockSignals(true); measureAct_->setChecked(false); measureAct_->blockSignals(false);
+            return;
+        }
+        for (int p = 0; p < 2; ++p) view_[p]->setMeasure(on);
+        clearMeasuresAct_->setVisible(on);
+        if (on) statusBar()->showMessage(scaleUm_ > 0 ? "Measure: drag a line on either image. Shift keeps it level or upright; the right button pans; Backspace removes the last line."
+                                                      : "Measure: lengths are in pixels (Field of view is not set in the main window, or these images are not this render's outputs).", 10000);
+    });
     tb->addSeparator();
     diffAct_ = tb->addAction("Difference");
     diffAct_->setCheckable(true);
@@ -198,6 +218,8 @@ CompareWindow::CompareWindow(QWidget* parent) : QMainWindow(parent) {
             syncing_ = true; view_[b]->syncFrom(view_[a]); syncing_ = false;
         });
         connect(view_[a], &ImageView::hovered, this, [this, a](int x, int y) { depthHover(a, x, y); });
+        connect(view_[a], &ImageView::measuresChanged, this, [this, a, b] { view_[b]->setMeasures(view_[a]->measures()); });
+        connect(view_[a], &ImageView::measured, this, [this](QString len) { statusBar()->showMessage(QString("Measured: %1").arg(len), 10000); });
     }
     // the brush paints on the left pane
     connect(view_[0], &ImageView::strokeBegin, this, [this](QPointF p) {
@@ -399,6 +421,23 @@ void CompareWindow::openImageDialog() {
 
 // ----------------------------------------------------------------------------- showing
 
+void CompareWindow::setScale(double um, QSize size) {
+    scaleUm_ = um;
+    scaleSize_ = size;
+    for (int p = 0; p < 2; ++p) applyScale(p);
+}
+
+void CompareWindow::setScaleBar(bool on) {
+    for (int p = 0; p < 2; ++p) view_[p]->setScaleBar(on);
+}
+
+// a pane's image has the scale when it is the size of the render's outputs (its B, C, depth map, a sweep's variants)
+void CompareWindow::applyScale(int pane) {
+    const int i = sel_[pane];
+    const bool same = i >= 0 && i < entries_.size() && !entries_[i].image.isNull() && entries_[i].image.size() == scaleSize_;
+    view_[pane]->setSceneWidthUm(same ? scaleUm_ : 0);
+}
+
 void CompareWindow::select(int pane, const QString& name) {
     int i = indexOf(name);
     if (i >= 0) showIn(pane, i);
@@ -434,6 +473,7 @@ void CompareWindow::refresh(int pane) {
     if (!view_[other]->image().isNull()) view_[pane]->syncFrom(view_[other]);
     syncing_ = false;
     view_[pane]->setLabel(e.name);
+    applyScale(pane);
     status_->setText(QString("%1  |  %2").arg(sel_[0] >= 0 ? entries_[sel_[0]].name : "—", sel_[1] >= 0 ? entries_[sel_[1]].name : "—"));
     trimCache();
     updateOverlay();
@@ -547,7 +587,7 @@ void CompareWindow::depthHover(int pane, int x, int y) {
     const auto& R = depth_->result;
     if (x < 0 || y < 0 || x >= R.w || y >= R.h || entries_[sel_[pane]].image.size() != QSize(R.w, R.h)) { view_[pane]->setCursorNote({}); return; }
     // "within" a patch of about 8 screen pixels around the cursor
-    const int radius = std::clamp((int)std::lround(8.0 / std::max(view_[pane]->zoom(), 1e-3)), 1, 64);
+    const int radius = depthStyle_.radiusAt(view_[pane]->zoom());
     const QString text = depthFrameText(R.depth.data(), R.w, R.h, depth_->align.paths, x, y, radius);
     statusBar()->showMessage(QString("x %1, y %2: %3").arg(x).arg(y).arg(QString(text).replace('\n', "; ")));
     view_[pane]->setCursorNote(depthStyle_.popup ? text : QString());   // drawn by the view beside the cursor
@@ -700,6 +740,7 @@ void CompareWindow::retouchToggle(bool on) {
             retouchAct_->blockSignals(true); retouchAct_->setChecked(false); retouchAct_->blockSignals(false);
             return;
         }
+        if (measureAct_->isChecked()) measureAct_->setChecked(false);   // the left button paints from here on
         QApplication::setOverrideCursor(Qt::WaitCursor);
         rt_ = Retouch{};
         rt_.target = sel_[0];

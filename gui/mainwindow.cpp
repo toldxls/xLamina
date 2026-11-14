@@ -272,6 +272,7 @@ void MainWindow::buildMenus() {
             appSettings().setValue("ui/scaleBar", on);
             view_->setScaleBar(on);
             liveView_->setScaleBar(on);
+            if (twoUp_) twoUp_->setScaleBar(on);
         });
         measureAct_ = view->addAction("&Measure");
         measureAct_->setCheckable(true);
@@ -473,7 +474,16 @@ void MainWindow::buildUi() {
     connect(tabs_, &QTabBar::tabBarClicked, this, [this](int i) { if (i >= 0 && i == tabs_->currentIndex()) showOutput(i); });
     tabs_->installEventFilter(this);   // the middle button closes a comparison tab (eventFilter)
     connect(view_, &ImageView::hovered, this, &MainWindow::depthHover);
-    connect(view_, &ImageView::viewChanged, this, [this] { if (hoverFrame_ >= 0) updateDepthHighlight(); });
+    connect(view_, &ImageView::viewChanged, this, [this] { if (shownFrame() >= 0) updateDepthHighlight(); });
+    connect(view_, &ImageView::clicked, this, [this](int x, int y) {
+        if (!depthLayers() || view_->measuring()) return;
+        const auto& R = result_->result;
+        if (x < 0 || y < 0 || x >= R.w || y >= R.h) return;
+        const int k = std::clamp((int)std::lround(R.depth[(size_t)y * R.w + x]), 0, (int)result_->align.paths.size() - 1);
+        lockDepthFrame(k == lockedFrame_ ? -1 : k);
+    });
+    connect(view_, &ImageView::stepKey, this, [this](int d) { stepDepthFrame(d); });
+    connect(view_, &ImageView::escapePressed, this, [this] { if (lockedFrame_ >= 0) lockDepthFrame(-1); });
     connect(view_, &ImageView::zoomChanged, this, [this](double z) { status_->setText(QString("%1 %").arg(z * 100, 0, 'f', 0)); });
 
     // ---- left: frames
@@ -669,7 +679,7 @@ void MainWindow::buildUi() {
         rl->setContentsMargins(0, 0, 0, 0);
         rl->setSpacing(4);
         QToolButton* browse = new QToolButton;
-        browse->setText("…");
+        browse->setText("Browse…");
         browse->setToolTip("Choose the folder the outputs and report.json are written to.\nIt applies to this stack; another folder opened starts at <folder>_stacker again.");
         connect(browse, &QToolButton::clicked, this, [this] {
             QString start = outDir_->text();
@@ -691,8 +701,8 @@ void MainWindow::buildUi() {
                                "every frame before stacking, so a speck on the sensor leaves no trail. It must have the frames' size.\n"
                                "How dark each speck is, is measured on the frames of every render (a white frame shows where, not how much).");
         QToolButton* choose = new QToolButton;
-        choose->setText("…");
-        choose->setToolTip("Choose the dust map (File > Set dust map).");
+        choose->setText("Choose…");
+        choose->setToolTip("Choose the dust map: a photograph of an evenly lit white background (File > Set dust map).");
         connect(choose, &QToolButton::clicked, this, [this] { chooseDustMap(); });
         dustClear_ = new QToolButton;
         dustClear_->setText("×");
@@ -1056,7 +1066,7 @@ void MainWindow::setDepthStyle(const DepthStyle& st, bool fromTwoUp) {
         cache_.remove("depth");
         if (current_ == "depth") showOutput(tabs_->currentIndex());
     }
-    if (!depthStyle_.highlight && hoverFrame_ >= 0) hoverFrame_ = -1;
+    if (!depthStyle_.highlight && hoverFrame_ >= 0) hoverFrame_ = -1;   // (a held layer stays: it was asked for by a click)
     if (!depthStyle_.popup) view_->setCursorNote({});
     updateDepthHighlight();   // the marking colour goes with the palette
     if (twoUp_ && !fromTwoUp) twoUp_->setDepthStyle(depthStyle_);
@@ -1070,34 +1080,81 @@ void MainWindow::depthHover(int x, int y) {
                       x >= 0 && y >= 0 && x < result_->result.w && y < result_->result.h;
     if (!live) {
         view_->setCursorNote({});
-        if (hoverFrame_ >= 0) { hoverFrame_ = -1; updateDepthHighlight(); }
+        if (hoverFrame_ >= 0) { hoverFrame_ = -1; if (lockedFrame_ < 0) updateDepthHighlight(); }
         return;
     }
     const auto& R = result_->result;
-    const int radius = std::clamp((int)std::lround(8.0 / std::max(view_->zoom(), 1e-3)), 1, 64);   // about 8 screen pixels
+    const int radius = depthStyle_.radiusAt(view_->zoom());   // the Within setting, or about 8 screen pixels
     const QString text = depthFrameText(R.depth.data(), R.w, R.h, result_->align.paths, x, y, radius);
     statusBar()->showMessage(QString("%1 — x %2, y %3: %4").arg(current_).arg(x).arg(y).arg(QString(text).replace('\n', "; ")));
     const bool onDepth = current_ == "depth";
     view_->setCursorNote(onDepth && depthStyle_.popup ? text : QString());   // drawn by the view beside the cursor
     const int K = (int)result_->align.paths.size();
     const int k = onDepth && depthStyle_.highlight ? std::clamp((int)std::lround(R.depth[(size_t)y * R.w + x]), 0, K - 1) : -1;
-    if (k != hoverFrame_) { hoverFrame_ = k; updateDepthHighlight(); }
+    if (k != hoverFrame_) { hoverFrame_ = k; if (lockedFrame_ < 0) updateDepthHighlight(); }   // (a held layer stays marked)
 }
 
 // The frame under the cursor across the image: its pixels marked, the rest dimmed. Drawn for what the view shows
 // only, at the screen's resolution (one overlay pixel per block of image pixels when zoomed out; a block is marked
 // when any of its pixels is the frame's), so it costs the same at every zoom and follows pans and zooms.
+bool MainWindow::depthLayers() const {
+    return developer_ && hasDepth() && !worker_.running() && current_ == "depth" && !compare_.contains(current_) &&
+           view_->image().size() == QSize(result_->result.w, result_->result.h);
+}
+
+// A layer held on show (or let go, k < 0): the view's label names it, so that what is marked is never in doubt.
+void MainWindow::lockDepthFrame(int k) {
+    if (k >= 0 && !depthLayers()) return;
+    lockedFrame_ = k;
+    updateDepthHighlight();
+    if (current_ != "depth") return;
+    if (k < 0) {
+        view_->setLabel("depth");
+        statusBar()->showMessage("Layer let go: the frame under the cursor is marked again.", 5000);
+        return;
+    }
+    const int K = (int)result_->align.paths.size();
+    const QString name = QString::fromStdWString(result_->align.paths[k].filename().wstring());
+    size_t px = 0;
+    for (uint16_t v : depthIdx_) px += v == (uint16_t)k;
+    view_->setLabel(QString("depth  ·  frame %1 of %2  ·  %3").arg(k + 1).arg(K).arg(name));
+    statusBar()->showMessage(QString("Layer held: frame %1 of %2 (%3), %4 % of the image. Arrow keys or PgUp / PgDn step through the layers; Esc or a click on it lets go.")
+                                 .arg(k + 1).arg(K).arg(name).arg(depthIdx_.empty() ? 0.0 : 100.0 * px / depthIdx_.size(), 0, 'f', 2));
+}
+
+// The next layer the depth map uses, in the stack's order; from the frame under the cursor (or the first) when none is held.
+void MainWindow::stepDepthFrame(int delta) {
+    if (!depthLayers() || delta == 0) return;
+    const int K = (int)result_->align.paths.size();
+    if (lockedFrame_ < 0 && hoverFrame_ < 0) updateDepthHighlight();   // (builds the list of frames in use)
+    int k = shownFrame();
+    if (k < 0) k = delta > 0 ? -1 : K;   // nothing marked: start at the stack's first (or last) layer
+    if (depthHas_.size() != (size_t)K) {   // not built yet: every frame counts
+        lockDepthFrame(std::clamp(k + (delta > 0 ? 1 : -1), 0, K - 1));
+        return;
+    }
+    int n = k;
+    for (int i = k + (delta > 0 ? 1 : -1); i >= 0 && i < K; i += delta > 0 ? 1 : -1) if (depthHas_[i]) { n = i; break; }
+    if (n < 0 || n >= K) return;
+    if (n == k && lockedFrame_ >= 0) { statusBar()->showMessage(delta > 0 ? "This is the last layer the depth map uses." : "This is the first layer the depth map uses.", 4000); return; }
+    lockDepthFrame(n);
+}
+
 void MainWindow::updateDepthHighlight() {
-    if (hoverFrame_ < 0 || current_ != "depth" || !depthStyle_.highlight || !hasDepth()) {
+    if (hasDepth() && current_ == "depth") {
+        const auto& R0 = result_->result;
+        const int K0 = (int)result_->align.paths.size();
+        if (depthIdx_.size() != R0.depth.size()) {   // the frame per pixel, rounded once per render; and which frames are used
+            depthIdx_.resize(R0.depth.size());
+            depthHas_.assign(K0, 0);
+            for (size_t i = 0; i < R0.depth.size(); ++i) { depthIdx_[i] = (uint16_t)std::clamp((int)std::lround(R0.depth[i]), 0, K0 - 1); depthHas_[depthIdx_[i]] = 1; }
+        }
+    }
+    if (shownFrame() < 0 || current_ != "depth" || (!depthStyle_.highlight && lockedFrame_ < 0) || !hasDepth()) {
         if (highlightOn_) { view_->setOverlay(QImage()); highlightOn_ = false; }
         return;
     }
     const auto& R = result_->result;
-    const int K = (int)result_->align.paths.size();
-    if (depthIdx_.size() != R.depth.size()) {   // the frame per pixel, rounded once per render
-        depthIdx_.resize(R.depth.size());
-        for (size_t i = 0; i < R.depth.size(); ++i) depthIdx_[i] = (uint16_t)std::clamp((int)std::lround(R.depth[i]), 0, K - 1);
-    }
     const QRect vis = view_->visibleSceneRect().toAlignedRect().intersected(QRect(0, 0, R.w, R.h));
     if (vis.isEmpty()) return;
     const int s = std::max(1, (int)std::floor(1.0 / std::max(view_->zoom(), 1e-3)));
@@ -1105,7 +1162,7 @@ void MainWindow::updateDepthHighlight() {
     // a colour the palette does not hold: white on Turbo, cyan on the others
     const QRgb on = depthStyle_.palette == 4 ? qRgba(255, 255, 255, 255) : qRgba(0, 255, 255, 255);
     const QRgb off = qRgba(0, 0, 0, 120);
-    const uint16_t k = (uint16_t)hoverFrame_;
+    const uint16_t k = (uint16_t)shownFrame();
     QImage ov(ow, oh, QImage::Format_ARGB32_Premultiplied);
     std::vector<uint8_t> hit(ow);
     for (int oy = 0; oy < oh; ++oy) {
@@ -1179,6 +1236,13 @@ void MainWindow::perfToUi(const PerfSettings& p) {
 
 // ----------------------------------------------------------------------------- folders and frames
 
+// Raw files are listed in the file windows too: a folder of them looked empty ("No items match your search") and
+// gave no hint why. What can be done with one is said when it is chosen.
+static const char* kRawPatterns = "*.cr3 *.cr2 *.crw *.nef *.nrw *.arw *.dng *.raf *.orf *.rw2 *.pef *.srw";
+static bool isRawFile(const QString& path) {
+    static const QStringList ext = QString(kRawPatterns).remove("*.").split(' ');
+    return ext.contains(QFileInfo(path).suffix().toLower());
+}
 // A stack of chosen files: those of the first file's folder (a stack lives in one folder; files from elsewhere are
 // named and left out). One file alone is not a stack: its folder opens instead.
 void MainWindow::openFiles(const QStringList& paths) {
@@ -1200,9 +1264,17 @@ void MainWindow::openFiles(const QStringList& paths) {
 // Open…: a window that lists the photos (a folder picker lists folders only, so a folder full of photos looked
 // empty and none could be chosen). One photo selected opens its whole folder; several are the stack.
 void MainWindow::chooseFolder() {
-    const QStringList fns = QFileDialog::getOpenFileNames(this, "Open a stack: select one photo to open its whole folder, or several to stack only those",
-                                                          folder_.isEmpty() ? recent_.value(0) : folder_, "Frames (*.tif *.tiff *.jpg *.jpeg);;All files (*)");
-    if (!fns.isEmpty()) openFiles(fns);
+    const QStringList all = QFileDialog::getOpenFileNames(this, "Open a stack: select one photo to open its whole folder, or several to stack only those",
+                                                          folder_.isEmpty() ? recent_.value(0) : folder_,
+                                                          QString("Frames and raw files (*.tif *.tiff *.jpg *.jpeg %1);;Frames only (*.tif *.tiff *.jpg *.jpeg);;All files (*)").arg(kRawPatterns));
+    if (all.isEmpty()) return;
+    QStringList fns;
+    for (const QString& f : all) if (!isRawFile(f)) fns << f;
+    if (fns.isEmpty()) {
+        QMessageBox::information(this, "xLamina", "These are raw files. xLamina stacks TIFF or JPEG frames: develop the raw files first (16-bit TIFF keeps the most), then open those.");
+        return;
+    }
+    openFiles(fns);
 }
 
 void MainWindow::openFolder(const QString& dir, const QStringList& only) {
@@ -1267,7 +1339,9 @@ void MainWindow::openFolder(const QString& dir, const QStringList& only) {
     result_.reset();
     cache_.clear();
     depthIdx_.clear();
+    depthHas_.clear();
     hoverFrame_ = -1;
+    lockedFrame_ = -1;
     if (twoUp_) twoUp_->setDepth(nullptr, depthStyle_);
     rebuildTabs();
     if (tabs_->count() == 0) { current_.clear(); depthBar_->hide(); view_->setCursorNote({}); view_->setPrecise(false); view_->setOverlay(QImage()); view_->setImage(QImage(), false); view_->setLabel({}); }
@@ -1490,6 +1564,11 @@ void MainWindow::applyViewScale() {
     const double um = fov_->value() * 1000.0;
     view_->setSceneWidthUm(um > 0 ? um * viewFovFrac_ : 0);
     liveView_->setSceneWidthUm(um > 0 ? um * outFovFrac_ : 0);
+    if (twoUp_) {   // the two-up viewer: the outputs' scale, for images of the outputs' size
+        QSize size;
+        if (result_ && result_->rc == 0 && !result_->result.names.empty()) size = outputImage(QString::fromStdString(result_->result.names.front())).size();
+        twoUp_->setScale(um > 0 && size.isValid() ? um * outFovFrac_ : 0, size);
+    }
 }
 
 // The live view's buffer for the run that is about to start: what this screen can show (its own pixels, so a 4K
@@ -1604,6 +1683,8 @@ void MainWindow::twoUp() {
     }
     for (auto it = compare_.begin(); it != compare_.end(); ++it) twoUp_->addImage(it.key(), it.value(), "comparison image");
     twoUp_->setDepth(developer_ && hasDepth() ? result_ : nullptr, depthStyle_);   // the depth map, with the developer controls
+    twoUp_->setScaleBar(appSettings().value("ui/scaleBar", true).toBool());
+    applyViewScale();
     twoUp_->show();
     twoUp_->raise();
     twoUp_->activateWindow();
@@ -1695,6 +1776,7 @@ void MainWindow::rebuildTabs() {
 
 void MainWindow::stepOutput(int delta) {
     if (tabs_->count() == 0) return;
+    if (lockedFrame_ >= 0 && depthLayers()) { stepDepthFrame(delta); return; }   // a held layer: PgUp / PgDn step the layers
     int i = tabs_->currentIndex() + delta;
     if (i < 0) i = tabs_->count() - 1;
     if (i >= tabs_->count()) i = 0;
@@ -1777,7 +1859,7 @@ void MainWindow::render() {
     if (jo.dust && !jo.align.paths.empty() && !batchRunning_) {
         const TiffInfo t = tiff_probe(jo.align.paths.front());
         if (t.ok() && ((int)t.width != jo.dust->w || (int)t.height != jo.dust->h)) {
-            const auto a = QMessageBox::question(this, "xLamina", QString("The dust map (%1) is %2 x %3; these frames are %4 x %5.\n\nIt cannot be used on them. Render without it?")
+            const auto a = QMessageBox::question(this, "xLamina", QString("The dust map (%1) is %2 x %3; these frames are %4 x %5.\n\nIt cannot be used on them: a dust map must be exactly the frames' size (develop it the same way as the frames, with the same crop).\n\nRender without it?")
                                                                       .arg(QString::fromStdString(jo.dust->name)).arg(jo.dust->w).arg(jo.dust->h).arg(t.width).arg(t.height),
                                                  QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Yes);
             if (a != QMessageBox::Yes) return;
@@ -1820,8 +1902,19 @@ void MainWindow::chooseDustMap() {
     if (worker_.running()) { statusBar()->showMessage("A render is running; set the dust map when it has finished.", 4000); return; }
     const QString start = !dustPath_.isEmpty() ? QFileInfo(dustPath_).absolutePath() : folder_.isEmpty() ? recent_.value(0) : folder_;
     const QString fn = QFileDialog::getOpenFileName(this, "Dust map: a photograph of an evenly lit white background", start,
-                                                    "Images (*.tif *.tiff *.jpg *.jpeg *.png);;All files (*)");
-    if (!fn.isEmpty()) setDustMap(fn, false);
+                                                    QString("Images and raw files (*.tif *.tiff *.jpg *.jpeg *.png %1);;All files (*)").arg(kRawPatterns));
+    if (fn.isEmpty()) return;
+    // a raw file is the whole sensor; frames developed from raw are usually cropped a little, and a map of another
+    // size cannot be used: said before the choice is made, not at the first render
+    if (isRawFile(fn)) {
+        const auto a = QMessageBox::question(this, "xLamina",
+            QString("%1 is a raw file.\n\nxLamina can read it if Windows can (the Raw Image Extension), but a raw file is the whole sensor, and frames "
+                    "developed from raw are usually a little smaller. A dust map must be exactly the frames' size.\n\n"
+                    "The sure way: develop this file the same way as the frames (same program, same crop) and choose that TIFF or JPEG.\n\nTry the raw file anyway?")
+                .arg(QFileInfo(fn).fileName()), QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+        if (a != QMessageBox::Yes) return;
+    }
+    setDustMap(fn, false);
 }
 
 // The dust map in use: read and searched for dust now (a second or two for a 45 Mpx frame), kept for every render
@@ -2332,7 +2425,9 @@ void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
     depthStyle_.lo = 0;   // the range belongs to a stack: the new one starts on all of its frames
     depthStyle_.hi = -1;
     depthIdx_.clear();
+    depthHas_.clear();
     hoverFrame_ = -1;
+    lockedFrame_ = -1;
     depthBar_->setFrames((int)data->align.paths.size());
     depthBar_->setStyle(depthStyle_);
     rebuildTabs();
@@ -2546,6 +2641,8 @@ void MainWindow::showOutput(int tab) {
     }
     view_->setLabel(compare_.contains(name) ? name + "  (comparison)" : name);
     statusBar()->showMessage(QString("%1 — %2 x %3%4").arg(name).arg(img.width()).arg(img.height()).arg(compare_.contains(name) ? " (comparison image)" : ""));
+    view_->setStepKeys(onDepth);   // the arrow keys step the depth map's layers there
+    if (onDepth && lockedFrame_ >= 0) lockDepthFrame(lockedFrame_);   // a held layer is still held on coming back to the map
 }
 
 // The middle button on a comparison tab closes it (the tab's tooltip has always said so).

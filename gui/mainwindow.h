@@ -157,6 +157,14 @@ private:
     void depthHover(int x, int y);
     void updateDepthHighlight();           // the frame under the cursor marked across what the view shows
     int hoverFrame_ = -1;                  // that frame, -1 = none
+    // a layer kept on show: a click on the depth map holds the frame there, the arrow keys and PgUp / PgDn step
+    // through the frames the map uses, Esc (or a click on the held layer) lets go
+    int lockedFrame_ = -1;
+    std::vector<char> depthHas_;           // frames the depth map uses at all, built with depthIdx_
+    int shownFrame() const { return lockedFrame_ >= 0 ? lockedFrame_ : hoverFrame_; }
+    void lockDepthFrame(int k);            // -1 = let go
+    void stepDepthFrame(int delta);
+    bool depthLayers() const;              // the depth tab of a finished render is on show
     bool highlightOn_ = false;
     std::vector<uint16_t> depthIdx_;       // the depth map rounded to frames, built when first needed
     DepthStyle depthStyle_;

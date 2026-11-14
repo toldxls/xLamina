@@ -40,6 +40,8 @@ public:
     void setPrecise(bool on);
     // a few lines drawn beside the cursor while it is over the view (the depth map's frame); empty = none
     void setCursorNote(const QString& text);
+    // the arrow keys step (stepKey) instead of scrolling the image, and Esc is reported: the depth map's layers
+    void setStepKeys(bool on) { stepKeys_ = on; }
     // retouch: the pane draws `img` (owned by the caller, same size as the image) instead of its pixmap; patch(r)
     // repaints r after the caller changed those pixels. mask (w*h, 0..255) is tinted when shown. null = back to the pixmap
     void setLive(const QImage* img, const std::vector<uint8_t>* mask);
@@ -60,9 +62,15 @@ public:
     void clearMeasures();
     void addMeasure(const QLineF& frac);  // a line by its ends as fractions of the image (what a drag makes)
     int measureCount() const { return (int)lines_.size(); }
+    const std::vector<QLineF>& measures() const { return lines_; }
+    void setMeasures(const std::vector<QLineF>& lines);   // another view's lines (the two-up viewer): no signal
 
 signals:
     void measured(QString length);        // a line was drawn: its length in words
+    void measuresChanged();               // a line was drawn, removed, or all were cleared (not by setMeasures)
+    void clicked(int x, int y);           // the left button pressed and released in one place (not a drag): image coordinates
+    void stepKey(int delta);              // an arrow key while setStepKeys(true): -1 = up or left, +1 = down or right
+    void escapePressed();
     void zoomChanged(double z);
     void viewChanged();                   // zoom, scroll or size: what the viewport shows has changed
     void hovered(int x, int y);           // image coordinates under the cursor; (-1, -1) when it leaves the view
@@ -98,6 +106,9 @@ private:
     QPoint lastPan_;
     QPointF cursor_;   // viewport position of the mouse, for the brush circle
     bool cursorIn_ = false;
+    bool stepKeys_ = false;
+    QPoint pressAt_;
+    bool pressed_ = false;
     double sceneUm_ = 0;
     bool scaleBar_ = true, measure_ = false, drawing_ = false;
     std::vector<QLineF> lines_;           // as fractions of the image's width and height, so they hold for any size of it

@@ -201,13 +201,21 @@ void ImageView::setMeasure(bool on) {
 
 void ImageView::addMeasure(const QLineF& frac) {
     lines_.push_back(frac);
+    emit measuresChanged();
     emit measured(lengthText(frac));
     viewport()->update();
 }
 
+void ImageView::setMeasures(const std::vector<QLineF>& lines) {
+    lines_ = lines;
+    viewport()->update();
+}
+
 void ImageView::clearMeasures() {
+    const bool any = !lines_.empty();
     lines_.clear();
     drawing_ = false;
+    if (any) emit measuresChanged();
     viewport()->update();
 }
 
@@ -426,6 +434,7 @@ void ImageView::mousePressEvent(QMouseEvent* e) {
             return;
         }
     }
+    if (e->button() == Qt::LeftButton && !brush_ && !measure_) { pressed_ = true; pressAt_ = e->pos(); }
     QGraphicsView::mousePressEvent(e);
 }
 
@@ -481,6 +490,7 @@ void ImageView::mouseReleaseEvent(QMouseEvent* e) {
             const QPointF a = fromFrac(cur_.p1()), b = fromFrac(cur_.p2());
             if (std::hypot(b.x() - a.x(), b.y() - a.y()) >= 3) {   // (a click is not a line)
                 lines_.push_back(cur_);
+                emit measuresChanged();
                 emit measured(lengthText(cur_));
             }
             viewport()->update();
@@ -490,6 +500,13 @@ void ImageView::mouseReleaseEvent(QMouseEvent* e) {
     }
     QGraphicsView::mouseReleaseEvent(e);
     if ((precise_ || measure_) && !brush_) viewport()->setCursor(Qt::CrossCursor);
+    if (pressed_ && e->button() == Qt::LeftButton) {
+        pressed_ = false;
+        if ((e->pos() - pressAt_).manhattanLength() < 4 && hasImage()) {
+            const QPointF p = mapToScene(e->pos());
+            emit clicked((int)std::floor(p.x()), (int)std::floor(p.y()));
+        }
+    }
 }
 
 void ImageView::mouseDoubleClickEvent(QMouseEvent* e) {
@@ -505,8 +522,14 @@ void ImageView::keyPressEvent(QKeyEvent* e) {
         viewport()->update();
         return;
     }
+    if (stepKeys_ && !brush_) {
+        if (e->key() == Qt::Key_Up || e->key() == Qt::Key_Left) { emit stepKey(-1); return; }
+        if (e->key() == Qt::Key_Down || e->key() == Qt::Key_Right) { emit stepKey(1); return; }
+        if (e->key() == Qt::Key_Escape) { emit escapePressed(); return; }
+    }
     if (measure_ && !lines_.empty() && (e->key() == Qt::Key_Backspace || e->key() == Qt::Key_Delete)) {
         lines_.pop_back();
+        emit measuresChanged();
         viewport()->update();
         return;
     }

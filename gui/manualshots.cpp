@@ -103,6 +103,16 @@ ManualShots::ManualShots(MainWindow& w, const QString& dir) : w_(w), dir_(dir) {
         [this, tab, dock] { w_.twoUp(); w_.twoUp_->resize(1500, 900); w_.twoUp_->select(0, "B"); w_.twoUp_->select(1, "C"); },
         [this, tab, dock] { for (ImageView* v : w_.twoUp_->findChildren<ImageView*>()) { v->fit(); break; } },
         [this, tab, dock] { grab(w_.twoUp_, "compare"); },
+        // measuring in the two-up viewer: a line drawn in the left pane shows in both
+        [this, tab, dock] {
+            for (QAction* a : w_.twoUp_->findChildren<QAction*>()) if (plain(a->text()) == "Measure") a->setChecked(true);
+            if (ImageView* v = w_.twoUp_->findChildren<ImageView*>().value(0)) v->addMeasure(QLineF(0.36, 0.32, 0.47, 0.41));
+        },
+        [this, tab, dock] {
+            grab(w_.twoUp_, "compare_measure");
+            for (ImageView* v : w_.twoUp_->findChildren<ImageView*>()) v->clearMeasures();
+            for (QAction* a : w_.twoUp_->findChildren<QAction*>()) if (plain(a->text()) == "Measure") a->setChecked(false);
+        },
         [this, tab, dock] {
             ImageView* v = w_.twoUp_->findChildren<ImageView*>().value(0);
             v->actualSize();
@@ -123,6 +133,9 @@ ManualShots::ManualShots(MainWindow& w, const QString& dir) : w_(w), dir_(dir) {
         [this, tab, dock] { grab(dock("render"), "render_panel_developer"); tab("depth"); },
         [this, tab, dock] { w_.probeHover(0.5, 0.6); },
         [this, tab, dock] { grab(&w_, "depth"); grab(w_.depthBar_, "depth_bar"); },
+        // a layer held (as a click on it holds it), then two steps on with the keys
+        [this, tab, dock] { w_.probeHover(-1, -1); w_.lockDepthFrame(24); w_.stepDepthFrame(1); w_.stepDepthFrame(1); },
+        [this, tab, dock] { grab(&w_, "depth_layer"); w_.lockDepthFrame(-1); },
         [this, tab, dock] {   // bands: the palette repeating every 6 frames, without the highlight
             DepthStyle st = w_.depthStyle_;
             st.palette = 4; st.bands = 6; st.highlight = false; st.popup = false;

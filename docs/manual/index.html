@@ -82,7 +82,7 @@ li.aside { list-style:none; color:var(--dim); }
 <p>xLamina stacks a folder of focus-bracketed frames into one image that is sharp throughout. It needs 64-bit Windows 10 or 11 and an NVIDIA graphics card (GeForce GTX 16 / RTX 20 series or newer) with a current driver.</p>
 <ol>
   <li><b>Open the frames</b>: <b>Open</b> in the toolbar (<kbd>Ctrl+O</kbd>) and browse to the photos. Select <b>one</b> photo to open its whole folder, or drop the folder onto the window.</li>
-  <li class="aside">To stack only some of a folder's files: select <b>several</b> in the same window (Shift or Ctrl + click), or drop those files onto the window. <b>File &gt; Open a whole folder…</b> (<kbd>Ctrl+Shift+O</kbd>) chooses a folder by its name instead.</li>
+  <li class="aside">To stack only some of a folder's files: select <b>several</b> in the same window (Shift or Ctrl + click), or drop those files onto the window. <b>File &gt; Open a whole folder…</b> (<kbd>Ctrl+Shift+O</kbd>) chooses a folder by its name instead. Raw files are listed too, so that a folder of them does not look empty, but they cannot be stacked: develop them to TIFF or JPEG first.</li>
   <li><b>Tick the outputs</b> you want in the Render panel. <b>B</b> and <b>C</b> are ticked by default.</li>
   <li>Press <b>Render</b> (<kbd>F5</kbd>). The viewer splits in two while it works and shows the stack being built.</li>
   <li><b>Look at the results</b>: the tabs under the viewer switch between the outputs. Wheel to zoom, drag to pan.</li>
@@ -179,7 +179,7 @@ li.aside { list-style:none; color:var(--dim); }
     <li><b>Live view</b>: the resolution of the two panes shown while rendering. See <a href="#rendering">While it renders</a>.</li>
     <li><b>Smoothing (C)</b>: how much of C's weak detail is taken from B instead. 0 = the raw selection (noisiest), 2 = the default, 3 = the same as Cn.</li>
     <li><b>Field of view</b>: the width of one frame in mm. Optional; it gives the geometry report its µm/px and the saved file name its field of view.</li>
-    <li><b>Output folder</b>: where the files are written, <code>&lt;folder&gt;_stacker</code> beside the frames unless you type another or choose one with the <b>…</b> button. The choice applies to this stack; the next folder opened starts at its own <code>_stacker</code> again.</li>
+    <li><b>Output folder</b>: where the files are written, <code>&lt;folder&gt;_stacker</code> beside the frames unless you type another or choose one with <b>Browse…</b>. The choice applies to this stack; the next folder opened starts at its own <code>_stacker</code> again.</li>
   </ol>
 </figure>
 <p><b>Render &gt; Reset settings to defaults</b> puts the panel back as installed. With <a href="#developer">Developer controls</a> on, the panel also shows Radius (C), Radius (B) and the Advanced group.</p>
@@ -190,7 +190,8 @@ li.aside { list-style:none; color:var(--dim); }
 <p>Dust on the sensor sits at the same pixels of every frame. Once the frames are aligned, each a little differently, one speck becomes a short dark trail in the stack. A dust map removes the specks from every frame before stacking.</p>
 <ol>
   <li><b>Take the dust map:</b> a photograph of an evenly lit white background through the same optics, at the frames' size. Out of focus is fine; it must be bright and even.</li>
-  <li><b>File &gt; Set dust map…</b>, or the <b>…</b> button of the Dust map row in the Render panel, and choose it. The dust map's window opens (below).</li>
+  <li><b>File &gt; Set dust map…</b>, or <b>Choose…</b> in the Dust map row of the Render panel, and choose it. The dust map's window opens (below).</li>
+  <li class="aside">The file window lists TIFF, JPEG, PNG and raw files. A raw file can be tried, but it is the whole sensor and frames developed from raw are usually cropped a little smaller: develop the dust photograph the same way as the frames and choose that file.</li>
   <li>Check what is marked, adjust if needed, and press <b>Use this dust map</b>.</li>
   <li>Render as usual. The map stays in use for every stack of that size, also after a restart, until you press <b>×</b> in the Dust map row. <b>Spots…</b> there opens the window again.</li>
 </ol>
@@ -270,6 +271,19 @@ li.aside { list-style:none; color:var(--dim); }
   <li><kbd>Backspace</kbd> removes the last line; View &gt; Clear measurements removes them all. Opening another folder clears them too.</li>
   <li>Lengths are in the plane of the reference frame. A stack whose scale changes with depth (see the geometry report's µm/px range) is off by that much at its ends.</li>
   <li>The lines and the bar are drawn on the screen only: they are not saved into the output files.</li>
+</ul>
+<figure class="shot" data-img="compare_measure" data-cursor="Measure" data-marks="Measure;Clear lines;@0.415,0.44;@0.80,0.44">
+  <ol class="legend">
+    <li><b>Measure</b> (<kbd>M</kbd>) in the Compare window works the same way, on either pane.</li>
+    <li><b>Clear lines</b> removes them; it is shown while Measure is on.</li>
+    <li>A line drawn in one pane …</li>
+    <li>… is shown at the same place in the other, so the same feature can be read in both images.</li>
+  </ol>
+  <figcaption>One line, drawn on B, shown on B and C.</figcaption>
+</figure>
+<ul>
+  <li>In the Compare window the scale applies to images of the size of this render's outputs: its B and C, the depth map, a sweep's variants. An image of another size (another program's stack, say) has no scale bar and its lengths are in pixels.</li>
+  <li>Measure and Retouch do not run together: turning one on leaves the other.</li>
 </ul>
 </section>
 
@@ -472,10 +486,25 @@ li.aside { list-style:none; color:var(--dim); }
     <li><b>Brightness</b>: shifts the frames along the palette.</li>
     <li><b>Contrast</b>: stretches the palette about its middle (up to 4 x), so a few frames' difference takes many colours.</li>
     <li><b>Reset</b>: brightness and contrast back to the middle.</li>
-    <li><b>Frame popup</b>: checked = the note beside the cursor. Unchecked = the status bar only.</li>
+    <li><b>Frame popup</b>: checked = the note beside the cursor. Unchecked = the status bar only. <b>Within</b>, beside it, sets how far around the cursor the note's second line looks for frames, in image pixels: 1 px for the cursor's own neighbours, more for a wider patch. "auto" is about 8 pixels of the screen, so it widens as you zoom out.</li>
     <li><b>Highlight frame</b>: checked = the frame under the cursor is marked across the image.</li>
   </ol>
 </figure>
+<h3>Holding a layer and stepping through the layers</h3>
+<figure class="shot" data-img="depth_layer" data-marks="@0.27,0.13;view;status bar">
+  <ol class="legend">
+    <li>The label names the layer that is held: its number in the stack and its file.</li>
+    <li>Its pixels stay marked wherever the cursor goes, also off the image.</li>
+    <li>The status bar gives its share of the image.</li>
+  </ol>
+  <figcaption>Frame 27 of 53 held.</figcaption>
+</figure>
+<ul>
+  <li><b>Click</b> on the depth map: the layer under the cursor is held. The note beside the cursor still reads the frame under the cursor.</li>
+  <li><b>Arrow keys</b> (click the image first) or <kbd>PgUp</kbd> / <kbd>PgDn</kbd>: the next layer down or up the stack. Frames the map does not use at all are passed over. With nothing held, the arrow keys start from the frame under the cursor.</li>
+  <li><kbd>Esc</kbd>, or a click on the held layer: let go; the highlight follows the cursor again.</li>
+  <li>While a layer is held, <kbd>PgUp</kbd> / <kbd>PgDn</kbd> step layers instead of tabs. Dragging still pans, the wheel still zooms.</li>
+</ul>
 <figure class="shot mid" data-img="depth_bands">
   <figcaption>Turbo with bands of 6 frames: each colour cycle is six frames of depth.</figcaption>
 </figure>

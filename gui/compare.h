@@ -39,6 +39,10 @@ public:
     // the cursor in the status bar and the overlay. null = no depth map (the toolbar hides)
     void setDepth(std::shared_ptr<JobResultData> r, const DepthStyle& st);
     void setDepthStyle(const DepthStyle& st);   // from the main window's controls: no signal back
+    // the scale for measuring and the scale bar: an image of `size` pixels is `um` micrometres wide (the render's
+    // outputs, from Field of view). Images of another size have no scale: their lengths are in pixels. um 0 = none
+    void setScale(double um, QSize size);
+    void setScaleBar(bool on);
 
 signals:
     void depthStyleChanged(DepthStyle st);      // the Depth toolbar changed it
@@ -128,6 +132,11 @@ private:
     QComboBox* diffLevel_ = nullptr;     // the difference (in % of full scale) from which a pixel is highlighted
     int overlayFor_[2] = {-1, -1};       // the entries the current overlay was computed from
     QAction* flipAct_ = nullptr;
+    QAction* measureAct_ = nullptr;
+    QAction* clearMeasuresAct_ = nullptr;
+    double scaleUm_ = 0;
+    QSize scaleSize_;
+    void applyScale(int pane);
     QAction* retouchAct_ = nullptr;
     QAction* maskAct_ = nullptr;
     QAction* undoAct_ = nullptr;
