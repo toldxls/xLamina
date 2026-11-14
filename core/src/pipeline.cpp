@@ -796,7 +796,10 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         if (S.used) cudaStreamWaitEvent(f.stream, S.done, 0);   // the fold stream must be done with this slot
         S.fp.guard(f.stream);                                    // and the previous view's kernel with d_warp
         convert_to_rgb_f32(f.d_pixels(), *f.info, S.d_rgb, nullptr, f.stream);
-        D.dust.apply(S.d_rgb, f.stream);   // the frame without its dust, before anything else sees it
+        // this pass looks for detail (the pyramid's selection, the focus measure): the specks are filled in smoothly, so
+        // that they hold none. Brightened, they carried the gain's own noise, the same in every frame, and the pyramid
+        // drew it as a pale grainy trail where the dark one had been. The composition (pass 3) takes the brightened pixels.
+        D.dust.apply_fill(S.d_rgb, f.stream);
         int k = ks[f.k];
         load_aligned(S.d_rgb, g, T[k], S.d_scratch, S.d_warp, false, f.stream, D.rc.at(k));
         fold_measure(S.d_warp, fp, S.sc, f.stream);

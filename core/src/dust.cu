@@ -48,9 +48,9 @@ void smooth_weighted(std::vector<float>& v, std::vector<float>& wt, int w, int h
 }
 }  // namespace
 
-bool build_dust_fix(const std::filesystem::path& map, DustFix& out, std::string* err) {
+bool load_dust_map(const std::filesystem::path& map, DustMapData& M, std::string* err) {
     auto fail = [&](const std::string& why) { if (err) *err = why; return false; };
-    out = DustFix{};
+    M = DustMapData{};
     std::vector<uint8_t> rgb;
     int w = 0, h = 0;
     std::string why;
@@ -88,8 +88,8 @@ bool build_dust_fix(const std::filesystem::path& map, DustFix& out, std::string*
     {
         float lo = 1e9f, hi = 0;
         for (float v : bg) { lo = std::min(lo, v); hi = std::max(hi, v); }
-        out.vignette = hi > 0 ? 1.f - lo / hi : 0.f;
-        if (out.vignette > 0.6f) return fail("this image is not evenly lit enough for a dust map (its background varies by more than half)");
+        M.vignette = hi > 0 ? 1.f - lo / hi : 0.f;
+        if (M.vignette > 0.6f) return fail("this image is not evenly lit enough for a dust map (its background varies by more than half)");
     }
     auto bg_at = [&](int x, int y) {   // bilinear, the small grid's pixel centres at (i + 0.5) * ds
         float fx = std::min(std::max((x + 0.5f) / ds - 0.5f, 0.f), (float)(sw - 1)), fy = std::min(std::max((y + 0.5f) / ds - 0.5f, 0.f), (float)(sh - 1));
@@ -107,15 +107,35 @@ bool build_dust_fix(const std::filesystem::path& map, DustFix& out, std::string*
             ratio[(size_t)y * w + x] = (s / 9.f) / std::max(bg_at(x, y), 1e-3f);
         }
     lum.clear(); lum.shrink_to_fit();
+    M.w = w; M.h = h;
+    M.ratio = std::move(ratio);
+    M.name = map.filename().string();
+    return true;
+}
 
-    // dust: 3 % darker than the background or more. Each such pixel takes its surroundings with it (the shadow's soft
-    // edge), out to 9 px; inside that, a pixel is corrected when it lost more than half a percent.
-    const float seed = 0.97f;
-    const int grow = 9;   // the shadow's soft edge, and the few pixels a speck sits away from where the map shows it
+// The dust in a map that has been read: `darker` is how much darker than its surroundings a pixel must be to count
+// (0.03 = 3 %; lower finds fainter specks, and below about 1 % the map's own noise and 8-bit steps as well),
+// `margin` how far around each such pixel the correction reaches, in pixels.
+bool detect_dust(const DustMapData& M, float darker, int margin, DustFix& out, std::string* err) {
+    auto fail = [&](const std::string& why) { if (err) *err = why; return false; };
+    out = DustFix{};
+    const int w = M.w, h = M.h;
+    const size_t n = (size_t)w * h;
+    if (n == 0 || M.ratio.size() != n) return fail("no dust map has been read");
+    const std::vector<float>& ratio = M.ratio;
+    out.vignette = M.vignette;
+    out.darker = std::min(std::max(darker, 0.005f), 0.5f);
+    out.margin = std::min(std::max(margin, 1), 40);
+
+    // dust: darker than the background by `darker` or more. Each such pixel takes its surroundings with it (the
+    // shadow's soft edge, and the few pixels a speck sits away from where the map shows it), out to `margin`; inside
+    // that, a pixel is corrected when it lost more than half a percent.
+    const float seed = 1.f - out.darker;
+    const int grow = out.margin;
     std::vector<uint8_t> mask(n, 0);   // 1 = dust seed, 2 = its surroundings
     size_t seeds = 0;
     for (size_t i = 0; i < n; ++i) if (ratio[i] < seed) { mask[i] = 1; ++seeds; }
-    if (seeds > n / 50) return fail("this image does not look like an even white background: " + std::to_string(100 * seeds / n) + " % of it is darker than its surroundings");
+    if (seeds > n / 50) return fail(std::to_string(100 * seeds / n) + " % of the image is that much darker than its surroundings: too much for dust (a less sensitive setting, or a more even white background)");
     for (int y = 0; y < h; ++y)
         for (int x = 0; x < w; ++x) {
             if (mask[(size_t)y * w + x] != 1) continue;
@@ -175,10 +195,15 @@ bool build_dust_fix(const std::filesystem::path& map, DustFix& out, std::string*
             for (int k = 0; k < 8; ++k) { out.px_src.push_back(src[k]); out.px_w.push_back(wgt[k] / sum); }
         }
     out.w = w; out.h = h;
-    out.name = map.filename().string();
+    out.name = M.name;
     set_dust_correction(out, out.map_ratio);   // the map's own depths: a first guess, replaced by the frames' (calibrate_dust)
     out.map_deepest = out.deepest;
     return true;
+}
+
+bool build_dust_fix(const std::filesystem::path& map, DustFix& out, std::string* err, float darker, int margin) {
+    DustMapData M;
+    return load_dust_map(map, M, err) && detect_dust(M, darker, margin, out, err);
 }
 
 // The correction from the share of light each mask pixel keeps: a gain where the light can be scaled back, a fill
@@ -186,11 +211,17 @@ bool build_dust_fix(const std::filesystem::path& map, DustFix& out, std::string*
 void set_dust_correction(DustFix& fix, const std::vector<float>& kept) {
     const float edge = 0.995f, heal_under = 0.40f;
     fix.idx.clear(); fix.gain.clear(); fix.heal.clear(); fix.heal_src.clear(); fix.heal_w.clear();
+    fix.fill.clear(); fix.fill_src.clear(); fix.fill_w.clear();
+    const float fill_under = 0.98f;
     fix.deepest = 1.f;
     for (size_t i = 0; i < fix.px.size(); ++i) {
         const float a = kept[i];
         if (!(a == a)) continue;
         fix.deepest = std::min(fix.deepest, a);
+        if (a < fill_under) {
+            fix.fill.push_back(fix.px[i]);
+            for (int k = 0; k < 8; ++k) { fix.fill_src.push_back(fix.px_src[i * 8 + k]); fix.fill_w.push_back(fix.px_w[i * 8 + k]); }
+        }
         if (a < heal_under) {
             fix.heal.push_back(fix.px[i]);
             for (int k = 0; k < 8; ++k) { fix.heal_src.push_back(fix.px_src[i * 8 + k]); fix.heal_w.push_back(fix.px_w[i * 8 + k]); }
@@ -262,18 +293,30 @@ void DevDust::upload(const DustFix* fix, int w, int h) {
     heal = (uint32_t*)up(fix->heal.data(), fix->heal.size() * sizeof(uint32_t));
     src = (uint32_t*)up(fix->heal_src.data(), fix->heal_src.size() * sizeof(uint32_t));
     hw = (float*)up(fix->heal_w.data(), fix->heal_w.size() * sizeof(float));
+    nf = (int)fix->fill.size();
+    fill = (uint32_t*)up(fix->fill.data(), fix->fill.size() * sizeof(uint32_t));
+    fsrc = (uint32_t*)up(fix->fill_src.data(), fix->fill_src.size() * sizeof(uint32_t));
+    fw = (float*)up(fix->fill_w.data(), fix->fill_w.size() * sizeof(float));
 }
 
 void DevDust::free() {
-    cudaFree(idx); cudaFree(gain); cudaFree(heal); cudaFree(src); cudaFree(hw);
-    idx = heal = src = nullptr;
-    gain = hw = nullptr;
-    n = nh = 0;
+    cudaFree(idx); cudaFree(gain); cudaFree(heal); cudaFree(src); cudaFree(hw); cudaFree(fill); cudaFree(fsrc); cudaFree(fw);
+    idx = heal = src = fill = fsrc = nullptr;
+    gain = hw = fw = nullptr;
+    n = nh = nf = 0;
 }
 
 void DevDust::apply(float* d_rgb, cudaStream_t s) const {
     if (n > 0) k_dust_gain<<<(n + 255) / 256, 256, 0, s>>>(d_rgb, idx, gain, n);
     if (nh > 0) k_dust_heal<<<(nh + 255) / 256, 256, 0, s>>>(d_rgb, heal, src, hw, nh);
+}
+
+// The pixels outside the fill list that still lose a little light take their gain; the fill list's are replaced by
+// their surroundings (clean pixels, which nothing here writes: the two kernels need no order).
+void DevDust::apply_fill(float* d_rgb, cudaStream_t s) const {
+    if (n > 0) k_dust_gain<<<(n + 255) / 256, 256, 0, s>>>(d_rgb, idx, gain, n);
+    if (nf > 0) k_dust_heal<<<(nf + 255) / 256, 256, 0, s>>>(d_rgb, fill, fsrc, fw, nf);
+    else if (nh > 0) k_dust_heal<<<(nh + 255) / 256, 256, 0, s>>>(d_rgb, heal, src, hw, nh);
 }
 
 // each mask pixel's luma over the luma of its surroundings (the 8 clean pixels around its speck), for calibrate_dust

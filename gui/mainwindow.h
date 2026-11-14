@@ -115,6 +115,9 @@ private:
     QString dustPath_;
     QLabel* dustLabel_ = nullptr;              // the Render panel's Dust map row
     QToolButton* dustClear_ = nullptr;
+    QToolButton* dustAdjust_ = nullptr;        // opens the dust map's window on the map in use
+    float dustDarker_ = 0.03f;                 // the dust search's settings (DustDialog): darker than the surroundings by this share
+    int dustMargin_ = 9;                       // ... and the correction's reach around a dust pixel, px
     void buildMenus();
     void buildUi();
     void loadSettings();

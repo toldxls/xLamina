@@ -30,6 +30,11 @@ struct DustFix {
     std::vector<uint32_t> heal;           // pixels filled from their surroundings
     std::vector<uint32_t> heal_src;       // 8 source pixels per healed pixel (the nearest clean pixel in 8 directions)
     std::vector<float> heal_w;            // ... and their weights (1 / distance, summing to 1)
+    // every pixel a speck darkens by 2 % or more, with its 8 sources: filled in for the pass that looks for detail
+    // (DevDust::apply_fill). A brightened pixel carries the noise of the gain's own estimate, the same in every frame,
+    // which a detail-selecting method (the pyramid) takes for detail and draws as a pale grainy trail.
+    std::vector<uint32_t> fill, fill_src;
+    std::vector<float> fill_w;
     // the mask itself, whatever the correction made of it: every pixel in or beside a dust shadow, the 8 clean pixels
     // its surroundings are read from (with weights summing to 1), and the share of light the map says it keeps
     std::vector<uint32_t> px, px_src;
@@ -42,12 +47,25 @@ struct DustFix {
     float residual = 0.f;                 // the largest deviation left in the map itself after its own correction
     float vignette = 0.f;                 // the background's fall-off, corner to brightest (not corrected; for the record)
     std::string name;                     // the file's name
+    float darker = 0.03f;                 // the settings it was found with (detect_dust)
+    int margin = 9;
     bool empty() const { return idx.empty() && heal.empty(); }
 };
 
 // Reads the map (any image Windows or the TIFF reader decodes) and finds the dust. False with `err` set when the
 // file cannot be read or is not an even bright field (too dark, or more of it "dust" than a dust map has).
-bool build_dust_fix(const std::filesystem::path& map, DustFix& out, std::string* err);
+bool build_dust_fix(const std::filesystem::path& map, DustFix& out, std::string* err, float darker = 0.03f, int margin = 9);
+
+// The two halves of that, for a front end that lets the user see what a setting finds: the map read once (each
+// pixel's share of its smooth background's light), then the dust in it for a sensitivity and a margin.
+struct DustMapData {
+    int w = 0, h = 0;
+    std::vector<float> ratio;             // w * h: 1 = as bright as its surroundings, 0.9 = 10 % darker
+    float vignette = 0.f;
+    std::string name;
+};
+bool load_dust_map(const std::filesystem::path& map, DustMapData& M, std::string* err);
+bool detect_dust(const DustMapData& M, float darker, int margin, DustFix& out, std::string* err);
 
 // the correction from the share of light each mask pixel keeps (fix.px's order)
 void set_dust_correction(DustFix& fix, const std::vector<float>& kept);
@@ -69,12 +87,13 @@ struct DevDustProbe {
 
 // the correction on one GPU: uploaded once per pass, applied to each frame (float RGB, interleaved) on its stream
 struct DevDust {
-    uint32_t *idx = nullptr, *heal = nullptr, *src = nullptr;
-    float *gain = nullptr, *hw = nullptr;
-    int n = 0, nh = 0;
+    uint32_t *idx = nullptr, *heal = nullptr, *src = nullptr, *fill = nullptr, *fsrc = nullptr;
+    float *gain = nullptr, *hw = nullptr, *fw = nullptr;
+    int n = 0, nh = 0, nf = 0;
     void upload(const DustFix* fix, int w, int h);   // nothing when fix is null, empty, or of another size
     void free();
-    void apply(float* d_rgb, cudaStream_t s) const;
+    void apply(float* d_rgb, cudaStream_t s) const;        // the specks brightened (filled where too dark): the frame as a picture
+    void apply_fill(float* d_rgb, cudaStream_t s) const;   // the specks filled in smoothly: the frame as a source of detail
 };
 
 }  // namespace stackcore

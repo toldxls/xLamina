@@ -6,6 +6,7 @@ qt_add_executable(xlamina WIN32
     compare.cpp compare.h
     depthview.cpp depthview.h
     diaglog.cpp diaglog.h
+    dustdialog.cpp dustdialog.h
     manualshots.cpp manualshots.h
     sweepdialog.cpp sweepdialog.h
     worker.cpp worker.h

@@ -46,6 +46,7 @@
 #include <QStandardPaths>
 
 #include "diaglog.h"
+#include "dustdialog.h"
 #include "stackcore/tiff.h"
 #include "version.h"
 
@@ -663,7 +664,13 @@ void MainWindow::buildUi() {
         dustClear_->setEnabled(false);
         connect(dustClear_, &QToolButton::clicked, this, [this] { setDustMap({}, false); });
         rl->addWidget(dustLabel_, 1);
+        dustAdjust_ = new QToolButton;
+        dustAdjust_->setText("Spots…");
+        dustAdjust_->setToolTip("See what is found in the dust map, and set how sensitive the search is.");
+        dustAdjust_->setEnabled(false);
+        connect(dustAdjust_, &QToolButton::clicked, this, [this] { if (!dustPath_.isEmpty() && !worker_.running()) setDustMap(dustPath_, false); });
         rl->addWidget(choose);
+        rl->addWidget(dustAdjust_);
         rl->addWidget(dustClear_);
         fl->addRow("Dust map", row);
     }
@@ -871,8 +878,11 @@ void MainWindow::loadSettings() {
     fov_->setValue(s.value("fov", 0.0).toDouble());
     dustPath_ = s.value("dustMap").toString();   // read at the first render (a second or two), not at every start
     if (!dustPath_.isEmpty() && !QFileInfo::exists(dustPath_)) dustPath_.clear();
+    dustDarker_ = std::clamp((float)s.value("dustDarker", 0.03).toDouble(), 0.01f, 0.10f);
+    dustMargin_ = std::clamp(s.value("dustMargin", 9).toInt(), 2, 30);
     dustLabel_->setText(dustPath_.isEmpty() ? QString("none") : QFileInfo(dustPath_).fileName());
     dustClear_->setEnabled(!dustPath_.isEmpty());
+    dustAdjust_->setEnabled(!dustPath_.isEmpty());
     s.endGroup();
     s.beginGroup("advanced");
     advanced_->setChecked(s.value("enabled", false).toBool());
@@ -919,6 +929,8 @@ void MainWindow::saveSettings() {
     s.setValue("bradius", bradius_->value());
     s.setValue("fov", fov_->value());
     s.setValue("dustMap", dustPath_);
+    s.setValue("dustDarker", (double)dustDarker_);
+    s.setValue("dustMargin", dustMargin_);
     s.endGroup();
     s.beginGroup("advanced");
     s.setValue("enabled", advanced_->isChecked());
@@ -1737,6 +1749,7 @@ void MainWindow::chooseDustMap() {
 bool MainWindow::setDustMap(const QString& path, bool quiet) {
     auto show = [this] {
         dustClear_->setEnabled(!dustPath_.isEmpty());
+        dustAdjust_->setEnabled(!dustPath_.isEmpty());
         if (dustPath_.isEmpty()) { dustLabel_->setText("none"); return; }
         const QString name = QFileInfo(dustPath_).fileName();
         dustLabel_->setText(dust_ ? QString("%1 (%2 spot%3)").arg(name).arg(dust_->spots).arg(dust_->spots == 1 ? "" : "s") : name);
@@ -1748,35 +1761,37 @@ bool MainWindow::setDustMap(const QString& path, bool quiet) {
         if (!quiet) statusBar()->showMessage("The dust map is no longer used.", 5000);
         return true;
     }
-    QApplication::setOverrideCursor(Qt::WaitCursor);
-    auto fix = std::make_shared<stackcore::DustFix>();
-    std::string why;
-    const bool ok = stackcore::build_dust_fix(path.toStdWString(), *fix, &why);
-    QApplication::restoreOverrideCursor();
-    if (!ok) {
-        DiagLog::write("dust map refused: " + QString::fromStdString(why));
-        if (!quiet) QMessageBox::warning(this, "xLamina", QString("%1\n\n%2").arg(QDir::toNativeSeparators(path), QString::fromStdString(why)));
-        show();
-        return false;
+    std::shared_ptr<const stackcore::DustFix> fix;
+    if (quiet) {   // the map named in the settings, with the settings it was accepted with
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        auto f = std::make_shared<stackcore::DustFix>();
+        std::string why;
+        const bool ok = stackcore::build_dust_fix(path.toStdWString(), *f, &why, dustDarker_, dustMargin_);
+        QApplication::restoreOverrideCursor();
+        if (!ok) { DiagLog::write("dust map refused: " + QString::fromStdString(why)); show(); return false; }
+        fix = f;
+    } else {       // the window that shows what is found, with its two settings
+        DustDialog dlg(path, dustDarker_, dustMargin_, this);
+        if (!dlg.loaded()) {
+            DiagLog::write("dust map refused: " + dlg.error());
+            QMessageBox::warning(this, "xLamina", QString("%1\n\n%2").arg(QDir::toNativeSeparators(path), dlg.error()));
+            show();
+            return false;
+        }
+        if (dlg.exec() != QDialog::Accepted || !dlg.fix()) { show(); return false; }
+        fix = dlg.fix();
+        dustDarker_ = dlg.darker();
+        dustMargin_ = dlg.margin();
     }
     dust_ = fix;
     dustPath_ = path;
     show();
-    DiagLog::write(QString("dust map %1: %2 x %3, %4 spots, %5 pixels in and around them").arg(QFileInfo(path).fileName()).arg(fix->w).arg(fix->h).arg(fix->spots).arg(fix->px.size()));
-    if (!quiet) {
-        if (fix->spots == 0)
-            QMessageBox::information(this, "Dust map", QString("%1\n\nNo dust was found in it (nothing 3 % darker than its surroundings), so it changes nothing.").arg(QFileInfo(path).fileName()));
-        else
-            QMessageBox::information(this, "Dust map",
-                                     QString("%1: %2 x %3\n\n%4 dust spot%5 found (%6 pixels in and around them; the darkest keeps %7 % of the light in this image).\n\n"
-                                             "From now on they are taken out of every frame of that size before stacking. How dark each one is in the frames "
-                                             "is measured on the frames of each render. The Dust map row of the Render panel shows it; × there stops using it.")
-                                         .arg(QFileInfo(path).fileName()).arg(fix->w).arg(fix->h).arg(fix->spots).arg(fix->spots == 1 ? "" : "s").arg(fix->px.size())
-                                         .arg(100.0 * fix->map_deepest, 0, 'f', 0));
-    }
+    DiagLog::write(QString("dust map %1: %2 x %3, %4 spots, %5 pixels in and around them (darker by %6 %, margin %7 px)")
+                       .arg(QFileInfo(path).fileName()).arg(fix->w).arg(fix->h).arg(fix->spots).arg(fix->px.size()).arg(100.0 * fix->darker, 0, 'f', 1).arg(fix->margin));
+    if (!quiet) statusBar()->showMessage(QString("Dust map set: %1 spot%2. They are taken out of every frame of %3 x %4 from now on.")
+                                             .arg(fix->spots).arg(fix->spots == 1 ? "" : "s").arg(fix->w).arg(fix->h), 8000);
     return true;
 }
-
 // A run's block in the session's log (diaglog.h): what is rendered and under which settings, so a log sent by
 // someone else says what their render was. The folder by its name only.
 void MainWindow::logRunStart(const QString& what, const stackcore::JobOptions& jo) {

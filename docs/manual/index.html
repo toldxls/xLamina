@@ -190,9 +190,23 @@ li.aside { list-style:none; color:var(--dim); }
 <p>Dust on the sensor sits at the same pixels of every frame. Once the frames are aligned, each a little differently, one speck becomes a short dark trail in the stack. A dust map removes the specks from every frame before stacking.</p>
 <ol>
   <li><b>Take the dust map:</b> a photograph of an evenly lit white background through the same optics, at the frames' size. Out of focus is fine; it must be bright and even.</li>
-  <li><b>File &gt; Set dust map…</b>, or the <b>…</b> button of the Dust map row in the Render panel, and choose it. xLamina says how many dust spots it found.</li>
-  <li>Render as usual. The map stays in use for every stack of that size, also after a restart, until you press <b>×</b> in the Dust map row.</li>
+  <li><b>File &gt; Set dust map…</b>, or the <b>…</b> button of the Dust map row in the Render panel, and choose it. The dust map's window opens (below).</li>
+  <li>Check what is marked, adjust if needed, and press <b>Use this dust map</b>.</li>
+  <li>Render as usual. The map stays in use for every stack of that size, also after a restart, until you press <b>×</b> in the Dust map row. <b>Spots…</b> there opens the window again.</li>
 </ol>
+<figure class="shot" data-img="dust_map" data-cursor="slider 1" data-marks="view;slider 1;@0.565,0.935;@0.74,0.935;Use this dust map">
+  <ol class="legend">
+    <li><b>The map</b>, with its contrast raised so that faint specks show. <b>Red</b> is what would be corrected in every frame; each dust spot has a <b>yellow ring</b> so it can be found with the whole map in view. Wheel to zoom, drag to pan.</li>
+    <li><b>Sensitivity</b>: how much darker than its surroundings a pixel must be to count as dust, 1 % to 10 %. To the right = more sensitive. 3 % is the default.</li>
+    <li><b>Margin</b>: how far around each dust pixel the correction reaches (9 px by default). Raise it for a map taken at another time than the stack, when specks may have shifted a little.</li>
+    <li>How many spots the settings find, and how much of the image they cover.</li>
+    <li><b>Use this dust map</b> keeps the map and the two settings.</li>
+  </ol>
+  <figcaption>The dust map's window at the default sensitivity: 20 spots.</figcaption>
+</figure>
+<figure class="shot" data-img="dust_map_sensitive">
+  <figcaption>The same map at 1.5 %: 50 spots. Dust is stronger in real frames than in a white frame, so a faint speck here can still leave a trail. Raise the sensitivity until the faint specks are caught; when rings, bands or scattered dots light up, it has reached the image's own noise, so go back a step.</figcaption>
+</figure>
 <ul>
   <li>The map shows <i>where</i> the dust is. <i>How dark</i> each speck is, is measured on the frames of each render, so the map does not have to match the frames' exposure.</li>
   <li>Only the pixels in and around a speck are changed: they are brightened by what the speck took away, or filled in from their surroundings where almost no light is left. Everything else is untouched.</li>

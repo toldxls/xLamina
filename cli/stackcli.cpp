@@ -59,7 +59,7 @@ static int usage() {
             "usage:\n"
             "  stackcli run DIR [DIR2 ...] [--out DIR] [--prefix IMG_] [--scale 1|0.5] [--outputs B,C,Cn] [--ref middle] [--lock-scale 1]\n"
             "               [--fov-mm X | --um-per-px X] [--gpus 0,1] [--streams 2] [--align-scale 0.25] [--baselines 1,2,4,8] [--pair-threads 3]\n"
-            "               [--smoothing 0] [--c-radius 0] [--dust-map FILE]   align the frames in DIR (TIFF, JPEG; all of them, or those starting with --prefix) and fuse them:\n"
+            "               [--smoothing 0] [--c-radius 0] [--dust-map FILE [--dust-darker 3] [--dust-margin 9]]   align the frames in DIR (TIFF, JPEG; all of them, or those starting with --prefix) and fuse them:\n"
             "               report.json + 16-bit TIFFs in DIR_stacker (or --out). Outputs: A B B0 C CB Cn CBn Cx Cd Cg Cg2 H\n"
             "               Several DIRs are rendered one after the other (a batch): each into its own DIR_stacker, or --out\\<folder name>\n"
             "               Cx: CBn with the finer level's support in place of the dominance test (against the glow of defocused highlights)\n"
@@ -673,20 +673,29 @@ static int cmd_run(int argc, char** argv) {
     if (dirs.empty()) return usage();
     JobOptions jo;
     jo.stack.po.opt.streams_per_gpu = 2;
+    std::string dust_map;
+    float dust_darker = 0.03f;
+    int dust_margin = 9;
     for (; i + 1 < argc; i += 2) {
         std::string a = argv[i], v = argv[i + 1];
         if (a == "--out") jo.out = v;
-        else if (a == "--dust-map") {   // a photograph of a white background: its dust is taken out of every frame (dust.h)
-            auto fix = std::make_shared<DustFix>();
-            std::string why;
-            if (!build_dust_fix(v, *fix, &why)) { fprintf(stderr, "%s\n", why.c_str()); return 1; }
-            jo.dust = fix;
-        }
+        // a photograph of a white background: its dust is taken out of every frame (dust.h). --dust-darker P: a pixel of
+        // the map counts as dust when it is P % darker than its surroundings (3); --dust-margin N: the correction's reach
+        // around it in px (9)
+        else if (a == "--dust-map") dust_map = v;
+        else if (a == "--dust-darker") dust_darker = (float)(atof(v.c_str()) / 100.0);
+        else if (a == "--dust-margin") dust_margin = atoi(v.c_str());
         else if (parse_align_option(a, v, jo.align)) continue;
         else if (parse_stack_option(a, v, jo.stack)) continue;
         else return usage();
     }
     if (i < argc) { fprintf(stderr, "option %s has no value\n", argv[i]); return usage(); }
+    if (!dust_map.empty()) {
+        auto fix = std::make_shared<DustFix>();
+        std::string why;
+        if (!build_dust_fix(dust_map, *fix, &why, dust_darker, dust_margin)) { fprintf(stderr, "%s\n", why.c_str()); return 1; }
+        jo.dust = fix;
+    }
     // developer aid: STACKER_BALLAST_GB=N holds N GB of every GPU for the length of the run, to see how a job goes on
     // a card with that much less memory (a 12 GB card with 6 held stands in for a 6 GB one)
     struct Ballast { std::vector<std::pair<int, void*>> held; ~Ballast() { for (auto& h : held) { cudaSetDevice(h.first); cudaFree(h.second); } } } ballast;

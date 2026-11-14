@@ -7,6 +7,7 @@
 #include <QMouseEvent>
 #include <QStatusBar>
 #include <QFile>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -130,6 +131,25 @@ ManualShots::ManualShots(MainWindow& w, const QString& dir) : w_(w), dir_(dir) {
         [this, tab, dock] { w_.twoUp(); w_.twoUp_->select(0, "B"); w_.twoUp_->select(1, "depth"); },
         [this, tab, dock] { if (QSlider* s = w_.twoUp_->findChildren<QSlider*>().value(2)) s->setValue(50); },
         [this, tab, dock] { grab(w_.twoUp_, "compare_depth"); },
+        // the dust map's window, when the run names a dust map (XLAMINA_MANUAL_DUST: any white-background frame): as it
+        // opens, and with the sensitivity raised to 1.5 %. Dismissed without setting the map.
+        [this, tab, dock] {
+            const QString map = qEnvironmentVariable("XLAMINA_MANUAL_DUST");
+            if (map.isEmpty() || !QFileInfo::exists(map)) return;
+            QTimer::singleShot(1200, this, [this] {
+                QWidget* d = QApplication::activeModalWidget();
+                if (!d) return;
+                grab(d, "dust_map");
+                if (QSlider* s = d->findChild<QSlider*>()) s->setValue(3);
+                QTimer::singleShot(2500, this, [this] {
+                    QWidget* d2 = QApplication::activeModalWidget();
+                    if (!d2) return;
+                    grab(d2, "dust_map_sensitive");
+                    if (auto* q = qobject_cast<QDialog*>(d2)) q->reject();
+                });
+            });
+            w_.setDustMap(map, false);   // returns when the window has been dismissed
+        },
         [this, tab, dock] { finish(); },
     };
     connect(&run_, &QTimer::timeout, this, [this] {

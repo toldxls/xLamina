@@ -111,7 +111,8 @@ capture time) reorder it, Tick all frames puts every frame back into the render.
 
 File > Set dust map takes a photograph of an evenly lit white background (the frames' size, same optics): the dust
 it shows is taken out of every frame before stacking, so a speck on the sensor leaves no trail. The map says where
-the dust is; how dark each speck is, is measured on the frames of each render. `stackcli run ... --dust-map FILE`
+the dust is; how dark each speck is, is measured on the frames of each render. Its window shows what is found and
+has the two settings: the sensitivity (how much darker than its surroundings counts as dust) and the margin around it. `stackcli run ... --dust-map FILE`
 does the same.
 
 Smoothing (C): 0 is the raw selection (in flat areas it picks the noisiest frame), 2 is the
