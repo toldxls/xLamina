@@ -40,6 +40,7 @@ xcopy /e /q /y /i docs\manual dist\%NAME%\manual >nul
 if not exist dist\%NAME%\manual\index.html ( echo the manual was not copied: docs\manual\index.html is missing & exit /b 4 )
 copy /y README.md dist\%NAME%\ >nul
 copy /y LICENSE dist\%NAME%\ >nul
+copy /y CHANGELOG.md dist\%NAME%\ >nul
 rem the icon as a file: a shortcut that points at it keeps a sharp icon across updates (Explorer's cache serves a
 rem stale small image for a while after the exe it reads the icon from is replaced)
 copy /y gui\icon\xlamina.ico dist\%NAME%\ >nul

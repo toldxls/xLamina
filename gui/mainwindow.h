@@ -57,6 +57,8 @@ public:
     // grabs and the result into dir, then quit. spec: "x0,y0,x1,y1[,strength]" (a rectangle) or "x,y,x,y,x,y,..."
     // with an odd number of fields over six (an outline, strength last), image px, separated by ';'
     void testRegions(const QString& spec, const QString& dir);
+    static QString changelogText();           // CHANGELOG.md as built in (Help > What's new); empty when it is missing
+    static QDialog* whatsNewDialog(QWidget* parent);   // the window Help > What's new shows (the caller runs and deletes it)
 
 protected:
     void dragEnterEvent(QDragEnterEvent* e) override;
@@ -84,6 +86,7 @@ private slots:
     void batchNext();      // open and render the queue's next folder, or finish
     void preferences();                        // File > Preferences: General, Performance, System
     void about();
+    void whatsNew();                          // Help > What's new: the changes of each version (CHANGELOG.md, built in)
     // the dust map (dust.h): a white-background frame whose dust is taken out of every frame before stacking
     void chooseDustMap();                      // File > Set dust map
     bool setDustMap(const QString& path, bool quiet);   // read it and find its dust; an empty path drops it

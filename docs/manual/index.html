@@ -337,6 +337,7 @@ li.aside { list-style:none; color:var(--dim); }
   </ol>
 </figure>
 <p>The first column of the list holds the tick boxes for <a href="#composite">Make composite</a>. The second toolbar row is <a href="#retouch">Retouch</a>, the third <a href="#refine">Refine</a>.</p>
+<p>Each row has its own colour: blue for comparing, purple for Retouch, green for Refine. A row is faint as a rule and strong while its mode is on: Retouch switched on, or a region tool in use. A button that is on is filled with the row's colour.</p>
 <h3>Three or four panes</h3>
 <p>The box beside Stack vertically sets the number of panes: 2, 3 or 4. Three stand side by side; four are two rows of two.</p>
 <ul>
@@ -371,7 +372,7 @@ li.aside { list-style:none; color:var(--dim); }
 <p><b>File &gt; Add comparison image…</b> (<kbd>Ctrl+I</kbd>), or dropping an image file onto a finished render, adds another stacker's output as a tab beside xLamina's. Close such a tab with the middle mouse button.</p>
 </section>
 
-<section id="retouch" data-k="retouch paint brush clone source mask undo hardness size save result fix artefact">
+<section id="retouch" data-k="retouch paint brush clone copy stamp heal dust speck spot remove match tone colour brightness source mask undo hardness size save result fix artefact">
 <h2>Retouch: paint one image into another</h2>
 <p>Press <b>Retouch</b> above the viewer, or <kbd>R</kbd> in the compare window. The left pane becomes the result; the brush paints the right pane's image into it. Typical use: B as the base, with C painted in where B lost detail (or the other way round).</p>
 <figure class="shot" data-img="compare_retouch" data-cursor="@0.42,0.5" data-marks="Retouch;@0.077,0.055;@0.156,0.055;Show mask;Undo;Reset;Save result;view;view 2">
@@ -382,18 +383,47 @@ li.aside { list-style:none; color:var(--dim); }
     <li><b>Show mask</b> (<kbd>M</kbd>): tints the painted pixels green.</li>
     <li><b>Undo</b> (<kbd>Ctrl+Z</kbd>): the last stroke.</li>
     <li><b>Reset</b>: drop every stroke.</li>
-    <li><b>Save result…</b> (<kbd>Ctrl+S</kbd>): a 16-bit TIFF with the frames' colour profile, which also joins the list.</li>
+    <li><b>Save result…</b> (<kbd>Ctrl+S</kbd>): a 16-bit TIFF with the frames' colour profile, which also joins the list. The name offered is the image's with <i>_retouched</i>, and the field of view after it when it is known (<i>_1.46mm</i>), as Save as writes it.</li>
     <li><b>Result</b> (left): the left button paints, the middle or right button pans. The cursor shows where a stroke would start.</li>
     <li><b>Source</b> (right): pick another image here at any time to paint from it.</li>
   </ol>
 </figure>
 <p>Hold <kbd>Space</kbd> to see the source in the result pane. The painting is done on the 16-bit data, not on the screen image.</p>
+<p>To retouch another image, pick it for the left pane (its picker, or a double-click in the list): the retouch moves to it. With unsaved strokes or regions xLamina asks first.</p>
+<h3>Clone: copy from another place of the image</h3>
+<p>For a dust speck or a stray mark that is in every output: the brush copies a clean place of the result itself over it.</p>
+<figure class="shot" data-img="compare_clone" data-cursor="view@0.40,0.55" data-marks="Clone;Match tone;view@0.61,0.41;view@0.40,0.55">
+  <ol class="legend">
+    <li><b>Clone</b> on: the brush copies from the place picked.</li>
+    <li><b>Match tone</b> on: the copy takes the colour and brightness of the place it is painted on.</li>
+    <li>The place copied from: a dashed green circle, set with <kbd>Alt</kbd> + click.</li>
+    <li>The brush. Paint over the spot; the dashed circle moves with it.</li>
+  </ol>
+</figure>
+<ol>
+  <li>With Retouch on, press <b>Clone</b> (<kbd>C</kbd>).</li>
+  <li>Hold <kbd>Alt</kbd> and click a clean place near the spot (<kbd>Ctrl</kbd> + click does the same). A dashed green circle marks it.</li>
+  <li>Paint over the spot. The place copied from moves with the brush, the same distance away; the dashed circle shows it.</li>
+  <li>Press Clone again to paint from the other pane as before.</li>
+</ol>
+<table>
+  <tr><th>Button</th><th>What it does</th></tr>
+  <tr><td><b>Clone</b> (<kbd>C</kbd>)</td><td>Checked = the brush copies from the place picked with Alt + click. Unchecked = it paints from the other pane.</td></tr>
+  <tr><td><b>Match tone</b></td><td>Checked = the copy takes the colour and brightness of the place it is painted on; only its detail comes from the place copied. Unchecked = an exact copy.</td></tr>
+</table>
+<ul>
+  <li>Cover the whole speck in one stroke, with a little room around it: Match tone reads the colour from the ring just outside the stroke, so a stroke that ends on the speck takes some of its darkness along.</li>
+  <li>While a stroke is drawn it shows the plain copy; the tone is matched when the button is let go.</li>
+  <li>Alt + click again picks another place. Until then every stroke copies from the same distance away.</li>
+  <li>Undo, Reset, Show mask and Save result treat a clone stroke like any other. A stroke painted from the other pane afterwards goes over the copy.</li>
+</ul>
 <h3>Painting from a single frame</h3>
 <p>Sometimes one frame holds a detail in focus that no output kept. The compare window shows the stack's frames lined up with the outputs: each frame cropped and moved exactly as the render placed it, so it can be painted from.</p>
 <table>
   <tr><th>To</th><th>Do this</th></tr>
   <tr><td>Find the frame that is sharp at a spot</td><td>Press <b>Frame here</b> (<kbd>H</kbd>) and click the spot on an output. The frame that is sharpest there comes up in the right pane, and the status bar names it. <kbd>PgUp</kbd> / <kbd>PgDn</kbd> step to the frames before and after it.</td></tr>
   <tr><td>Have every frame in the list</td><td>Press <b>Add frames</b>. The frames are listed in stack order; a frame is read when you first show it (about a second).</td></tr>
+  <tr><td>Take the frames out of the list again</td><td>Press <b>Hide frames</b> above the list: only the outputs, the added images and the composites are listed, here and in the panes' pickers. <b>Show frames</b> brings them back. A pane showing a frame keeps it. The choice is kept, so the frames that Frame here lists stay out of the way.</td></tr>
   <tr><td>Show one frame you already know</td><td>In the main window, right-click it in the frame list: <b>Show in the compare window</b>.</td></tr>
 </table>
 <ul>
@@ -406,9 +436,13 @@ li.aside { list-style:none; color:var(--dim); }
 </section>
 
 <section id="refine" data-k="refine region regions rectangle lasso render again re-render local detail smoothed soft blob needle missing detail more detail edge feather patch strength low medium high">
-<h2>Refine: render regions of B again</h2>
-<p>For a part of B that came out smooth although the frames hold detail there. You mark the part, and only that part is rendered again with settings that keep more weak detail. The rest of the image is not touched.</p>
-<p>The tools are in the compare window's third row, <b>Refine regions of B</b>. They are shown after a render, with that render's B in the left pane.</p>
+<h2>Refine: render regions of an output again</h2>
+<p>For a part of an output that came out smooth although the frames hold detail there. You mark the part, and only that part is rendered again with settings that keep more weak detail. The rest of the image is not touched.</p>
+<p>The tools are in the compare window's third row, <b>Refine regions</b>. They work on the image in the left pane, which must be an output of the last render: B, C, CBn or another one. The row names it: <b>Refine regions of CBn</b>.</p>
+<ul>
+  <li>Refine renders from the frames and the alignment the render left in memory. After the program is started again there is no such render: the row reads <b>Refine regions (render first)</b>. Press Render, then Compare.</li>
+  <li>A file opened from disk, a frame, a composite and A cannot be refined. Rectangle and Lasso then stay off and say why, beside the cursor and in the status bar.</li>
+</ul>
 <ol>
   <li>Click <b>Rectangle</b> and drag over the part, or <b>Lasso</b> and draw around it. Either pane will do. Mark as many regions as you need; each gets a number.</li>
   <li>Choose <b>More detail</b>: Low, Medium or High. It applies to the next region you mark, and to the region selected in the list.</li>
@@ -416,6 +450,17 @@ li.aside { list-style:none; color:var(--dim); }
   <li>Look at the result at 1:1. Hold <kbd>Space</kbd> to see the image as it was.</li>
   <li><b>Save result…</b> (<kbd>Ctrl+S</kbd>) writes the image with its regions as a 16-bit TIFF.</li>
 </ol>
+<figure class="shot" data-img="compare_refine" data-cursor="Refine" data-marks="Rectangle;Lasso;@0.221,0.1;Refine;view@0.33,0.34;table;Remove">
+  <ol class="legend">
+    <li><b>Rectangle</b>: drag over the part.</li>
+    <li><b>Lasso</b>: draw around it.</li>
+    <li><b>More detail</b>: the strength, for the next region and the selected one.</li>
+    <li><b>Refine</b> renders the marked regions.</li>
+    <li>A region, numbered at its corner. Green = rendered and in the image; dashed yellow = marked, not rendered yet.</li>
+    <li>The regions' list: the tick, the strength, the soft edge and the state of each.</li>
+    <li><b>Remove</b> and <b>Remove all</b>.</li>
+  </ol>
+</figure>
 <p>The list under the image list has a row per region:</p>
 <ul>
   <li><b>The tick</b>: ticked = the rendered region is in the image; unticked = the image as it was there.</li>
@@ -430,9 +475,11 @@ li.aside { list-style:none; color:var(--dim); }
 </table>
 <ul>
   <li>Mark a region a little larger than the fault, so its edge lies where the old and the new image agree.</li>
+  <li>Mark regions on the left pane, or on another pane that shows an image of the same size.</li>
   <li>Regions are laid into the retouch result: Retouch switches on with the first region, and the brush can paint over a region afterwards. While a region tool is on, the left button marks regions; switch the tool off to paint.</li>
   <li>What the strengths change depends on the render's Depth resolution: at 1/2 or Full, how weak a detail may be and still set the depth; at 1/4, how much of the region is treated as featureless background, and how far the fine focus searches.</li>
-  <li>Refine works on the B of the last render. After another render, or another folder, press Compare again and mark the regions on the new B.</li>
+  <li>Refine works on the outputs of the last render. After another render, or another folder, press Compare again and mark the regions on the new output.</li>
+  <li>The strengths act on the depth map, so they change B most; the pyramid outputs (C, CBn and the others) change where they take from B or follow its depth.</li>
   <li>If a region shows no change at any strength, the fault has another cause: see <a href="#fixing">Fixing image problems</a>, or paint C into B there with <a href="#retouch">Retouch</a>.</li>
 </ul>
 </section>
@@ -445,11 +492,23 @@ li.aside { list-style:none; color:var(--dim); }
   <li>Press <b>Make composite</b> under the list. The button names what is ticked: <b>2B1C</b> = two B and one C.</li>
   <li>The result joins the list, shows in the right pane, and is written beside the render's outputs as a 16-bit TIFF: <i>2B1C composite (B).tif</i>.</li>
 </ol>
+<figure class="shot" data-img="compare_composite" data-cursor="Make composite (1B1C)" data-marks="table@0.03,0.07;Make composite (1B1C);Methods: B, C, CBn;table@0.25,0.18;view 2;Show frames (261)">
+  <ol class="legend">
+    <li>The tick boxes: here B and C.</li>
+    <li><b>Make composite</b> names what is ticked.</li>
+    <li><b>Methods</b>: one composite for each method ticked in its menu.</li>
+    <li>The composites in the list.</li>
+    <li>The first of them in the right pane.</li>
+    <li><b>Show frames</b> / <b>Hide frames</b>: the stack's frames in the list, or not. The choice is kept.</li>
+  </ol>
+</figure>
 <ul>
-  <li>The composite is made with the Render panel's settings, once for each output ticked there: with B and C ticked you get <i>2B1C composite (B)</i> and <i>2B1C composite (C)</i>, the same images stacked by each method. A few seconds each.</li>
-  <li>The images must be the same size. Outputs of one render are; another program's stack of the same frames usually is not.</li>
-  <li>The images are stacked as they lie, without the alignment a folder of frames gets, so the composite keeps the full size of its inputs.</li>
-  <li>In the name, B, C, Cn and A are outputs of those methods, F is a frame of the stack, and X is any other image.</li>
+  <li>The composite is made with the Render panel's settings, once for each method ticked under <b>Methods</b>, the button below Make composite. B, C and CBn are ticked to begin with: you get <i>2B1C composite (B)</i>, <i>2B1C composite (C)</i> and <i>2B1C composite (CBn)</i>, the same images stacked by each method. A few seconds each.</li>
+  <li>Methods: ticked = a composite is made with that method; unticked = it is not. With the developer controls on, the other methods are listed there too. The choice is kept.</li>
+  <li>Images of one size are stacked as they lie, without the alignment a folder of frames gets, so the composite keeps the full size of its inputs. Outputs of one render are of one size.</li>
+  <li>An image of another size, such as another program's stack of the same frames, is lined up first: with the first ticked image of the size most of the ticked images have (of two sizes with as many images each: the render's own, else the larger). It is scaled and moved as a whole, then part by part, and resampled once at 16 bits. Show both images in a pane once before, so that they are read. The status bar and the session log say how far it was moved.</li>
+  <li>Two programs do not give the frames the same scale and place, so their results differ by more than a move and a scale: on a deep stack by tens of pixels, changing with depth. The part-by-part fit takes that out to about a pixel where the picture has detail. Where two depths meet, a pixel or two can remain: look at such places at 1:1.</li>
+  <li>In the name, the letters are the methods of the images that went in (B, C, CBn …), F is a frame of the stack, and X is any other image.</li>
   <li>A composite can be ticked for the next one, or retouched, like any other image in the list.</li>
 </ul>
 </section>
@@ -649,6 +708,7 @@ li.aside { list-style:none; color:var(--dim); }
 <p>A few seconds after it starts, xLamina asks GitHub for the latest release. A newer one lights an <b>Update to x.y.z</b> button at the right end of the toolbar. It shows what changed and, on <b>Update and restart</b>, downloads the release, swaps the files in the program's folder and restarts. Settings are kept.</p>
 <ul>
   <li><b>Help &gt; Check for updates…</b> asks at any time.</li>
+  <li><b>Help &gt; What's new…</b> lists what changed in each version, the newest first. It opens by itself after an update.</li>
   <li><b>Help &gt; Check for updates at start</b> turns the automatic check off or on.</li>
 </ul>
 </section>
@@ -683,6 +743,7 @@ li.aside { list-style:none; color:var(--dim); }
   <tr><td><kbd>R</kbd></td><td>Retouch</td></tr>
   <tr><td><kbd>[</kbd> <kbd>]</kbd> or <kbd>Ctrl</kbd> + wheel</td><td>Brush size</td></tr>
   <tr><td><kbd>M</kbd></td><td>Show mask</td></tr>
+  <tr><td><kbd>C</kbd>, then <kbd>Alt</kbd> + click</td><td>Clone, and the place to copy from</td></tr>
   <tr><td><kbd>Ctrl+Z</kbd> / <kbd>Ctrl+S</kbd></td><td>Undo a stroke / save the result</td></tr>
 </table>
 <table>
@@ -710,7 +771,7 @@ li.aside { list-style:none; color:var(--dim); }
   <li><b>Fix the frames.</b> Drop the frames flagged red, amber or violet in the frame list and render again. Faults that follow a few frames (doubled edges, soft patches) go with them, and no setting removes them otherwise.</li>
   <li><b>Choose the output.</b> B and C fail in different ways, and the other outputs are mixtures made for one fault each: see the table below and <a href="#outputs">Outputs</a>.</li>
   <li><b>Change a setting.</b> One at a time, judged at 1:1. A <a href="#sweep">sweep</a> renders several values of the Advanced settings in one go.</li>
-  <li><b>Fix the spot.</b> <a href="#refine">Refine</a> renders a marked region of B again; <a href="#retouch">Retouch</a> paints another output of the same render into it.</li>
+  <li><b>Fix the spot.</b> <a href="#refine">Refine</a> renders a marked region of an output again; <a href="#retouch">Retouch</a> paints another output of the same render into it.</li>
 </ol>
 
 <h3>By what you see</h3>

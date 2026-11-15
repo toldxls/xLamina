@@ -12,6 +12,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QMenuBar>
+#include <QMessageBox>
 #include <QSlider>
 #include <QTabWidget>
 #include <QToolBar>
@@ -101,12 +102,12 @@ ManualShots::ManualShots(MainWindow& w, const QString& dir) : w_(w), dir_(dir) {
         [this, tab, dock] { if (w_.bench_) { grab(w_.bench_, "benchmark"); w_.bench_->close(); } },
         // the two-up viewer: B against C, the difference, retouching
         [this, tab, dock] { w_.twoUp(); w_.twoUp_->resize(1500, 900); w_.twoUp_->select(0, "B"); w_.twoUp_->select(1, "C"); },
-        [this, tab, dock] { for (ImageView* v : w_.twoUp_->findChildren<ImageView*>()) { v->fit(); break; } },
+        [this, tab, dock] { w_.twoUp_->testView(0)->fit(); },
         [this, tab, dock] { grab(w_.twoUp_, "compare"); },
         // measuring in the two-up viewer: a line drawn in the left pane shows in both
         [this, tab, dock] {
             for (QAction* a : w_.twoUp_->findChildren<QAction*>()) if (plain(a->text()) == "Measure") a->setChecked(true);
-            if (ImageView* v = w_.twoUp_->findChildren<ImageView*>().value(0)) v->addMeasure(QLineF(0.36, 0.32, 0.47, 0.41));
+            if (ImageView* v = w_.twoUp_->testView(0)) v->addMeasure(QLineF(0.36, 0.32, 0.47, 0.41));
         },
         [this, tab, dock] {
             grab(w_.twoUp_, "compare_measure");
@@ -114,7 +115,7 @@ ManualShots::ManualShots(MainWindow& w, const QString& dir) : w_(w), dir_(dir) {
             for (QAction* a : w_.twoUp_->findChildren<QAction*>()) if (plain(a->text()) == "Measure") a->setChecked(false);
         },
         [this, tab, dock] {
-            ImageView* v = w_.twoUp_->findChildren<ImageView*>().value(0);
+            ImageView* v = w_.twoUp_->testView(0);
             v->actualSize();
             v->centerOn(v->image().width() * 0.50, v->image().height() * 0.44);
             for (QAction* a : w_.twoUp_->findChildren<QAction*>()) if (plain(a->text()) == "Difference") a->setChecked(true);
@@ -122,12 +123,58 @@ ManualShots::ManualShots(MainWindow& w, const QString& dir) : w_(w), dir_(dir) {
         [this, tab, dock] { grab(w_.twoUp_, "compare_difference"); for (QAction* a : w_.twoUp_->findChildren<QAction*>()) if (plain(a->text()) == "Difference") a->setChecked(false); },
         [this, tab, dock] { w_.twoUp_->setRetouch(true); },
         [this, tab, dock] {   // the brush circle follows the mouse: a move over the left pane
-            QWidget* vp = w_.twoUp_->findChildren<ImageView*>().value(0)->viewport();
+            QWidget* vp = w_.twoUp_->testView(0)->viewport();
             const QPointF pos(vp->width() * 0.5, vp->height() * 0.5);
             QMouseEvent e(QEvent::MouseMove, pos, vp->mapToGlobal(pos), Qt::NoButton, Qt::NoButton, Qt::NoModifier);
             QCoreApplication::sendEvent(vp, &e);
         },
-        [this, tab, dock] { grab(w_.twoUp_, "compare_retouch"); w_.twoUp_->setRetouch(false); for (ImageView* v : w_.twoUp_->findChildren<ImageView*>()) { v->fit(); break; } },
+        [this, tab, dock] { grab(w_.twoUp_, "compare_retouch"); },
+        // the clone brush: Clone on, a place picked as Alt + click picks it, the brush beside it
+        [this, tab, dock] {
+            for (QAction* a : w_.twoUp_->findChildren<QAction*>()) if (plain(a->text()) == "Clone") a->setChecked(true);
+            ImageView* v = w_.twoUp_->testView(0);
+            v->actualSize();
+            v->centerOn(v->image().width() * 0.50, v->image().height() * 0.44);
+            emit v->altClicked(v->mapToScene(QPoint((int)(v->viewport()->width() * 0.62), (int)(v->viewport()->height() * 0.42))));
+            QWidget* vp = v->viewport();
+            const QPointF pos(vp->width() * 0.40, vp->height() * 0.55);
+            QMouseEvent e(QEvent::MouseMove, pos, vp->mapToGlobal(pos), Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+            QCoreApplication::sendEvent(vp, &e);
+        },
+        [this, tab, dock] {
+            grab(w_.twoUp_, "compare_clone");
+            for (QAction* a : w_.twoUp_->findChildren<QAction*>()) if (plain(a->text()) == "Clone") a->setChecked(false);
+            w_.twoUp_->setRetouch(false);
+        },
+        // Refine: two regions marked on B where the view is, rendered again (the steps wait for the render)
+        [this, tab, dock] {
+            w_.twoUp_->select(0, "B");
+            ImageView* v = w_.twoUp_->testView(0);
+            const QRectF vis = v->visibleSceneRect();
+            auto rect = [&](double x0, double y0, double x1, double y1) {
+                QPolygonF p;
+                p << QPointF(vis.x() + x0 * vis.width(), vis.y() + y0 * vis.height()) << QPointF(vis.x() + x1 * vis.width(), vis.y() + y0 * vis.height())
+                  << QPointF(vis.x() + x1 * vis.width(), vis.y() + y1 * vis.height()) << QPointF(vis.x() + x0 * vis.width(), vis.y() + y1 * vis.height());
+                return p;
+            };
+            w_.twoUp_->addRegionPx(rect(0.16, 0.22, 0.52, 0.48), 1);
+            w_.twoUp_->addRegionPx(rect(0.50, 0.58, 0.84, 0.82), 2);
+            w_.twoUp_->refine();
+        },
+        [this, tab, dock] {
+            grab(w_.twoUp_, "compare_refine");
+            // leaving Retouch asks about the unsaved regions: Yes, as a click on it
+            QTimer::singleShot(600, this, [] {
+                if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget()))
+                    if (QAbstractButton* yes = box->button(QMessageBox::Yes)) yes->click();
+            });
+            w_.twoUp_->setRetouch(false);
+            w_.twoUp_->testView(0)->fit();
+        },
+        // a composite of B and C, with the stack's frames in the list and hidden again
+        [this, tab, dock] { w_.twoUp_->testAddFrames(); w_.twoUp_->testHideFrames(true); w_.twoUp_->testComposite({"B", "C"}); },
+        [this, tab, dock] { grab(w_.twoUp_, "compare_composite"); w_.twoUp_->testHideFrames(false); },
+        [this, tab, dock] { modal("whats_new", [this] { w_.whatsNew(); }); },
         // the developer controls: the Render panel with them, the depth map with the frame under the cursor
         [this, tab, dock] { w_.setDeveloper(true); },
         [this, tab, dock] { grab(dock("render"), "render_panel_developer"); tab("depth"); },
@@ -150,9 +197,9 @@ ManualShots::ManualShots(MainWindow& w, const QString& dir) : w_(w), dir_(dir) {
         // a layer held there: the click that holds it, one step on, the overlay off so that B shows under the marks
         [this, tab, dock] {
             if (QSlider* s = w_.twoUp_->findChildren<QSlider*>().value(2)) s->setValue(0);
-            if (ImageView* v = w_.twoUp_->findChildren<ImageView*>().value(0)) { emit v->clicked(v->image().width() / 2, (int)(v->image().height() * 0.6)); emit v->stepKey(1); }
+            if (ImageView* v = w_.twoUp_->testView(0)) { emit v->clicked(v->image().width() / 2, (int)(v->image().height() * 0.6)); emit v->stepKey(1); }
         },
-        [this, tab, dock] { grab(w_.twoUp_, "compare_depth_layer"); if (ImageView* v = w_.twoUp_->findChildren<ImageView*>().value(0)) emit v->escapePressed(); },
+        [this, tab, dock] { grab(w_.twoUp_, "compare_depth_layer"); if (ImageView* v = w_.twoUp_->testView(0)) emit v->escapePressed(); },
         // the dust map's window, when the run names a dust map (XLAMINA_MANUAL_DUST: any white-background frame): as it
         // opens, and with the sensitivity raised to 1.5 %. Dismissed without setting the map.
         [this, tab, dock] {

@@ -351,6 +351,8 @@ void MainWindow::buildMenus() {
     QMenu* help = menuBar()->addMenu("&Help");
     QAction* man = help->addAction("&Manual", QKeySequence::HelpContents, this, [this] { openManual(); });
     man->setStatusTip("The illustrated manual, in the browser: every panel and control, searchable (F1).");
+    QAction* news = help->addAction("What's &new…", this, &MainWindow::whatsNew);
+    news->setStatusTip("What changed in each version, the newest first.");
     help->addSeparator();
     QAction* chk = help->addAction("Check for &updates…", this, &MainWindow::checkForUpdates);
     chk->setStatusTip("Ask GitHub for the latest release; a newer one can be installed from here and xLamina restarts.");
@@ -1088,6 +1090,7 @@ void MainWindow::setDeveloper(bool on) {
     if (mainForm_) { mainForm_->setRowVisible(cradius_, on); mainForm_->setRowVisible(bradius_, on); }
     for (int i = 2; i < kNumOutputs; ++i) if (!isMenuOutput(i)) outputs_[kOutputs[i]]->setVisible(on);   // A, B0 stay hidden boxes
     if (devOutMenu_) devOutMenu_->menuAction()->setVisible(on);
+    if (twoUp_) twoUp_->setMoreMethods(on);
     if (tabs_ && result_) {   // the depth tab comes and goes with the controls
         const bool onDepth = current_ == "depth";
         rebuildTabs();
@@ -1711,6 +1714,8 @@ void MainWindow::twoUp() {
         connect(twoUp_, &CompareWindow::unitsChanged, this, &MainWindow::setUnits);
         twoUp_->setGpuIdle([this] { return !worker_.running() && !(bench_ && bench_->running()); });
         twoUp_->setUnits(view_->measureUnit(), view_->barUnit());
+        for (int i = 0; i < kNumOutputs; ++i) twoUp_->setMethodHelp(kOutputs[i], kOutputHelp[i]);
+        twoUp_->setMoreMethods(developer_);
     }
     twoUp_->setRender(result_ && result_->rc == 0 ? result_ : nullptr, colorSpace_);   // Refine renders regions of its B again
     if (result_ && result_->rc == 0) {
@@ -1791,7 +1796,7 @@ void MainWindow::setUnits(int measure, int bar) {
 }
 
 // The two-up viewer's Make composite: the images ticked there are stacked by the worker with this panel's settings and
-// outputs, as a render of them as frames would be, without the alignment; onFinished hands the outputs back.
+// the methods ticked there, as a render of them as frames would be, without the alignment; onFinished hands the outputs back.
 void MainWindow::makeComposite(std::shared_ptr<CompositeJobData> job) {
     if (!twoUp_ || !job) return;
     QString why;
@@ -1805,6 +1810,10 @@ void MainWindow::makeComposite(std::shared_ptr<CompositeJobData> job) {
     buildJob(jo, false);
     jobItems_ = keepItems;
     jobTag_ = keepTag;
+    if (!job->outputs.isEmpty()) {   // the methods ticked beside the button, not the Render panel's outputs
+        jo.stack.outputs.clear();
+        for (const QString& o : job->outputs) jo.stack.outputs.push_back(o.toStdString());
+    }
     if (jo.stack.outputs.empty()) jo.stack.outputs = {"B"};
     QStringList outs;
     for (const auto& o : jo.stack.outputs) outs << QString::fromStdString(o);
@@ -1819,7 +1828,7 @@ void MainWindow::makeComposite(std::shared_ptr<CompositeJobData> job) {
     worker_.startComposite(jo, job);
 }
 
-// The two-up viewer's Refine: the regions marked on the render's B are rendered again by the worker (run_region), from
+// The two-up viewer's Refine: the regions marked on one of the render's outputs are rendered again by the worker (run_region), from
 // the frames the render left in memory; onFinished hands the tiles back to the viewer.
 void MainWindow::refineRegions(std::shared_ptr<RegionJobData> job) {
     if (!twoUp_ || !job) return;
@@ -1827,7 +1836,7 @@ void MainWindow::refineRegions(std::shared_ptr<RegionJobData> job) {
     if (worker_.running()) why = "A render is running; press Refine when it has finished.";
     else if (bench_ && bench_->running()) why = "The benchmark is running; stop it first.";
     else if (!result_ || job->render != result_ || !result_->stack)
-        why = "This B is not the last render's any more (another render, or another folder, came after it): leave Retouch, press Compare in the main window, and mark the regions again.";
+        why = "This image is not the last render's any more (another render, or another folder, came after it): leave Retouch, press Compare in the main window, and mark the regions again.";
     if (!why.isEmpty()) { twoUp_->refineFailedToStart(why); return; }
     if (!result_->stack->cache_frames) worker_.releaseCache();
     thumbs_.stop();   // resumed in onFinished
@@ -1865,6 +1874,33 @@ void MainWindow::testRegions(const QString& spec, const QString& dir) {
                 const QStringList f = one.split(',');
                 if (f.size() == 2 && f[0] == "n") {   // "n,3": that many panes
                     twoUp_->testPanes(f[1].toInt());
+                    continue;
+                }
+                if (f.size() == 2 && f[0] == "l") {   // "l,NAME": NAME in the left pane (the output the regions are marked on)
+                    twoUp_->setRetouch(false);
+                    twoUp_->select(0, f[1]);
+                    continue;
+                }
+                if (f.size() == 2 && f[0] == "hide") {   // "hide,1" / "hide,0": the frames out of the list, or back
+                    log("hide frames: " + twoUp_->testHideFrames(f[1].toInt() != 0));
+                    continue;
+                }
+                if (f.size() == 8 && f[0] == "clone") {   // "clone,sx,sy,x0,y0,x1,y1,m": a clone stroke from x0,y0 to x1,y1 copying from sx,sy (m: Match tone)
+                    log("clone: " + twoUp_->testClone(QPointF(f[1].toDouble(), f[2].toDouble()), QPointF(f[3].toDouble(), f[4].toDouble()),
+                                                      QPointF(f[5].toDouble(), f[6].toDouble()), f[7].toInt() != 0));
+                    continue;
+                }
+                if (f.size() == 2 && f[0] == "save") {   // "save,NAME": the retouch result written as NAME in the output folder of the test
+                    log(QString("saved %1: %2").arg(f[1]).arg(twoUp_->saveResultTo(QDir(dir).filePath(f[1]))));
+                    continue;
+                }
+                if (f.size() == 1 && f[0] == "undo") { twoUp_->testUndo(); log("undo"); continue; }
+                if (f.size() == 2 && f[0] == "pick") { log("pick left: " + twoUp_->testPickLeft(f[1])); continue; }   // "pick,NAME": NAME picked for the left pane
+                if (f.size() == 1 && f[0] == "broken") { log("stroke cut short: " + twoUp_->testBrokenStroke()); continue; }
+                if (f.size() == 1 && f[0] == "savename") { log("save name: " + twoUp_->testSaveName()); continue; }   // what Save result would offer
+                if (f.size() == 2 && f[0] == "clone" && f[1] == "off") { twoUp_->testCloneOff(); continue; }   // the brush paints from the other pane again
+                if (f.size() == 2 && f[0] == "tool") {   // "tool,1": the Rectangle button pressed (2: Lasso), and off again
+                    log("tool: " + twoUp_->testTool(f[1].toInt()));
                     continue;
                 }
                 if (f.size() == 1 && f[0] == "frames") {   // every frame of the stack into the list
@@ -1910,6 +1946,7 @@ void MainWindow::testRegions(const QString& spec, const QString& dir) {
                 if (f.size() >= 3 && f[0] == "c") {   // "c,NAME,NAME[,NAME...]": those entries ticked, Make composite pressed
                     connect(twoUp_, &CompareWindow::compositeFinished, this, [this, log, grab](bool ok) {
                         log(QString("composite finished: %1 | %2").arg(ok ? "ok" : "NOT ok", twoUp_->statusBar()->currentMessage()));
+                        if (ok) log("retouched composite: " + twoUp_->testRetouchLast());
                         QTimer::singleShot(800, this, [this, grab] { grab("c1_composite"); QTimer::singleShot(300, this, &QWidget::close); });
                     }, Qt::SingleShotConnection);
                     twoUp_->testComposite(f.mid(1));
@@ -3116,9 +3153,40 @@ void MainWindow::showUpdate() {
 }
 
 void MainWindow::notifyUpdated(const QString& from) {
-    QString line = QString("Updated to xLamina %1 (from %2).").arg(XLAMINA_VERSION, from);
+    QString line = QString("Updated to xLamina %1 (from %2). Help > What's new lists the changes.").arg(XLAMINA_VERSION, from);
     statusBar()->showMessage(line, 15000);
     onLog(line);
+    QTimer::singleShot(600, this, &MainWindow::whatsNew);   // after an update: what it brought
+}
+
+// The changes of each version, the newest first: CHANGELOG.md of the repository, built into the program so that it
+// is there without a file beside it or a connection.
+QString MainWindow::changelogText() {
+    QFile f(":/CHANGELOG.md");
+    return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()) : QString();
+}
+
+QDialog* MainWindow::whatsNewDialog(QWidget* parent) {
+    const QString text = changelogText();
+    QDialog* dlg = new QDialog(parent);
+    dlg->setWindowTitle(QString("What's new: xLamina %1").arg(XLAMINA_VERSION));
+    dlg->resize(760, 680);
+    QVBoxLayout* l = new QVBoxLayout(dlg);
+    QTextBrowser* view = new QTextBrowser;
+    view->setOpenExternalLinks(true);
+    view->document()->setDocumentMargin(14);
+    view->setMarkdown(text.isEmpty() ? QString("The list of changes is missing from this build.") : text);
+    l->addWidget(view);
+    QDialogButtonBox* box = new QDialogButtonBox(QDialogButtonBox::Close);
+    connect(box, &QDialogButtonBox::rejected, dlg, &QDialog::reject);
+    l->addWidget(box);
+    return dlg;
+}
+
+void MainWindow::whatsNew() {
+    QDialog* dlg = whatsNewDialog(this);
+    dlg->exec();
+    dlg->deleteLater();
 }
 
 void MainWindow::selfUpdate() {

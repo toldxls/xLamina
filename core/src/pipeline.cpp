@@ -2653,6 +2653,14 @@ int run_region(const StackOptions& base, const StackOptions::Result& whole, std:
         for (auto& v : t.variants) { RegionTile::Out o; o.name = v.name; o.rc = 1; t.out.push_back(std::move(o)); }
         if (t.variants.empty()) continue;
         const std::string tile_label = "tile " + std::to_string(ti + 1) + " of " + std::to_string(tiles.size());
+        if (t.output.empty()) t.output = "B";
+        if (t.output == "A") {
+            logf("%s: A cannot be rendered as a region", tile_label.c_str());
+            for (auto& o : t.out) o.rc = 2;
+            failed += (int)t.variants.size();
+            vi += t.variants.size();
+            continue;
+        }
         if (!region_rect(g, levels, margin_px, t.x0, t.y0, t.x1, t.y1)) {
             logf("%s: its rectangle lies outside the render", tile_label.c_str());
             for (auto& o : t.out) o.rc = 2;
@@ -2662,7 +2670,7 @@ int run_region(const StackOptions& base, const StackOptions::Result& whole, std:
         }
         t.ox = (int)std::lround((t.x0 - g.x0) * g.scale);
         t.oy = (int)std::lround((t.y0 - g.y0) * g.scale);
-        logf("%s: sensor px %d,%d .. %d,%d (%d x %d), %zu variant(s)", tile_label.c_str(), t.x0, t.y0, t.x1, t.y1, t.x1 - t.x0 + 1, t.y1 - t.y0 + 1, t.variants.size());
+        logf("%s: %s, sensor px %d,%d .. %d,%d (%d x %d), %zu variant(s)", tile_label.c_str(), t.output.c_str(), t.x0, t.y0, t.x1, t.y1, t.x1 - t.x0 + 1, t.y1 - t.y0 + 1, t.variants.size());
 
         // each variant's options on top of the render's; grouped by what pass 1 sees, as a sweep's
         struct Prepared { StackOptions so; std::string key; };
@@ -2683,7 +2691,7 @@ int run_region(const StackOptions& base, const StackOptions::Result& whole, std:
             p.so.hooks = quiet;
             p.so.out.clear();
             p.so.note.clear();
-            p.so.outputs = {"B"};
+            p.so.outputs = {t.output};
             p.so.diagnostics = false;
             p.so.result = nullptr;
             p.key = pass1_key(po);
@@ -2728,8 +2736,8 @@ int run_region(const StackOptions& base, const StackOptions::Result& whole, std:
                 so.result = &res;
                 int rc = guarded([&] { return fuse_from_pass1(so, P, false, t_v, &noise); });
                 if (base.hooks.cancelled()) return 3;
-                auto it = std::find(res.names.begin(), res.names.end(), "B");
-                if (rc == 0 && it == res.names.end()) rc = 1;
+                auto it = std::find(res.names.begin(), res.names.end(), t.output);
+                if (rc == 0 && it == res.names.end()) { logf("%s: the render has no output named %s", tile_label.c_str(), t.output.c_str()); rc = 1; }
                 t.out[i].rc = rc;
                 if (rc == 0) {
                     t.out[i].b = std::move(res.images[it - res.names.begin()]);

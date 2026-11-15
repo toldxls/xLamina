@@ -16,8 +16,9 @@ class LiveImageItem : public QGraphicsItem {
 public:
     const QImage* img = nullptr;
     const std::vector<uint8_t>* mask = nullptr;
+    const std::vector<uint8_t>* mask2 = nullptr;
     bool showMask = false;
-    void setSource(const QImage* i, const std::vector<uint8_t>* m) { prepareGeometryChange(); img = i; mask = m; }
+    void setSource(const QImage* i, const std::vector<uint8_t>* m) { prepareGeometryChange(); img = i; mask = m; mask2 = nullptr; }
     QRectF boundingRect() const override { return img ? QRectF(0, 0, img->width(), img->height()) : QRectF(); }
     void paint(QPainter* p, const QStyleOptionGraphicsItem* opt, QWidget*) override {
         if (!img) return;
@@ -28,8 +29,12 @@ public:
             QImage tint(r.size(), QImage::Format_ARGB32);
             for (int y = 0; y < r.height(); ++y) {
                 const uint8_t* m = mask->data() + (size_t)(r.y() + y) * img->width() + r.x();
+                const uint8_t* m2 = mask2 && mask2->size() == mask->size() ? mask2->data() + (size_t)(r.y() + y) * img->width() + r.x() : nullptr;
                 QRgb* o = reinterpret_cast<QRgb*>(tint.scanLine(y));
-                for (int x = 0; x < r.width(); ++x) o[x] = m[x] ? qRgba(40, 220, 90, m[x] * 150 / 255) : 0;
+                for (int x = 0; x < r.width(); ++x) {
+                    const int a = m2 ? std::max(m[x], m2[x]) : m[x];
+                    o[x] = a ? qRgba(40, 220, 90, a * 150 / 255) : 0;
+                }
             }
             p->drawImage(r, tint);
         }
@@ -186,6 +191,11 @@ void ImageView::setLive(const QImage* img, const std::vector<uint8_t>* mask) {
     viewport()->update();
 }
 
+void ImageView::setSecondMask(const std::vector<uint8_t>* mask) {
+    live_->mask2 = mask;
+    live_->update();
+}
+
 void ImageView::patch(const QRect& r) { live_->update(QRectF(r)); }
 
 void ImageView::setMaskShown(bool on) {
@@ -193,7 +203,19 @@ void ImageView::setMaskShown(bool on) {
     live_->update();
 }
 
+void ImageView::setCloneMark(int mode, QPointF v) {
+    cloneMode_ = mode;
+    cloneV_ = v;
+    viewport()->update();
+}
+
 void ImageView::setBrush(bool on, double radius, double hardness) {
+    // a stroke under way when the brush is taken away (a tool's shortcut pressed during the drag) ends here: the
+    // button's release would no longer be the brush's, and the stroke stayed open, past undoing
+    if (!on && brush_) {
+        panning_ = false;
+        if (painting_) { painting_ = false; emit strokeEnd(); }
+    }
     brush_ = on;
     brushRadius_ = radius;
     brushHardness_ = hardness;
@@ -503,6 +525,19 @@ void ImageView::drawForeground(QPainter* p, const QRectF&) {
             p->drawEllipse(cursor_, rc, rc);
         }
     }
+    if (brush_ && cloneMode_ && (cloneMode_ == 1 || cursorIn_)) {   // where the clone brush copies from: a dashed circle and a cross
+        const QPointF c = cloneMode_ == 1 ? QPointF(mapFromScene(cloneV_)) : cursor_ + cloneV_ * zoom();
+        const double rr = brushRadius_ * zoom();
+        p->setRenderHint(QPainter::Antialiasing);
+        p->setBrush(Qt::NoBrush);
+        for (int pass = 0; pass < 2; ++pass) {
+            p->setPen(pass == 0 ? QPen(QColor(0, 0, 0, 170), 3) : QPen(QColor(120, 255, 170, 235), 1, Qt::DashLine));
+            p->drawEllipse(c, rr, rr);
+            p->setPen(pass == 0 ? QPen(QColor(0, 0, 0, 170), 3) : QPen(QColor(120, 255, 170, 235), 1));
+            p->drawLine(c - QPointF(6, 0), c + QPointF(6, 0));
+            p->drawLine(c - QPointF(0, 6), c + QPointF(0, 6));
+        }
+    }
     p->restore();
 }
 
@@ -546,6 +581,7 @@ void ImageView::mousePressEvent(QMouseEvent* e) {
     }
     if (brush_) {
         if (e->button() == Qt::LeftButton) {
+            if (altPick_ && (e->modifiers() & (Qt::AltModifier | Qt::ControlModifier))) { emit altClicked(mapToScene(e->pos())); viewport()->update(); return; }
             painting_ = true;
             emit strokeBegin(mapToScene(e->pos()));
             return;

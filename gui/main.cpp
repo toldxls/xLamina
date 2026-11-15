@@ -1,4 +1,5 @@
 #include <QApplication>
+#include <QDialog>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -25,6 +26,8 @@
 //   --manual DIR        developer aid: with --render, save the manual's screen grabs and rects.js to DIR, then quit
 //                       (manualshots.h; tools\manual.cmd runs it off screen)
 //   --report DIR        save the problem report (Help > Report a problem) into DIR and quit
+//   --changelog FILE    developer aid: write the built-in list of changes (Help > What's new) to FILE and quit;
+//                       a FILE ending in .png gets a picture of the window instead, made off screen
 //   --regions SPEC --regions-out DIR   developer aid: after the render, mark these regions of B in the two-up viewer,
 //                       press Refine, save grabs and the result into DIR, then quit (MainWindow::testRegions)
 //   --hover FX,FY       developer aid: after the render, show the last tab and move a synthetic cursor to that
@@ -73,6 +76,22 @@ int main(int argc, char** argv) {
             const QString p = DiagLog::makeReport(QString::fromLocal8Bit(argv[i + 1]), "made with --report", &why);
             DiagLog::write(p.isEmpty() ? "report: " + why : "report saved: " + p);
             return p.isEmpty() ? 1 : 0;
+        }
+    for (int i = 1; i + 1 < argc; ++i)
+        if (QString::fromLocal8Bit(argv[i]) == "--changelog") {
+            const QString text = MainWindow::changelogText();
+            if (QString::fromLocal8Bit(argv[i + 1]).endsWith(".png", Qt::CaseInsensitive)) {
+                QDialog* d = MainWindow::whatsNewDialog(nullptr);
+                d->setAttribute(Qt::WA_DontShowOnScreen);
+                d->show();
+                QCoreApplication::processEvents();
+                const bool ok = d->grab().save(QString::fromLocal8Bit(argv[i + 1]));
+                delete d;
+                return ok && !text.isEmpty() ? 0 : 1;
+            }
+            QFile f(QString::fromLocal8Bit(argv[i + 1]));
+            if (f.open(QIODevice::WriteOnly)) f.write(text.toUtf8());
+            return text.isEmpty() ? 1 : 0;
         }
     // --align-test LEFT RIGHT OUT.txt: developer aid: where RIGHT lies in LEFT (the two-up viewer's Align), written to OUT
     for (int i = 1; i + 3 < argc; ++i)

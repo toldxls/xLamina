@@ -4,7 +4,8 @@ rem The dust map (any photograph of a white background, of any size) is for the 
 rem it those two grabs are left as they are.
 rem Renders the folder in build\gui\xLamina.exe with every window kept off the screen and writes the grabs and
 rem rects.js (where each control sits in each grab) to docs\manual\img. The folder's path shows in some grabs, so
-rem use one you are content to publish (a copy or hard links under C:\Users\Public, say). About 50 frames is plenty.
+rem use one you are content to publish (a copy or hard links under C:\Users\Public, say). Use the whole stack: a
+rem render of every few frames shows blur and artefacts in the pictures that a real render does not have.
 rem The run uses its own settings file, so the installed program's settings are untouched.
 setlocal
 if "%~1"=="" ( echo usage: tools\manual.cmd FOLDER & exit /b 1 )

@@ -54,11 +54,19 @@ public:
     // retouch: the pane draws `img` (owned by the caller, same size as the image) instead of its pixmap; patch(r)
     // repaints r after the caller changed those pixels. mask (w*h, 0..255) is tinted when shown. null = back to the pixmap
     void setLive(const QImage* img, const std::vector<uint8_t>* mask);
+    // a second mask tinted with the first when the mask is shown (the pixels a clone stroke changed); null = none.
+    // setLive() drops it
+    void setSecondMask(const std::vector<uint8_t>* mask);
     void patch(const QRect& r);
     void setMaskShown(bool on);
     // brush mode: the left button paints (signals below, image coordinates), the middle button pans
     void setBrush(bool on, double radius, double hardness);
     double brushRadius() const { return brushRadius_; }
+    // the clone brush (the two-up viewer): with setAltPick, Alt + the left button reports a place (altClicked) instead
+    // of painting. setCloneMark shows where the brush copies from: mode 1 = a fixed place `v` of the image (picked,
+    // not painted from yet), 2 = the brush moved by `v` image pixels (it follows the cursor), 0 = nothing
+    void setAltPick(bool on) { altPick_ = on; }
+    void setCloneMark(int mode, QPointF v);
     // the width the whole image stands for, in micrometres (0 = not known): gives the scale bar its length and the
     // measured lines theirs
     void setSceneWidthUm(double um);
@@ -103,6 +111,7 @@ signals:
     void zoomChanged(double z);
     void viewChanged();                   // zoom, scroll or size: what the viewport shows has changed
     void hovered(int x, int y);           // image coordinates under the cursor; (-1, -1) when it leaves the view
+    void altClicked(QPointF imagePos);    // Alt + the left button in brush mode, while setAltPick(true)
     void strokeBegin(QPointF imagePos);
     void strokeTo(QPointF imagePos);
     void strokeEnd();
@@ -132,6 +141,9 @@ private:
     bool fitted_ = true;
     bool winActive_ = false;              // the pixmap item shows a live-view crop, placed and scaled (setLiveWindow)
     bool brush_ = false, painting_ = false, panning_ = false;
+    bool altPick_ = false;
+    int cloneMode_ = 0;
+    QPointF cloneV_;
     double brushRadius_ = 60, brushHardness_ = 0.5;
     QPoint lastPan_;
     QPointF cursor_;   // viewport position of the mouse, for the brush circle

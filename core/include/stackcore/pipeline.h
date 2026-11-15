@@ -343,15 +343,16 @@ int run_sweep(const StackOptions& base, const std::vector<SweepVariant>& variant
 // rectangle of the render's own; it is rendered as a strip is: with the whole frame's noise, flat thresholds and
 // pyramid depth (`whole`: the render's Result, of which only those values are read), so that with unchanged settings
 // it gives the render's own pixels away from its edges. One pass 1 + volume per tile and group of pass-1 settings,
-// then a B per variant; nothing is written. `base` is the render's options as it ran them (the frames, their
-// transforms and row corrections, the dust map, the rectangle in po.g).
+// then the tile's output per variant; nothing is written. `base` is the render's options as it ran them (the frames,
+// their transforms and row corrections, the dust map, the rectangle in po.g).
 struct RegionTile {
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;   // sensor px, inclusive; run_region replaces them with the rectangle it rendered
+    std::string output = "B";             // the output rendered (any of the render's but A, whose sums a tile does not keep)
     std::vector<SweepVariant> variants;   // a variant without options = the render's own settings
     struct Out {
         std::string name;
         int rc = 0;                       // 0, or why this variant has no image (the codes of run_stack)
-        std::vector<float> b;             // float RGB, w x h
+        std::vector<float> b;             // `output`, float RGB, w x h
         std::vector<float> depth;         // the frame per pixel, w x h
     };
     int ox = 0, oy = 0, w = 0, h = 0;     // where the rendered rectangle lies in the render's output grid, and its size

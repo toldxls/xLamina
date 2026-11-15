@@ -111,8 +111,8 @@ static int usage() {
             "  stackcli sweep LIST.txt --rect X0,Y0,X1,Y1 --out DIR --grid GRID.txt [stack options as the base]   one pass 1, then a B per variant\n"
             "                 GRID.txt: one line per set, '--sgm-p1 0.03,0.06 --dark-prior 0,1' = every combination of the comma lists;\n"
             "                 a line 'base' = the base options alone; # comments. Variants write DIR\\<name>\\B.tif; DIR\\sweep.json lists them\n"
-            "  stackcli region DIR --out DIR --region X0,Y0,X1,Y1 [--region ...] [--grid GRID.txt] [--margin 512] [run's options]\n"
-            "                 render DIR as run does, then each region (output px) again: with the same settings, and per grid variant\n"
+            "  stackcli region DIR --out DIR --region X0,Y0,X1,Y1 [--region ...] [--output B] [--grid GRID.txt] [--margin 512] [run's options]\n"
+            "                 render DIR as run does, then each region (output px) of that output again: with the same settings, and per grid variant\n"
             "  stackcli align DIR --out DIR [--prefix IMG_] [--align-scale 0.25] [--baselines 1,2,4,8] [--ref middle]\n"
             "                 [--gpus 0,1] [--pairs i:j,...]      alignment -> report.json + list.txt (+ per-pair dump)\n");
     return 2;
@@ -748,8 +748,8 @@ static int cmd_run(int argc, char** argv) {
 
 // ----------------------------------------------------------------------------- region: a render, then parts of it again
 
-// stackcli region DIR --out DIR --region X0,Y0,X1,Y1 [--region ...] [--grid GRID.txt] [--margin 512] [run's options]
-// Renders DIR as `run` does, then renders each region (output px of that render, inclusive) again through run_region:
+// stackcli region DIR --out DIR --region X0,Y0,X1,Y1 [--region ...] [--output B] [--grid GRID.txt] [--margin 512] [run's options]
+// Renders DIR as `run` does, then renders each region (output px of that render, inclusive) of --output again through run_region:
 // once with the render's own settings ("same": how far a region is from the render it came from) and once per
 // variant of the grid file (the sweep's format). Writes region<N>_render.tif (the render's pixels of the tile) and
 // region<N>_<variant>.tif into --out, and prints each one's difference from the render.
@@ -759,21 +759,33 @@ static int cmd_region(int argc, char** argv) {
     jo.align.dir = argv[2];
     jo.stack.po.opt.streams_per_gpu = 2;
     std::vector<std::vector<double>> regions;
-    std::string grid;
+    std::string grid, output = "B", dust_map;
+    float dust_darker = 0.03f;
+    int dust_margin = 9;
     double margin = 512;
     int i = 3;
     for (; i + 1 < argc; i += 2) {
         std::string a = argv[i], v = argv[i + 1];
         if (a == "--out") jo.out = v;
+        else if (a == "--output") output = v;
         else if (a == "--region") { auto d = parse_doubles(v); if (d.size() != 4) return usage(); regions.push_back(d); }
         else if (a == "--grid") grid = v;
         else if (a == "--margin") margin = atof(v.c_str());
+        else if (a == "--dust-map") dust_map = v;   // as run's
+        else if (a == "--dust-darker") dust_darker = (float)(atof(v.c_str()) / 100.0);
+        else if (a == "--dust-margin") dust_margin = atoi(v.c_str());
         else if (parse_align_option(a, v, jo.align)) continue;
         else if (parse_stack_option(a, v, jo.stack)) continue;
-        else return usage();
+        else { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
     }
     if (i < argc) { fprintf(stderr, "option %s has no value\n", argv[i]); return usage(); }
     if (jo.out.empty() || regions.empty()) return usage();
+    if (!dust_map.empty()) {
+        auto fix = std::make_shared<DustFix>();
+        std::string why;
+        if (!build_dust_fix(dust_map, *fix, &why, dust_darker, dust_margin)) { fprintf(stderr, "%s\n", why.c_str()); return 1; }
+        jo.dust = fix;
+    }
     std::vector<SweepVariant> variants;
     variants.push_back({"same", {}});
     if (!grid.empty())
@@ -783,11 +795,11 @@ static int cmd_region(int argc, char** argv) {
     jo.cache = &cache;
     StackOptions::Result whole;
     jo.stack.result = &whole;
-    if (std::find(jo.stack.outputs.begin(), jo.stack.outputs.end(), "B") == jo.stack.outputs.end()) jo.stack.outputs.push_back("B");
+    if (std::find(jo.stack.outputs.begin(), jo.stack.outputs.end(), output) == jo.stack.outputs.end()) jo.stack.outputs.push_back(output);
     AlignOut A;
     if (int rc = run_job(jo, A, Hooks{})) { printf("region: the render failed (code %d)\n", rc); return rc; }
-    const size_t jb = std::find(whole.names.begin(), whole.names.end(), "B") - whole.names.begin();
-    if (jb >= whole.names.size()) { printf("region: the render has no B\n"); return 1; }
+    const size_t jb = std::find(whole.names.begin(), whole.names.end(), output) - whole.names.begin();
+    if (jb >= whole.names.size()) { printf("region: the render has no %s\n", output.c_str()); return 1; }
     const std::vector<float>& B = whole.images[jb];
     const Grid g = jo.stack.po.g;
     printf("region: the render is %d x %d; noise floor %.4f, flat thresholds %.4g .. %.4g, %d levels\n", whole.w, whole.h, whole.depth_floor,
@@ -798,6 +810,7 @@ static int cmd_region(int argc, char** argv) {
         RegionTile t;
         t.x0 = g.x0 + (int)std::floor(r[0] / g.scale); t.y0 = g.y0 + (int)std::floor(r[1] / g.scale);
         t.x1 = g.x0 + (int)std::ceil((r[2] + 1) / g.scale) - 1; t.y1 = g.y0 + (int)std::ceil((r[3] + 1) / g.scale) - 1;
+        t.output = output;
         t.variants = variants;
         tiles.push_back(std::move(t));
     }

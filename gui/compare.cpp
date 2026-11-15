@@ -21,7 +21,14 @@
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QStatusBar>
+#include <QTimer>
+#include <QListView>
+#include <QCheckBox>
+#include <QMenu>
 #include <QToolBar>
+#include <QToolButton>
+#include <QToolTip>
+#include <QWidgetAction>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -30,6 +37,7 @@
 #include <cstring>
 #include <thread>
 
+#include "diaglog.h"
 #include "prefs.h"
 #include "stackcore/compose.h"
 #include "stackcore/depth.h"
@@ -49,7 +57,7 @@ CompareWindow::CompareWindow(QWidget* parent) : QMainWindow(parent) {
     setAcceptDrops(true);
     resize(1500, 900);
 
-    QToolBar* tb = addToolBar("Compare");
+    QToolBar* tb = mainTb_ = addToolBar("Compare");
     tb->setMovable(false);
     QAction* openSweep = tb->addAction("Open sweep…", this, &CompareWindow::openSweepDialog);
     openSweep->setStatusTip("A folder written by a sweep (holds sweep.json): its B variants join the list.");
@@ -152,13 +160,14 @@ CompareWindow::CompareWindow(QWidget* parent) : QMainWindow(parent) {
 
     // ---- retouch (a row of its own)
     addToolBarBreak();
-    QToolBar* rb = addToolBar("Retouch");
+    QToolBar* rb = retouchTb_ = addToolBar("Retouch");
     rb->setMovable(false);
     retouchAct_ = rb->addAction("Retouch");
     retouchAct_->setCheckable(true);
     retouchAct_->setShortcut(QKeySequence("R"));
     retouchAct_->setStatusTip("Paint the right pane's image into the left one (R). Left button paints, middle button pans, [ ] or Ctrl+wheel size the brush, Space peeks at the source.");
     connect(retouchAct_, &QAction::toggled, this, &CompareWindow::retouchToggle);
+    connect(retouchAct_, &QAction::toggled, this, [this] { markRows(); });   // (after retouchToggle: the row shows the mode)
     rb->addWidget(new QLabel(" Size "));
     brushSize_ = new QDoubleSpinBox;
     brushSize_->setRange(2, 2000);
@@ -166,7 +175,7 @@ CompareWindow::CompareWindow(QWidget* parent) : QMainWindow(parent) {
     brushSize_->setSuffix(" px");
     brushSize_->setValue(60);
     brushSize_->setToolTip("Brush radius in image pixels ([ and ], or Ctrl + wheel over the image).");
-    connect(brushSize_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double v) { if (rt_.on) view_[0]->setBrush(true, v, brushHard_->value()); });
+    connect(brushSize_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double) { if (rt_.on) restBrush(); });
     rb->addWidget(brushSize_);
     rb->addWidget(new QLabel(" Hardness "));
     brushHard_ = new QDoubleSpinBox;
@@ -175,8 +184,28 @@ CompareWindow::CompareWindow(QWidget* parent) : QMainWindow(parent) {
     brushHard_->setDecimals(1);
     brushHard_->setValue(0.5);
     brushHard_->setToolTip("Share of the radius painted at full strength; the rest fades out.");
-    connect(brushHard_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double v) { if (rt_.on) view_[0]->setBrush(true, brushSize_->value(), v); });
+    connect(brushHard_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double) { if (rt_.on) restBrush(); });
     rb->addWidget(brushHard_);
+    rb->addSeparator();
+    cloneAct_ = rb->addAction("Clone");
+    cloneAct_->setCheckable(true);
+    cloneAct_->setShortcut(QKeySequence("C"));
+    cloneAct_->setToolTip("Copy from another place of the left image (C), for a dust speck or a stray mark:\n"
+                          "hold Alt and click the place to copy from, then paint over the spot.\n"
+                          "Checked = the brush copies from that place; unchecked = it paints from the other pane.");
+    connect(cloneAct_, &QAction::toggled, this, [this](bool on) {
+        view_[0]->setAltPick(on && rt_.on);
+        showCloneMark();
+        if (on) statusBar()->showMessage(clone_.have ? "Clone: paint over the spot. Alt + click picks another place to copy from."
+                                                     : "Clone: hold Alt and click the place to copy from, then paint over the spot.", 12000);
+    });
+    matchAct_ = rb->addAction("Match tone");
+    matchAct_->setCheckable(true);
+    matchAct_->setChecked(appSettings().value("compare/cloneMatch", true).toBool());
+    matchAct_->setToolTip("For Clone. Checked = the copy takes the colour and brightness of the place it is painted on,\n"
+                          "and only its detail comes from the place copied. Unchecked = an exact copy.");
+    connect(matchAct_, &QAction::toggled, this, [](bool on) { QSettings s = appSettings(); s.setValue("compare/cloneMatch", on); });
+    for (QAction* a : {cloneAct_, matchAct_}) a->setEnabled(false);
     rb->addSeparator();
     maskAct_ = rb->addAction("Show mask");
     maskAct_->setCheckable(true);
@@ -209,11 +238,14 @@ CompareWindow::CompareWindow(QWidget* parent) : QMainWindow(parent) {
         if (on) statusBar()->showMessage("Frame here: click the spot. The frame of the stack that is sharpest there comes up on the right.", 12000);
     });
 
-    // ---- regions of B rendered again (a row of its own)
+    // ---- regions of the left pane's output rendered again (a row of its own)
     addToolBarBreak();
     regionTb_ = addToolBar("Regions");
     regionTb_->setMovable(false);
-    regionTb_->addWidget(new QLabel(" Refine regions of B: "));
+    regionLabel_ = new QLabel(" Refine regions: ");
+    regionLabel_->setToolTip("Renders marked parts of the left pane's image again, with more detail.\n"
+                             "The left pane must hold an output of the last render (B, C, CBn …), not a file, a frame or a composite.");
+    regionTb_->addWidget(regionLabel_);
     rectAct_ = regionTb_->addAction("Rectangle");
     rectAct_->setCheckable(true);
     rectAct_->setToolTip("Mark a region to render again: drag a rectangle on either pane.\nMark as many as needed, then press Refine. The middle or right button pans.");
@@ -257,13 +289,15 @@ CompareWindow::CompareWindow(QWidget* parent) : QMainWindow(parent) {
     regionTb_->addSeparator();
     refineAct_ = regionTb_->addAction("Refine", this, &CompareWindow::refine);
     refineAct_->setToolTip("Render the marked regions again and lay them into the left pane's image. The rest of the image is not touched.");
+    if (QWidget* b = regionTb_->widgetForAction(refineAct_)) b->setObjectName("primary");   // drawn as a button (markRows)
     refineCancelAct_ = regionTb_->addAction("Cancel", this, [this] { if (refining_) emit refineCancelRequested(); });
     refineCancelAct_->setVisible(false);
     removeRegionAct_ = regionTb_->addAction("Remove", this, [this] { removeRegion(selectedRegion()); });
     removeRegionAct_->setToolTip("Remove the selected region; its part of the image goes back to what it was.");
     clearRegionsAct_ = regionTb_->addAction("Remove all", this, &CompareWindow::clearRegions);
     clearRegionsAct_->setToolTip("Remove every region; the image goes back to what it was (brush strokes stay).");
-    regionTb_->hide();   // shown with a render whose B can be refined (setRender)
+    // (the row is always there: hidden without a render of this session, it looked as if the feature had gone; its
+    // tools say what they need when pressed)
 
     regionList_ = new QTableWidget(0, 4);
     regionList_->setHorizontalHeaderLabels({"Region", "Detail", "Edge", "State"});
@@ -333,17 +367,52 @@ CompareWindow::CompareWindow(QWidget* parent) : QMainWindow(parent) {
     list_->setToolTip("Click: show in the right pane (with three or four panes: the pane clicked last). Double-click: show in the left pane.\n"
                       "PgUp / PgDown step that pane through the list.");
     connect(list_, &QTableWidget::cellClicked, this, [this](int row, int col) { if (col != 3) showIn(active_, row); });   // (a tick is not a pick)
-    connect(list_, &QTableWidget::cellDoubleClicked, this, [this](int row, int col) { if (col != 3) showIn(0, row); });
+    connect(list_, &QTableWidget::cellDoubleClicked, this, [this](int row, int col) { if (col != 3) pickLeft(row); });
     connect(list_, &QTableWidget::itemChanged, this, [this](QTableWidgetItem* it) {
         if (fillingList_ || !it || it->column() != 3 || it->row() >= entries_.size()) return;
         entries_[it->row()].pick = it->checkState() == Qt::Checked;
         updateCompositeButton();
     });
+    framesBtn_ = new QPushButton("Hide frames");
+    framesBtn_->setToolTip("Takes the stack's frames out of the list and the panes' pickers, or puts them back.\n"
+                           "The outputs and the added images stay; a pane showing a frame keeps it.");
+    framesBtn_->hide();   // there with the first frame in the list
+    framesHidden_ = appSettings().value("compare/hideFrames", false).toBool();
+    connect(framesBtn_, &QPushButton::clicked, this, [this] { setFramesHidden(!framesHidden_); });
     compositeBtn_ = new QPushButton("Make composite");
     compositeBtn_->setEnabled(false);
-    compositeBtn_->setToolTip("Stacks the ticked images again, as if they were frames, with the Render panel's settings and outputs.\n"
-                              "The result is named by what went in: 2B1C = two B and one C.");
+    compositeBtn_->setToolTip("Stacks the ticked images again, as if they were frames, with the Render panel's settings,\n"
+                              "once for each method ticked under Methods. The result is named by what went in: 2B1C = two B and one C.");
     connect(compositeBtn_, &QPushButton::clicked, this, &CompareWindow::makeComposite);
+    // the methods a composite is made with: B, C and CBn to begin with, the others a tick away (the menu stays open
+    // while its boxes are ticked)
+    methodsBtn_ = new QToolButton;
+    methodsBtn_->setPopupMode(QToolButton::InstantPopup);
+    methodsBtn_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    methodsBtn_->setToolTip("The methods a composite is made with: one image for each ticked method.");
+    {
+        QMenu* m = new QMenu(methodsBtn_);
+        const QStringList on = appSettings().value("compare/compositeMethods", "B,C,CBn").toString().split(',', Qt::SkipEmptyParts);
+        for (const char* name : {"B", "C", "CBn", "Cn", "Cx", "Cd", "Cg", "Cg2", "H"}) {
+            QCheckBox* box = new QCheckBox(name);
+            box->setStyleSheet("QCheckBox { padding: 4px 14px 4px 8px; }");
+            box->setChecked(on.contains(name));
+            QWidgetAction* a = new QWidgetAction(m);
+            a->setDefaultWidget(box);
+            if (methodBox_.size() == kFirstMethods) m->addSeparator();
+            m->addAction(a);
+            methodBox_ << box;
+            methodAct_ << a;
+            connect(box, &QCheckBox::toggled, this, [this] {
+                QStringList ticked;
+                for (QCheckBox* b : methodBox_) if (b->isChecked()) ticked << b->text();
+                QSettings s = appSettings();
+                s.setValue("compare/compositeMethods", ticked.join(','));
+                updateCompositeButton();
+            });
+        }
+        methodsBtn_->setMenu(m);
+    }
 
     split_ = new QSplitter(Qt::Horizontal);
     split2_ = new QSplitter(Qt::Horizontal);
@@ -360,7 +429,7 @@ CompareWindow::CompareWindow(QWidget* parent) : QMainWindow(parent) {
         pick_[p] = new QComboBox;
         pick_[p]->setToolTip(p == 0 ? "The left pane's image (the result, when retouching)" : p == 1 ? "The right pane's image (the source, when retouching)"
                                     : "This pane's image. Click the pane and the list fills it.");
-        connect(pick_[p], QOverload<int>::of(&QComboBox::activated), this, [this, p](int i) { showIn(p, i); });
+        connect(pick_[p], QOverload<int>::of(&QComboBox::activated), this, [this, p](int i) { if (p == 0) pickLeft(i); else showIn(p, i); });
         view_[p] = new ImageView;
         l->addWidget(pick_[p]);
         l->addWidget(view_[p], 1);
@@ -404,17 +473,32 @@ CompareWindow::CompareWindow(QWidget* parent) : QMainWindow(parent) {
         connect(view_[a], &ImageView::viewChanged, this, [this] { if (heldFrame_ >= 0) markLayer(); });
         connect(view_[a], &ImageView::measuresChanged, this, [this, a] { for (int b = 0; b < kPanes; ++b) if (b != a) view_[b]->setMeasures(view_[a]->measures()); });
         connect(view_[a], &ImageView::measured, this, [this](QString len) { statusBar()->showMessage(QString("Measured: %1").arg(len), 10000); });
-        connect(view_[a], &ImageView::regionDrawn, this, [this](QPolygonF frac) { regionDrawn(frac); });
+        connect(view_[a], &ImageView::regionDrawn, this, [this, a](QPolygonF frac) { regionDrawn(a, frac); });
         connect(view_[a], &ImageView::barUnitChanged, this, [this, a](int u) { for (int b = 0; b < kPanes; ++b) if (b != a) view_[b]->setBarUnit(u); emit unitsChanged(measureUnit_->currentIndex(), u); });
     }
     // the brush paints on the left pane
+    connect(view_[0], &ImageView::altClicked, this, [this](QPointF p) { setCloneSource(p); });
     connect(view_[0], &ImageView::strokeBegin, this, [this](QPointF p) {
         if (!rt_.on) return;
+        if (cloneAct_->isChecked()) {   // a copy from another place of this image (the other pane is not needed)
+            if (!clone_.have) {
+                refuse("Clone: hold Alt and click the place to copy from first.");
+                return;
+            }
+            if (!ensureCloneLayer()) return;
+            if (clone_.pending) { clone_.off = (clone_.src - p).toPoint(); clone_.pending = false; showCloneMark(); }
+            rt_.inStroke = rt_.cloning = true;
+            rt_.current = Stroke{};
+            rt_.last = p;
+            cloneDab(p);
+            return;
+        }
         if (rt_.blocked) {
-            statusBar()->showMessage("Nothing is painted: the image in the pane painted from is not the size of the result. Pick an output, or one of this stack's frames.", 9000);
+            refuse("Nothing is painted: the image in the pane painted from is not the size of the result. Pick an output, or one of this stack's frames.", 9000);
             return;
         }
         rt_.inStroke = true;
+        rt_.erasing = rt_.hasClone();
         rt_.current = Stroke{};
         rt_.last = p;
         dab(p);
@@ -427,12 +511,14 @@ CompareWindow::CompareWindow(QWidget* parent) : QMainWindow(parent) {
         double len = std::hypot(d.x(), d.y());
         if (len < r) return;
         int n = (int)(len / r);
-        for (int i = 1; i <= n; ++i) dab(rt_.last + d * (double(i) / n));
+        for (int i = 1; i <= n; ++i) { const QPointF q = rt_.last + d * (double(i) / n); if (rt_.cloning) cloneDab(q); else dab(q); }
         rt_.last = p;
     });
     connect(view_[0], &ImageView::strokeEnd, this, [this] {
         if (!rt_.on || !rt_.inStroke) return;
         rt_.inStroke = false;
+        if (rt_.cloning) cloneCommit();
+        else if (rt_.erasing) eraseCommit();
         if (!rt_.current.r.isEmpty()) {
             rt_.undo.push_back(std::move(rt_.current));
             if ((int)rt_.undo.size() > kUndoDepth) { rt_.undo.erase(rt_.undo.begin()); rt_.dropped = true; }   // that stroke stays, past undoing
@@ -450,8 +536,11 @@ CompareWindow::CompareWindow(QWidget* parent) : QMainWindow(parent) {
         QVBoxLayout* l = new QVBoxLayout(w);
         l->setContentsMargins(0, 0, 0, 0);
         l->setSpacing(2);
+        l->addWidget(framesBtn_);
         l->addWidget(list_, 1);
         l->addWidget(compositeBtn_);
+        methodsBtn_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        l->addWidget(methodsBtn_);
         left->addWidget(w);
     }
     left->addWidget(regionList_);
@@ -473,6 +562,7 @@ CompareWindow::CompareWindow(QWidget* parent) : QMainWindow(parent) {
     restoreGeometry(s.value("compare/geometry").toByteArray());
     if (s.contains("compare/outer")) outer->restoreState(s.value("compare/outer").toByteArray());
     setPaneCount(s.value("compare/panes", 2).toInt());
+    markRows();
 }
 
 CompareWindow::~CompareWindow() { loader_.stop(); }
@@ -579,6 +669,40 @@ void CompareWindow::rebuildList() {
         pick_[p]->setCurrentIndex(sel_[p]);
         pick_[p]->blockSignals(false);
     }
+    applyFramesHidden();
+}
+
+// The stack's frames out of the list and the pickers, or back: with a few hundred of them the outputs, the added images
+// and the composites are hard to find. The rows stay (an entry's index is its row): they are only not shown.
+void CompareWindow::setFramesHidden(bool hidden) {
+    framesHidden_ = hidden;
+    QSettings s = appSettings();   // kept: Frame here lists every frame, and who hid them once wants them hidden then too
+    if (s.value("compare/hideFrames", false).toBool() != hidden) s.setValue("compare/hideFrames", hidden);
+    applyFramesHidden();
+}
+
+void CompareWindow::applyFramesHidden() {
+    int n = 0;
+    for (int i = 0; i < entries_.size(); ++i) if (entries_[i].owner) ++n;
+    for (int i = 0; i < entries_.size(); ++i) {
+        const bool hide = framesHidden_ && entries_[i].owner;
+        list_->setRowHidden(i, hide);
+        for (int p = 0; p < kPanes; ++p)
+            if (auto* lv = qobject_cast<QListView*>(pick_[p]->view())) lv->setRowHidden(i, hide);
+    }
+    framesBtn_->setVisible(n > 0);
+    framesBtn_->setText(QString(framesHidden_ ? "Show frames (%1)" : "Hide frames (%1)").arg(n));
+}
+
+QString CompareWindow::testHideFrames(bool hidden) {
+    setFramesHidden(hidden);
+    int rows = 0, items = 0;
+    for (int i = 0; i < entries_.size(); ++i) {
+        if (!list_->isRowHidden(i)) ++rows;
+        if (auto* lv = qobject_cast<QListView*>(pick_[1]->view()); lv && !lv->isRowHidden(i)) ++items;
+    }
+    return QString("%1 of %2 rows on show, %3 items in the right picker | button \"%4\" %5").arg(rows).arg(entries_.size()).arg(items)
+        .arg(framesBtn_->text(), framesBtn_->isHidden() ? "hidden" : "there");
 }
 
 // sweep.json: {"variants": [{"name", "dir", "options", "rc", "seconds", "change_pct"}, ...]}
@@ -825,7 +949,7 @@ void CompareWindow::applyAlign() {
         plain();
         QSignalBlocker b(alignAct_);
         alignAct_->setChecked(false);
-        statusBar()->showMessage("Align is off while retouching (the brush paints pixel on pixel). A frame of this stack is lined up when picked on the right.", 9000);
+        refuse("Align is off while retouching (the brush paints pixel on pixel). A frame of this stack is lined up when picked on the right.", 9000);
         return;
     }
     if (sel_[0] < 0 || sel_[1] < 0 || entries_[sel_[0]].image.isNull() || entries_[sel_[1]].image.isNull()) { plain(); return; }
@@ -840,7 +964,7 @@ void CompareWindow::applyAlign() {
     if (sel_[0] == sel_[1]) { plain(); return; }
     if (!align_.ok) {
         plain();
-        statusBar()->showMessage(QString("Align: %1 and %2 could not be lined up (they do not look like the same subject).").arg(entries_[sel_[0]].name, entries_[sel_[1]].name), 9000);
+        refuse(QString("Align: %1 and %2 could not be lined up (they do not look like the same subject).").arg(entries_[sel_[0]].name, entries_[sel_[1]].name), 9000);
         return;
     }
     const bool same = l.size() == r.size() && std::fabs(align_.scale - 1) < 2e-4 && std::hypot(align_.pos.x(), align_.pos.y()) < 0.3;
@@ -867,7 +991,7 @@ void CompareWindow::alignHere() {
     // the same part of the right image, in its own pixels, and that at the left image's scale
     const QRectF inRight((vis.x() - align_.pos.x()) / align_.scale, (vis.y() - align_.pos.y()) / align_.scale, vis.width() / align_.scale, vis.height() / align_.scale);
     const QRect rr = inRight.toAlignedRect().intersected(r.rect());
-    if (vis.width() < 96 || vis.height() < 96 || rr.width() < 96 || rr.height() < 96) { statusBar()->showMessage("Align here: too little of both images is on screen.", 6000); return; }
+    if (vis.width() < 96 || vis.height() < 96 || rr.width() < 96 || rr.height() < 96) { refuse("Align here: too little of both images is on screen.", 6000); return; }
     QApplication::setOverrideCursor(Qt::WaitCursor);
     const QImage a = l.copy(vis);
     const QImage b = r.copy(rr).scaled(std::max(1, (int)std::lround(rr.width() * align_.scale)), std::max(1, (int)std::lround(rr.height() * align_.scale)), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
@@ -875,7 +999,7 @@ void CompareWindow::alignHere() {
     QPointF found;
     const bool ok = estimatePlacement(a, b, s, found, &m, true);
     QApplication::restoreOverrideCursor();
-    if (!ok) { statusBar()->showMessage("Align here: the two do not line up on this part (too little structure on screen?).", 8000); return; }
+    if (!ok) { refuse("Align here: the two do not line up on this part (too little structure on screen?).", 8000); return; }
     // where b's corner was expected in a, from the placement in use
     const QPointF expected(rr.x() * align_.scale + align_.pos.x() - vis.x(), rr.y() * align_.scale + align_.pos.y() - vis.y());
     const QPointF d = found - expected;
@@ -891,6 +1015,35 @@ void CompareWindow::select(int pane, const QString& name) {
     if (i >= 0) showIn(pane, i);
 }
 
+void CompareWindow::refuse(const QString& why, int ms) {
+    statusBar()->showMessage(why, ms);
+    if (isVisible() && isActiveWindow() && !testAttribute(Qt::WA_DontShowOnScreen))
+        QToolTip::showText(QCursor::pos(), QString("<qt>%1</qt>").arg(why.toHtmlEscaped()), this, QRect(), std::min(ms, 9000));   // (rich text wraps)
+}
+
+// The image the user picked for the left pane (its picker, a double-click in the list). While retouching, the left
+// pane is the result: the retouch moves to the image picked. Unsaved strokes and regions are asked about first.
+void CompareWindow::pickLeft(int index) {
+    if (index < 0 || index >= entries_.size()) return;
+    if (!rt_.on) { showIn(0, index); return; }
+    auto back = [this] { QSignalBlocker b(pick_[0]); pick_[0]->setCurrentIndex(sel_[0]); };
+    if (index == rt_.target) { back(); return; }
+    if (refining_) { back(); refuse("Refine is running: pick another image for the left pane when it has finished."); return; }
+    if (rt_.dirty || !regions_.empty()) {
+        const auto r = QMessageBox::question(this, "xLamina", QString("Retouch %1 instead?\n\nThe unsaved strokes and regions of %2 are dropped. Save result… keeps them: press No, save, and pick again.")
+                                                                  .arg(entries_[index].name, entries_[rt_.target].name), QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (r != QMessageBox::Yes) { back(); return; }
+    }
+    const bool clone = cloneAct_->isChecked();
+    rt_.dirty = false;                 // (asked above)
+    retouchAct_->setChecked(false);    // -> retouchToggle
+    if (rt_.on) { back(); return; }
+    showIn(0, index);
+    if (entries_[index].image.isNull()) { statusBar()->showMessage(QString("%1 is being read: press Retouch (R) when it is on show.").arg(entries_[index].name), 9000); return; }
+    retouchAct_->setChecked(true);
+    if (rt_.on && clone) cloneAct_->setChecked(true);
+}
+
 void CompareWindow::showIn(int pane, int index) {
     if (index < 0 || index >= entries_.size()) return;
     if (rt_.on && pane == 0) {   // the result pane is the retouch itself
@@ -902,6 +1055,7 @@ void CompareWindow::showIn(int pane, int index) {
     pick_[pane]->blockSignals(true);
     pick_[pane]->setCurrentIndex(index);
     pick_[pane]->blockSignals(false);
+    if (pane == 0) nameRegionRow();   // (before the image is there: a file still being read is not an output either)
     refresh(pane);
 }
 
@@ -929,6 +1083,7 @@ void CompareWindow::refresh(int pane) {
         if (other != pane && !view_[other]->image().isNull()) { view_[pane]->syncFrom(view_[other]); break; }
     syncing_ = false;
     view_[pane]->setLabel(rt_.on && pane == active_ && pane > 0 ? e.name + "  (source)" : e.name);
+    if (pane == 0) nameRegionRow();
     applyAlign();   // (a new image in either pane: the right one is lined up with the left one again, when Align is on)
     for (int p = 0; p < kPanes; ++p) applyScale(p);
     updateDepthTools();
@@ -950,7 +1105,7 @@ void CompareWindow::updateOverlay() {
         view_[0]->setOverlay(QImage());
         view_[1]->setOverlay(QImage());
         overlayFor_[0] = overlayFor_[1] = -1;
-        statusBar()->showMessage("Difference compares pixel with pixel: switch Align off for it.", 6000);
+        refuse("Difference compares pixel with pixel: switch Align off for it.", 6000);
         return;
     }
     if (!diffAct_->isChecked() && depthOverlay()) { overlayFor_[0] = overlayFor_[1] = -1; return; }
@@ -967,7 +1122,7 @@ void CompareWindow::updateOverlay() {
     if (a.size() != b.size()) {
         view_[0]->setOverlay(QImage());
         view_[1]->setOverlay(QImage());
-        statusBar()->showMessage("Difference: the two images are not the same size.", 5000);
+        refuse("Difference: the two images are not the same size.", 5000);
         return;
     }
     const double pct = diffLevel_->currentData().toDouble();
@@ -1165,9 +1320,9 @@ void CompareWindow::step(int pane, int delta) {
         list_->selectRow(j);
         return;
     }
-    int i = sel_[pane] < 0 ? 0 : sel_[pane] + delta;
-    if (i < 0) i = entries_.size() - 1;
-    if (i >= entries_.size()) i = 0;
+    const int n = entries_.size(), d = delta > 0 ? 1 : -1;
+    int i = sel_[pane] < 0 ? 0 : ((sel_[pane] + d) % n + n) % n;
+    for (int tries = 0; tries < n && list_->isRowHidden(i); ++tries) i = ((i + d) % n + n) % n;   // (the frames, when they are hidden)
     showIn(pane, i);
 }
 
@@ -1194,6 +1349,7 @@ void CompareWindow::keyReleaseEvent(QKeyEvent* e) {
     if (e->key() == Qt::Key_Space && rt_.on && rt_.peek && !e->isAutoRepeat()) {
         rt_.peek = false;
         view_[0]->setLive(&rt_.resDisp, &rt_.mask);
+        if (rt_.hasClone()) view_[0]->setSecondMask(&rt_.ca);
         view_[0]->setLabel(entries_[rt_.target].name + "  (retouch)");
         return;
     }
@@ -1312,11 +1468,12 @@ void CompareWindow::retouchToggle(bool on) {
         // the source is the pane the list fills (the outlined one); when that one cannot serve, the right pane
         if (active_ != 1 && sel_[0] >= 0 && (sel_[active_] < 0 || entries_[sel_[active_]].image.isNull() || entries_[sel_[active_]].image.size() != entries_[sel_[0]].image.size())) active_ = 1;
         if (sel_[0] < 0 || sel_[active_] < 0 || entries_[sel_[0]].image.isNull() || entries_[sel_[active_]].image.isNull()) {
-            statusBar()->showMessage("Retouch needs an image in each pane: the left is the result, the right the source.", 5000);
+            refuse("Retouch needs an image in each pane: the left is the result, the right the source.", 5000);
             retouchAct_->blockSignals(true); retouchAct_->setChecked(false); retouchAct_->blockSignals(false);
             return;
         }
         if (measureAct_->isChecked()) measureAct_->setChecked(false);   // the left button paints from here on
+        if (heldFrame_ >= 0) holdLayer(-1);                             // (a held depth layer's marks lay over the pane painted on)
         if (alignAct_->isChecked()) alignAct_->setChecked(false);       // painting is pixel on pixel: both images as they are
         QApplication::setOverrideCursor(Qt::WaitCursor);
         rt_ = Retouch{};
@@ -1331,7 +1488,7 @@ void CompareWindow::retouchToggle(bool on) {
         if (ok) ok = retouchSetSource(sel_[active_]);
         QApplication::restoreOverrideCursor();
         if (!ok) {
-            statusBar()->showMessage("Retouch: the two images must be the same size, and readable at 16 bits.", 6000);
+            refuse("Retouch: the two images must be the same size, and readable at 16 bits.", 6000);
             rt_ = Retouch{};
             retouchAct_->blockSignals(true); retouchAct_->setChecked(false); retouchAct_->blockSignals(false);
             return;
@@ -1346,7 +1503,10 @@ void CompareWindow::retouchToggle(bool on) {
         view_[0]->setBrush(true, brushSize_->value(), brushHard_->value());
         view_[0]->setLabel(entries_[rt_.target].name + "  (retouch)");
         flipAct_->setEnabled(false);
-        for (QAction* a : {maskAct_, resetAct_, saveAct_}) a->setEnabled(true);
+        for (QAction* a : {maskAct_, resetAct_, saveAct_, cloneAct_, matchAct_}) a->setEnabled(true);
+        clone_ = Clone{};
+        view_[0]->setAltPick(cloneAct_->isChecked());
+        showCloneMark();
         undoAct_->setEnabled(false);
         brushSize_->setEnabled(true);
         brushHard_->setEnabled(true);
@@ -1368,7 +1528,11 @@ void CompareWindow::retouchToggle(bool on) {
         rt_ = Retouch{};
         markActive();
         flipAct_->setEnabled(true);
-        for (QAction* a : {maskAct_, undoAct_, resetAct_, saveAct_}) a->setEnabled(false);
+        for (QAction* a : {maskAct_, undoAct_, resetAct_, saveAct_, cloneAct_, matchAct_}) a->setEnabled(false);
+        { QSignalBlocker b(cloneAct_); cloneAct_->setChecked(false); }
+        clone_ = Clone{};
+        view_[0]->setAltPick(false);
+        view_[0]->setCloneMark(0, QPointF());
         brushSize_->setEnabled(false);
         brushHard_->setEnabled(false);
         if (sel_[0] >= 0) refresh(0);
@@ -1383,7 +1547,7 @@ bool CompareWindow::retouchSetSource(int index) {
     int w = 0, h = 0;
     if (!load16(entries_[index], src, w, h, nullptr)) return false;
     if (w != rt_.w || h != rt_.h || entries_[index].image.width() != w || entries_[index].image.height() != h) {
-        if (rt_.on) statusBar()->showMessage(QString("%1 is not the result's size: the brush paints nothing from it. Pick an output, or one of this stack's frames.").arg(entries_[index].name), 9000);
+        if (rt_.on) refuse(QString("%1 is not the result's size: the brush paints nothing from it. Pick an output, or one of this stack's frames.").arg(entries_[index].name), 9000);
         return false;
     }
     if (rt_.on && rt_.source >= 0 && rt_.source != index) retouchBake();
@@ -1411,6 +1575,7 @@ void CompareWindow::retouchBake() {
         showRegions();
     }
     std::fill(rt_.mask.begin(), rt_.mask.end(), 0);
+    std::fill(rt_.ca.begin(), rt_.ca.end(), 0);   // (the copies are in the result, which is the target now)
     rt_.undo.clear();
     undoAct_->setEnabled(false);
     view_[0]->patch(QRect(0, 0, rt_.w, rt_.h));
@@ -1451,15 +1616,22 @@ void CompareWindow::dab(QPointF p) {
             a = a * a * (3 - 2 * a);   // smoothstep
             int v = (int)std::lround(a * 255);
             if (v > m[x]) m[x] = (uint8_t)v;
+            if (rt_.erasing) { uint8_t& s = rt_.sa[(size_t)y * rt_.w + x]; if (v > s) s = (uint8_t)v; }
         }
     }
     composite(r);
     view_[0]->patch(r);
 }
 
-// result = target + mask * (source - target), 16-bit and the 8-bit display, inside r
+// result = target + mask * (source - target), then the clone layer over it by its share; 16-bit and the 8-bit
+// display, inside r
 void CompareWindow::composite(const QRect& r) {
+    const bool lay = rt_.hasClone();
     for (int y = r.top(); y <= r.bottom(); ++y) {
+        const uint8_t* ca = lay ? rt_.ca.data() + (size_t)y * rt_.w : nullptr;
+        const uint8_t* sa = lay ? rt_.sa.data() + (size_t)y * rt_.w : nullptr;
+        const uint16_t* cl = lay ? rt_.cl16.data() + (size_t)y * rt_.w * 3 : nullptr;
+        const QRgb* cd = lay ? reinterpret_cast<const QRgb*>(rt_.clDisp.constScanLine(y)) : nullptr;
         const uint8_t* m = rt_.mask.data() + (size_t)y * rt_.w;
         uint16_t* res = rt_.res16.data() + (size_t)y * rt_.w * 3;
         const uint16_t* tg = rt_.tgt16.data() + (size_t)y * rt_.w * 3;
@@ -1469,15 +1641,43 @@ void CompareWindow::composite(const QRect& r) {
         const QRgb* sd = reinterpret_cast<const QRgb*>(rt_.srcDisp.constScanLine(y));
         for (int x = r.left(); x <= r.right(); ++x) {
             int a = m[x];
-            if (a == 0) { for (int k = 0; k < 3; ++k) res[x * 3 + k] = tg[x * 3 + k]; rd[x] = td[x]; continue; }
-            if (a == 255) { for (int k = 0; k < 3; ++k) res[x * 3 + k] = sr[x * 3 + k]; rd[x] = sd[x]; continue; }
-            for (int k = 0; k < 3; ++k) res[x * 3 + k] = (uint16_t)((tg[x * 3 + k] * (255 - a) + sr[x * 3 + k] * a + 127) / 255);
-            int rr = (qRed(td[x]) * (255 - a) + qRed(sd[x]) * a + 127) / 255;
-            int gg = (qGreen(td[x]) * (255 - a) + qGreen(sd[x]) * a + 127) / 255;
-            int bb = (qBlue(td[x]) * (255 - a) + qBlue(sd[x]) * a + 127) / 255;
-            rd[x] = qRgb(rr, gg, bb);
+            if (a == 0) { for (int k = 0; k < 3; ++k) res[x * 3 + k] = tg[x * 3 + k]; rd[x] = td[x]; }
+            else if (a == 255) { for (int k = 0; k < 3; ++k) res[x * 3 + k] = sr[x * 3 + k]; rd[x] = sd[x]; }
+            else {
+                for (int k = 0; k < 3; ++k) res[x * 3 + k] = (uint16_t)((tg[x * 3 + k] * (255 - a) + sr[x * 3 + k] * a + 127) / 255);
+                int rr = (qRed(td[x]) * (255 - a) + qRed(sd[x]) * a + 127) / 255;
+                int gg = (qGreen(td[x]) * (255 - a) + qGreen(sd[x]) * a + 127) / 255;
+                int bb = (qBlue(td[x]) * (255 - a) + qBlue(sd[x]) * a + 127) / 255;
+                rd[x] = qRgb(rr, gg, bb);
+            }
+            if (!lay || !ca[x]) continue;
+            int c = ca[x];
+            if (rt_.erasing) c = (c * (255 - sa[x]) + 127) / 255;   // a paint stroke under way: the copy gives way under it
+            if (c == 0) continue;
+            for (int k = 0; k < 3; ++k) res[x * 3 + k] = (uint16_t)((res[x * 3 + k] * (255 - c) + cl[x * 3 + k] * c + 127) / 255);
+            rd[x] = qRgb((qRed(rd[x]) * (255 - c) + qRed(cd[x]) * c + 127) / 255, (qGreen(rd[x]) * (255 - c) + qGreen(cd[x]) * c + 127) / 255,
+                         (qBlue(rd[x]) * (255 - c) + qBlue(cd[x]) * c + 127) / 255);
         }
     }
+}
+
+// one pixel of the result as composite() shows it, from the layers (the display itself holds a clone stroke's
+// preview while one is drawn)
+QRgb CompareWindow::dispAt(int x, int y) const {
+    const size_t i = (size_t)y * rt_.w + x;
+    const int a = rt_.mask[i];
+    const QRgb t = reinterpret_cast<const QRgb*>(rt_.tgtDisp.constScanLine(y))[x];
+    QRgb v = t;
+    if (a) {
+        const QRgb s = reinterpret_cast<const QRgb*>(rt_.srcDisp.constScanLine(y))[x];
+        v = a == 255 ? s : qRgb((qRed(t) * (255 - a) + qRed(s) * a + 127) / 255, (qGreen(t) * (255 - a) + qGreen(s) * a + 127) / 255, (qBlue(t) * (255 - a) + qBlue(s) * a + 127) / 255);
+    }
+    if (rt_.hasClone() && rt_.ca[i]) {
+        const int c = rt_.ca[i];
+        const QRgb d = reinterpret_cast<const QRgb*>(rt_.clDisp.constScanLine(y))[x];
+        v = qRgb((qRed(v) * (255 - c) + qRed(d) * c + 127) / 255, (qGreen(v) * (255 - c) + qGreen(d) * c + 127) / 255, (qBlue(v) * (255 - c) + qBlue(d) * c + 127) / 255);
+    }
+    return v;
 }
 
 void CompareWindow::retouchUndo() {
@@ -1485,6 +1685,13 @@ void CompareWindow::retouchUndo() {
     Stroke s = std::move(rt_.undo.back());
     rt_.undo.pop_back();
     for (int y = 0; y < s.r.height(); ++y) memcpy(rt_.mask.data() + (size_t)(s.r.y() + y) * rt_.w + s.r.x(), s.mask.data() + (size_t)y * s.r.width(), s.r.width());
+    const size_t n = (size_t)s.r.width() * s.r.height();
+    for (int y = 0; y < s.r.height() && rt_.hasClone(); ++y) {   // the clone layer as it was before the stroke
+        const size_t at = (size_t)(s.r.y() + y) * rt_.w + s.r.x(), row = (size_t)y * s.r.width();
+        if (s.ca.size() == n) memcpy(rt_.ca.data() + at, s.ca.data() + row, s.r.width());
+        if (s.cl.size() == n * 3) memcpy(rt_.cl16.data() + at * 3, s.cl.data() + row * 3, (size_t)s.r.width() * 6);
+        if (s.cd.size() == n) memcpy(reinterpret_cast<QRgb*>(rt_.clDisp.scanLine(s.r.y() + y)) + s.r.x(), s.cd.data() + row, (size_t)s.r.width() * sizeof(QRgb));
+    }
     composite(s.r);
     view_[0]->patch(s.r);
     undoAct_->setEnabled(!rt_.undo.empty());
@@ -1495,6 +1702,7 @@ void CompareWindow::retouchUndo() {
 void CompareWindow::retouchReset() {
     if (!rt_.on) return;
     std::fill(rt_.mask.begin(), rt_.mask.end(), 0);
+    std::fill(rt_.ca.begin(), rt_.ca.end(), 0);
     rt_.undo.clear();
     rt_.dropped = false;   // (no stroke is left that Undo could not take back)
     composite(QRect(0, 0, rt_.w, rt_.h));
@@ -1504,12 +1712,36 @@ void CompareWindow::retouchReset() {
     retouchStatus();
 }
 
+// the field of view written into a file name, as the main window's Save as does: "_1.46mm" before the end
+static double fovInName(const QString& name) {
+    static const QRegularExpression tag("_(\\d+(?:\\.\\d+)?)mm(?![A-Za-z0-9])");
+    double v = 0;
+    for (auto it = tag.globalMatch(name); it.hasNext();) v = it.next().captured(1).toDouble();   // (the last one)
+    return v;
+}
+
+double CompareWindow::fovOf(const Entry& e) const {
+    if (const double v = fovInName(e.path.isEmpty() ? e.name : QFileInfo(e.path).completeBaseName()); v > 0) return v;
+    if (e.fovMm > 0) return e.fovMm;
+    if (scaleUm_ > 0 && !e.image.isNull() && e.image.size() == scaleSize_) return scaleUm_ / 1000.0;
+    return 0;
+}
+
+// "<the image's name>_retouched", with the field of view after it when it is known and the name does not say it
+// already: the main window's Save as ends its names so, and a retouched composite lost it
+QString CompareWindow::retouchedName() const {
+    if (!rt_.on) return {};
+    const Entry& t = entries_[rt_.target];
+    QString base = (!t.path.isEmpty() ? QFileInfo(t.path).completeBaseName() : t.name) + "_retouched";
+    if (const double fov = fovOf(t); fov > 0 && fovInName(base) <= 0) base += QString("_%1mm").arg(fov, 0, 'f', 2);
+    return base + ".tif";
+}
+
 void CompareWindow::retouchSave() {
     if (!rt_.on) return;
     const Entry& t = entries_[rt_.target];
     QString dir = !t.path.isEmpty() ? QFileInfo(t.path).absolutePath() : appSettings().value("compare/lastSweep").toString();
-    QString base = !t.path.isEmpty() ? QFileInfo(t.path).completeBaseName() : t.name;
-    QString def = QDir(dir).filePath(base + "_retouched.tif");
+    QString def = QDir(dir).filePath(retouchedName());
     QString fn = QFileDialog::getSaveFileName(this, "Save the retouched image", def, "16-bit TIFF (*.tif)");
     if (fn.isEmpty()) return;
     saveResultTo(fn);
@@ -1624,13 +1856,14 @@ int CompareWindow::ensureFrameEntry(int k) {
 
 void CompareWindow::addFrames() {
     if (!render_ || !render_->stack) {
-        statusBar()->showMessage("Add frames needs this session's render: render the stack, then press Compare in the main window.", 9000);
+        refuse("Add frames needs this session's render: render the stack, then press Compare in the main window.", 9000);
         return;
     }
     const int K = (int)render_->stack->po.paths.size(), before = entries_.size();
     for (int k = 0; k < K; ++k) ensureFrameEntry(k);
     const int added = entries_.size() - before;
     if (added) rebuildList();
+    setFramesHidden(false);   // asked for: on show
     if (added && list_->item(before, 0)) list_->scrollToItem(list_->item(before, 0), QAbstractItemView::PositionAtTop);
     statusBar()->showMessage(added ? QString("%1 frames of the stack are in the list. Click one to see it lined up with the outputs; PgUp / PgDn step through them. Frame here finds the sharpest one at a spot.").arg(added)
                                    : QString("The stack's %1 frames are in the list already.").arg(K), 12000);
@@ -1700,11 +1933,11 @@ bool CompareWindow::loadFrame(int i) {
     if (i < 0 || i >= entries_.size()) return false;
     Entry& e = entries_[i];
     if (!render_ || !render_->stack || e.owner != render_.get()) {
-        statusBar()->showMessage(QString("%1 is a frame of an earlier render. Press Add frames for this render's.").arg(e.name), 9000);
+        refuse(QString("%1 is a frame of an earlier render. Press Add frames for this render's.").arg(e.name), 9000);
         return false;
     }
     if (gpuIdle_ && !gpuIdle_()) {
-        statusBar()->showMessage(QString("%1 is lined up with the outputs when picked again after the render.").arg(e.name), 9000);
+        refuse(QString("%1 is lined up with the outputs when picked again after the render.").arg(e.name), 9000);
         return false;
     }
     const auto& R = render_->result;
@@ -1716,7 +1949,7 @@ bool CompareWindow::loadFrame(int i) {
     try { rc = stackcore::warp_frame(*render_->stack, k, rgb, w, h); } catch (const std::exception&) { rc = 1; }
     QApplication::restoreOverrideCursor();
     if (rc != 0 || w < R.w || h < R.h || R.w <= 0 || R.h <= 0) {
-        statusBar()->showMessage(QString("%1 could not be lined up with the render (%2).").arg(e.name, rc == 4 ? "the graphics card is out of memory" : "the frame could not be read"), 9000);
+        refuse(QString("%1 could not be lined up with the render (%2).").arg(e.name, rc == 4 ? "the graphics card is out of memory" : "the frame could not be read"), 9000);
         return false;
     }
     // the render's size (a render made in strips is up to 3 px smaller than the rectangle), 16 bits as a render writes
@@ -1786,11 +2019,11 @@ int CompareWindow::sharpestAt(int x, int y, int* second, int* how) const {
 
 void CompareWindow::frameHere(int pane, int x, int y) {
     frameHereAct_->setChecked(false);   // one pick: the left button paints, or pans, again
-    if (!render_ || !render_->stack) { statusBar()->showMessage("Frame here needs this session's render: render the stack, then press Compare in the main window.", 9000); return; }
+    if (!render_ || !render_->stack) { refuse("Frame here needs this session's render: render the stack, then press Compare in the main window.", 9000); return; }
     const auto& R = render_->result;
     const int shown = rt_.on && pane == 0 ? rt_.target : sel_[pane];
     if (shown < 0 || shown >= entries_.size() || entries_[shown].image.size() != QSize(R.w, R.h) || (pane == 1 && view_[1]->placed())) {
-        statusBar()->showMessage("Frame here: click on an output of this render (B, C, a composite, a sweep's variant), not on an image of another size.", 9000);
+        refuse("Frame here: click on an output of this render (B, C, a composite, a sweep's variant), not on an image of another size.", 9000);
         return;
     }
     if (x < 0 || y < 0 || x >= R.w || y >= R.h) return;
@@ -1798,7 +2031,7 @@ void CompareWindow::frameHere(int pane, int x, int y) {
     QApplication::setOverrideCursor(Qt::WaitCursor);
     const int k = sharpestAt(x, y, &second, &how);
     QApplication::restoreOverrideCursor();
-    if (k < 0) { statusBar()->showMessage(how == 2 ? "Frame here: no frame stands out at that spot (nothing with detail there?)." : "Frame here: the frames are not in memory and this render kept no depth map.", 9000); return; }
+    if (k < 0) { refuse(how == 2 ? "Frame here: no frame stands out at that spot (nothing with detail there?)." : "Frame here: the frames are not in memory and this render kept no depth map.", 9000); return; }
     const int before = entries_.size();
     const int K = (int)render_->stack->po.paths.size();
     for (int q = 0; q < K; ++q) ensureFrameEntry(q);   // every frame, so that PgUp / PgDn step to the ones beside it
@@ -1836,7 +2069,7 @@ void CompareWindow::setActive(int pane) {
         const int i = sel_[active_];
         if (i < 0 || i >= entries_.size() || entries_[i].image.isNull()) {
             rt_.blocked = true;
-            statusBar()->showMessage("That pane has no image to paint from: pick one for it.", 8000);
+            refuse("That pane has no image to paint from: pick one for it.", 8000);
         } else rt_.blocked = i != rt_.source && !retouchSetSource(i);   // (it says why when the image does not fit)
     }
     markActive();
@@ -1930,7 +2163,38 @@ void CompareWindow::setRender(std::shared_ptr<JobResultData> render, const QColo
             for (int p = 0; p < nPanes_; ++p) if (sel_[p] >= 0 && entries_[sel_[p]].owner && !(rt_.on && p == 0)) refresh(p);
         }
     }
-    regionTb_->setVisible(render_ != nullptr);
+    nameRegionRow();
+}
+
+// An output of the render on show, as the render made it: what Refine can render regions of. Not A (a tile does not
+// keep its sums), and not a file, a frame, a composite or the depth map.
+bool CompareWindow::refinable(int i) const {
+    if (!render_ || i < 0 || i >= entries_.size()) return false;
+    const Entry& e = entries_[i];
+    const auto& R = render_->result;
+    if (e.fileBacked || e.owner || e.name == "A" || e.image.size() != QSize(R.w, R.h)) return false;
+    return std::find(R.names.begin(), R.names.end(), e.name.toStdString()) != R.names.end();
+}
+
+// the region row names the image its tools work on: the left pane's, when that is one Refine can render
+void CompareWindow::nameRegionRow() {
+    const int t = rt_.on ? rt_.target : sel_[0];
+    regionLabel_->setText(!render_ ? QString(" Refine regions (render first): ") : refinable(t) ? QString(" Refine regions of %1: ").arg(entries_[t].name) : QString(" Refine regions: "));
+}
+
+// The brush has the left button while retouching, unless a tool has it: a region tool, Measure or Frame here.
+void CompareWindow::restBrush() {
+    const bool tool = view_[0]->regionTool() || measureAct_->isChecked() || frameHereAct_->isChecked();
+    view_[0]->setBrush(rt_.on && !tool, brushSize_->value(), brushHard_->value());
+}
+
+QString CompareWindow::testTool(int mode) {
+    QAction* tool = mode == 2 ? lassoAct_ : rectAct_;
+    tool->setChecked(true);
+    const QString said = QString("%1 %2 | row \"%3\" | retouch %4 on %5 | %6").arg(tool->text(), tool->isChecked() && view_[0]->regionTool() ? "ON" : "refused", regionLabel_->text().trimmed(),
+                                                                        rt_.on ? "on" : "off", rt_.on ? entries_[rt_.target].name : QString("-"), statusBar()->currentMessage());
+    tool->setChecked(false);
+    return said;
 }
 
 // the soft edge of a region: the Edge box's width, or (Auto) a tenth of the region's shorter side, at least 8 px so
@@ -1955,18 +2219,25 @@ void CompareWindow::setRefining(bool on) {
     strength_->setEnabled(!on);
     regionList_->setEnabled(!on);
     if (on) for (QAction* a : {rectAct_, lassoAct_}) a->setChecked(false);   // (-> regionTool(0))
+    markRows();
 }
 
-// The left pane must hold the render's B, with retouching on: the regions are laid into the retouch result. Retouching
-// is switched on here when it is off, painting from the right pane's image when that fits B and from B itself when not.
+// The left pane must hold one of the render's outputs, with retouching on: the regions are laid into the retouch
+// result. Retouching is switched on here when it is off, painting from the right pane's image when that fits the
+// output and from the output itself when not. A refusal is said in the status bar and beside the cursor: a tool
+// that does not switch on, with its reason only in a line at the bottom of the window, looks broken.
 bool CompareWindow::regionsReady() {
-    auto no = [this](const QString& why) { statusBar()->showMessage(why, 9000); return false; };
+    auto no = [this](const QString& why) { refuse(why, 12000); return false; };
     if (refining_) return no("Refine is running.");
-    if (!render_) return no("Refine needs this session's render: render the stack, then open this window from it.");
-    const auto& R = render_->result;
+    if (!render_) return no("Refine renders from the frames and the alignment of a render made since the program was started: there is none yet. "
+                            "Press Render in the main window, then Compare. An image opened from disk cannot be refined.");
     const int t = rt_.on ? rt_.target : sel_[0];
-    if (t < 0 || entries_[t].name != "B" || entries_[t].fileBacked || entries_[t].image.size() != QSize(R.w, R.h))
-        return no("Refine renders regions of the render's B again: put B in the left pane (double-click it in the list).");
+    if (!refinable(t)) {
+        const QString what = t < 0 ? QString("The left pane is empty.")
+                           : entries_[t].name == "A" ? QString("A cannot be rendered in regions.")
+                           : QString("%1 is not an output of the last render (it is a file, a frame, a composite or an earlier render's image).").arg(entries_[t].name);
+        return no(what + " Refine renders regions of an output of the last render again: double-click B, C or another output in the list.");
+    }
     if (!rt_.on) {
         if (sel_[active_] < 0 || entries_[sel_[active_]].image.isNull() || entries_[sel_[active_]].image.size() != entries_[t].image.size()) showIn(active_, t);
         retouchAct_->setChecked(true);   // -> retouchToggle, which says why when it cannot
@@ -1985,12 +2256,18 @@ void CompareWindow::regionTool(int mode) {
     // the left button marks regions while a tool is on, and paints again when it is off
     if (rt_.on) view_[0]->setBrush(mode == 0, brushSize_->value(), brushHard_->value());
     for (ImageView* v : view_) v->setRegionTool(mode);
-    if (mode) statusBar()->showMessage(mode == 1 ? "Drag a rectangle over a part of B to render again. Mark as many as needed, then press Refine."
-                                                 : "Draw around a part of B to render again. Mark as many as needed, then press Refine.", 10000);
+    markRows();
+    if (mode) statusBar()->showMessage(QString(mode == 1 ? "Drag a rectangle over a part of %1 to render again. Mark as many as needed, then press Refine."
+                                                         : "Draw around a part of %1 to render again. Mark as many as needed, then press Refine.").arg(entries_[rt_.target].name), 10000);
 }
 
-void CompareWindow::regionDrawn(const QPolygonF& frac) {
+void CompareWindow::regionDrawn(int pane, const QPolygonF& frac) {
     if (!regionsReady()) return;
+    // an outline is in fractions of the pane's picture: on an image of another size it would mark another place
+    if (pane > 0 && (sel_[pane] < 0 || entries_[sel_[pane]].image.size() != QSize(rt_.w, rt_.h))) {
+        refuse(QString("Mark regions on the left pane: this pane's image is not the size of %1.").arg(entries_[rt_.target].name));
+        return;
+    }
     QPolygonF px;
     for (const QPointF& f : frac) px << QPointF(f.x() * rt_.w, f.y() * rt_.h);
     addRegionPx(px, strength_->currentIndex());
@@ -2112,7 +2389,7 @@ void CompareWindow::refine() {
     for (int i = 0; i < (int)regions_.size(); ++i)
         if (regions_[i].state != 2 || regions_[i].rendered != regions_[i].strength) todo.push_back(i);
     if (todo.empty()) {
-        statusBar()->showMessage(regions_.empty() ? "Nothing to render: mark a region first (Rectangle or Lasso)." : "Every region is rendered already. Mark another, or change one's strength.", 8000);
+        refuse(regions_.empty() ? "Nothing to render: mark a region first (Rectangle or Lasso)." : "Every region is rendered already. Mark another, or change one's strength.", 8000);
         return;
     }
     const stackcore::StackOptions& so = *render_->stack;
@@ -2157,9 +2434,11 @@ void CompareWindow::refine() {
     if (groups.empty()) { showRegions(); return; }
     auto job = std::make_shared<RegionJobData>();
     job->render = render_;
+    const std::string output = entries_[rt_.target].name.toStdString();   // (regionsReady: one of the render's)
     jobMap_.assign(regions_.size(), {-1, -1});
     for (size_t gi = 0; gi < groups.size(); ++gi) {
         stackcore::RegionTile t;
+        t.output = output;
         t.x0 = groups[gi].x0; t.y0 = groups[gi].y0; t.x1 = groups[gi].x1; t.y1 = groups[gi].y1;
         for (int i : groups[gi].members) {
             const DetailStrength& ds = kDetail[std::clamp(regions_[i].strength, 0, 2)];
@@ -2173,7 +2452,7 @@ void CompareWindow::refine() {
     }
     setRefining(true);
     showRegions();
-    statusBar()->showMessage(QString("Refine: %1 region%2 in %3 tile%4…").arg(todo.size()).arg(todo.size() == 1 ? "" : "s").arg(groups.size()).arg(groups.size() == 1 ? "" : "s"));
+    statusBar()->showMessage(QString("Refine %5: %1 region%2 in %3 tile%4…").arg(todo.size()).arg(todo.size() == 1 ? "" : "s").arg(groups.size()).arg(groups.size() == 1 ? "" : "s").arg(entries_[rt_.target].name));
     emit refineRequested(job);
 }
 
@@ -2184,7 +2463,7 @@ void CompareWindow::refine() {
 // X for anything else
 static QString kindOf(const QString& name, double change, bool frame) {
     if (frame) return "F";
-    static const QRegularExpression own("^(Cn|A|B|C)(?![A-Za-z0-9])"), other("\\((A|B|C),");
+    static const QRegularExpression own("^(CBn|Cg2|Cn|Cx|Cd|Cg|CB|B0|A|B|C|H)(?![A-Za-z0-9])"), other("\\((A|B|C),");
     if (auto m = own.match(name); m.hasMatch()) return m.captured(1);
     if (auto m = other.match(name); m.hasMatch()) return m.captured(1);
     if (change >= 0) return "B";
@@ -2193,7 +2472,7 @@ static QString kindOf(const QString& name, double change, bool frame) {
 
 QString CompareWindow::compositeLabel(const QList<int>& picks) const {
     QString s;
-    for (const char* k : {"B", "C", "Cn", "A", "F", "X"}) {
+    for (const char* k : {"B", "B0", "C", "CB", "Cn", "CBn", "Cx", "Cd", "Cg", "Cg2", "H", "A", "F", "X"}) {
         int n = 0;
         for (int i : picks) if (kindOf(entries_[i].name, entries_[i].change, entries_[i].owner != nullptr) == k) ++n;
         if (n) s += QString::number(n) + k;
@@ -2201,15 +2480,262 @@ QString CompareWindow::compositeLabel(const QList<int>& picks) const {
     return s;
 }
 
+// the ticked methods that are on offer (the ones past the first three only with the developer controls)
+QStringList CompareWindow::compositeMethods() const {
+    QStringList out;
+    for (int i = 0; i < methodBox_.size(); ++i)
+        if (methodBox_[i]->isChecked() && (moreMethods_ || i < kFirstMethods)) out << methodBox_[i]->text();
+    return out;
+}
+
+void CompareWindow::setMoreMethods(bool on) {
+    moreMethods_ = on;
+    for (int i = kFirstMethods; i < methodAct_.size(); ++i) methodAct_[i]->setVisible(on);
+    updateCompositeButton();
+}
+
+void CompareWindow::setMethodHelp(const QString& name, const QString& help) {
+    for (QCheckBox* b : methodBox_) if (b->text() == name) b->setToolTip(help);
+}
+
 void CompareWindow::updateCompositeButton() {
+    if (!methodsBtn_) return;   // (the list is filled before the buttons are made)
     QList<int> picks;
     for (int i = 0; i < entries_.size(); ++i) if (entries_[i].pick) picks << i;
-    compositeBtn_->setEnabled(picks.size() >= 2 && !compositing_ && !refining_);
-    compositeBtn_->setText(compositing_ ? "Making the composite…" : picks.size() >= 2 ? QString("Make composite (%1)").arg(compositeLabel(picks))
+    const QStringList methods = compositeMethods();
+    methodsBtn_->setText(methods.isEmpty() ? QString("Methods: none") : methods.size() <= 4 ? "Methods: " + methods.join(", ")
+                         : QString("Methods: %1 + %2 more").arg(methods.mid(0, 3).join(", ")).arg(methods.size() - 3));
+    methodsBtn_->setEnabled(!compositing_);
+    compositeBtn_->setEnabled(picks.size() >= 2 && !methods.isEmpty() && !compositing_ && !refining_);
+    compositeBtn_->setText(compositing_ ? "Making the composite…" : picks.size() >= 2 && methods.isEmpty() ? "Make composite: tick a method"
+                           : picks.size() >= 2 ? QString("Make composite (%1)").arg(compositeLabel(picks))
                            : picks.size() == 1 ? "Make composite: tick one more" : "Make composite");
 }
 
+namespace {
+// A field of shifts on a grid of nodes: node (i, j) stands at ((i + 0.5) * cell, (j + 0.5) * cell)
+struct Field {
+    int nx = 0, ny = 0;
+    double cell = 1;
+    std::vector<QPointF> d;
+    std::vector<char> ok;
+    QPointF at(double x, double y) const {   // between the nodes; past the outermost ones, theirs
+        const double gx = std::clamp(x / cell - 0.5, 0.0, nx - 1.0), gy = std::clamp(y / cell - 0.5, 0.0, ny - 1.0);
+        const int i = std::min((int)gx, std::max(0, nx - 2)), j = std::min((int)gy, std::max(0, ny - 2));
+        const double fx = nx > 1 ? gx - i : 0.0, fy = ny > 1 ? gy - j : 0.0;
+        const int i1 = std::min(i + 1, nx - 1), j1 = std::min(j + 1, ny - 1);
+        return (d[(size_t)j * nx + i] * (1 - fx) + d[(size_t)j * nx + i1] * fx) * (1 - fy) + (d[(size_t)j1 * nx + i] * (1 - fx) + d[(size_t)j1 * nx + i1] * fx) * fy;
+    }
+};
+
+// The nodes without a measurement take the mean of their measured neighbours, from those outwards; then every node
+// takes the median of itself and its neighbours, which drops a node that found another place than the ones around it.
+void settle(Field& f) {
+    const int nx = f.nx, ny = f.ny;
+    for (int pass = 0; pass < nx + ny; ++pass) {
+        std::vector<QPointF> d = f.d;
+        std::vector<char> ok = f.ok;
+        bool any = false, left = false;
+        for (int j = 0; j < ny; ++j)
+            for (int i = 0; i < nx; ++i) {
+                if (f.ok[(size_t)j * nx + i]) continue;
+                QPointF sum;
+                int n = 0;
+                for (int dj = -1; dj <= 1; ++dj)
+                    for (int di = -1; di <= 1; ++di) {
+                        const int a = i + di, b = j + dj;
+                        if (a >= 0 && b >= 0 && a < nx && b < ny && f.ok[(size_t)b * nx + a]) { sum += f.d[(size_t)b * nx + a]; ++n; }
+                    }
+                if (n) { d[(size_t)j * nx + i] = sum / n; ok[(size_t)j * nx + i] = 1; any = true; } else left = true;
+            }
+        f.d = d; f.ok = ok;
+        if (!any || !left) break;
+    }
+    std::vector<QPointF> out = f.d;
+    for (int j = 0; j < ny; ++j)
+        for (int i = 0; i < nx; ++i) {
+            double xs[9], ys[9];
+            int n = 0;
+            for (int dj = -1; dj <= 1; ++dj)
+                for (int di = -1; di <= 1; ++di) {
+                    const int a = i + di, b = j + dj;
+                    if (a >= 0 && b >= 0 && a < nx && b < ny) { xs[n] = f.d[(size_t)b * nx + a].x(); ys[n] = f.d[(size_t)b * nx + a].y(); ++n; }
+                }
+            std::nth_element(xs, xs + n / 2, xs + n);
+            std::nth_element(ys, ys + n / 2, ys + n);
+            out[(size_t)j * nx + i] = QPointF(xs[n / 2], ys[n / 2]);
+        }
+    f.d = out;
+}
+
+// the correlation of A's window about (cx, cy) with B's the shift (dx, dy) away (every `step`-th pixel); -2 when
+// too little of the two is there, or the window has no structure to go by
+double windowMatch(const Plane& A, const Plane& B, int cx, int cy, int hw, int dx, int dy, int step) {
+    const int x0 = std::max({0, cx - hw, -dx}), x1 = std::min({A.w, cx + hw, B.w - dx});
+    const int y0 = std::max({0, cy - hw, -dy}), y1 = std::min({A.h, cy + hw, B.h - dy});
+    if (x1 - x0 < hw || y1 - y0 < hw) return -2;
+    double sab = 0, saa = 0, sbb = 0;
+    long n = 0;
+    for (int y = y0; y < y1; y += step) {
+        const float* a = A.v.data() + (size_t)y * A.w;
+        const float* b = B.v.data() + (size_t)(y + dy) * B.w + dx;
+        for (int x = x0; x < x1; x += step) { sab += a[x] * b[x]; saa += a[x] * a[x]; sbb += b[x] * b[x]; ++n; }
+    }
+    if (n < 64 || saa < 1e-7 * n || sbb < 1e-7 * n) return -2;
+    return sab / std::sqrt(saa * sbb);
+}
+
+// One size of the two pictures: for each node of a grid of `cell` px, where A's window about it lies in B
+// (A(x) = B(x + d)), searched within r px of what the pass before found there (`prev`, at 1 / up of this size)
+Field matchLevel(const Plane& A, const Plane& B, int cell, int r, int step, const Field* prev, double up = 2.0) {
+    Field f;
+    f.cell = cell;
+    f.nx = std::max(1, A.w / cell); f.ny = std::max(1, A.h / cell);
+    f.d.assign((size_t)f.nx * f.ny, QPointF());
+    f.ok.assign((size_t)f.nx * f.ny, 0);
+    const int side = 2 * r + 1;
+    std::vector<std::thread> th;
+    const int nt = std::max(1u, std::min(16u, std::thread::hardware_concurrency()));
+    for (int q = 0; q < nt; ++q)
+        th.emplace_back([&, q] {
+            std::vector<double> m((size_t)side * side);
+            for (int k = q; k < f.nx * f.ny; k += nt) {
+                const int cx = (int)((k % f.nx + 0.5) * cell), cy = (int)((k / f.nx + 0.5) * cell);
+                const QPointF start = prev ? prev->at(cx / up, cy / up) * up : QPointF();
+                const int bx = (int)std::lround(start.x()), by = (int)std::lround(start.y());
+                f.d[k] = start;
+                int best = -1;
+                for (int j = 0; j < side; ++j)
+                    for (int i = 0; i < side; ++i) {
+                        m[(size_t)j * side + i] = windowMatch(A, B, cx, cy, cell, bx + i - r, by + j - r, step);
+                        if (best < 0 || m[(size_t)j * side + i] > m[best]) best = j * side + i;
+                    }
+                if (best < 0 || m[best] < 0.3) continue;
+                const int bi = best % side, bj = best / side;
+                auto peak = [](double a, double b, double c) { const double d = a - 2 * b + c; return a > -1.5 && c > -1.5 && d < 0 ? std::clamp(0.5 * (a - c) / d, -0.5, 0.5) : 0.0; };
+                const double px = bi > 0 && bi + 1 < side ? peak(m[best - 1], m[best], m[best + 1]) : 0.0;
+                const double py = bj > 0 && bj + 1 < side ? peak(m[best - side], m[best], m[best + side]) : 0.0;
+                f.d[k] = QPointF(bx + bi - r + px, by + bj - r + py);
+                f.ok[k] = 1;
+            }
+        });
+    for (auto& t : th) t.join();
+    return f;
+}
+}  // namespace
+
+// An image of another size or crop (another program's stack of the same frames) on the grid of a reference image,
+// for Make composite. Two programs' stacks are not one picture moved and scaled: each gave the frames its own scale
+// and place, so what lies at one depth sits elsewhere than what lies at another, by tens of pixels on a deep stack,
+// and no single move, scale, rotation or perspective brings the two together (measured on a 276-frame stack: 5 px
+// median and 40 px at most left by the best of them). So: the whole-image fit first (estimatePlacement: a scale and a
+// shift), then the shift that is left, found part by part from coarse to fine (parts of about 1000 px down to about
+// 100 px of the image, each searched about what the size before found). The image is then resampled once, with the
+// bicubic kernel, at 16 bits. Where it does not reach, the reference's own pixels stand in, so the stack finds
+// nothing new there.
+static bool placeOnto(const QImage& refImg, const std::vector<uint16_t>& refPx, int W, int H, const QImage& img, const std::vector<uint16_t>& px, int w, int h,
+                      std::vector<uint16_t>& out, QString* why, QString* how) {
+    auto no = [why](const QString& s) { if (why) *why = s; return false; };
+    if (refImg.width() != W || refImg.height() != H || img.width() != w || img.height() != h || refPx.size() != (size_t)W * H * 3 || px.size() != (size_t)w * h * 3)
+        return no("the images are not read in full.");
+    if (W < 512 || H < 512) return no("the images are too small to line up.");
+    double s = 1, match = 0;
+    QPointF pos;
+    if (!estimatePlacement(refImg, img, s, pos, &match)) return no("they do not look like the same subject.");
+    // both at half size on the reference's grid, as planes of structure, and those halved three times
+    const int hwid = W / 2, hhei = H / 2;
+    auto planeOf = [](const QImage& g8) {
+        Plane p;
+        p.w = g8.width(); p.h = g8.height();
+        p.v.resize((size_t)p.w * p.h);
+        for (int y = 0; y < p.h; ++y) {
+            const uchar* row = g8.constScanLine(y);
+            for (int x = 0; x < p.w; ++x) p.v[(size_t)y * p.w + x] = row[x] / 255.f;
+        }
+        return p;
+    };
+    std::vector<Plane> A, B;
+    {
+        A.push_back(planeOf(refImg.scaled(hwid, hhei, Qt::IgnoreAspectRatio, Qt::SmoothTransformation).convertToFormat(QImage::Format_Grayscale8)));
+        QImage on(hwid, hhei, QImage::Format_RGB32);
+        on.fill(Qt::black);
+        {
+            QPainter p(&on);
+            p.setRenderHint(QPainter::SmoothPixmapTransform);
+            p.translate(pos.x() / 2, pos.y() / 2);
+            p.scale(s / 2, s / 2);
+            p.drawImage(0, 0, img);
+        }
+        B.push_back(planeOf(on.convertToFormat(QImage::Format_Grayscale8)));
+    }
+    for (int k = 0; k < 3; ++k) { A.push_back(halved(A.back())); B.push_back(halved(B.back())); }
+    for (auto& p : A) p = structure(p);
+    for (auto& p : B) p = structure(p);
+    // coarse to fine: the nodes 32 px apart at each size (48 at the last), the search 4 px wide at first and 3 after
+    Field f;
+    int measured = 0;
+    for (int lv = 3; lv >= 0; --lv) {
+        Field g = matchLevel(A[lv], B[lv], lv == 0 ? 48 : 32, lv == 3 ? 4 : 3, lv == 0 ? 2 : 1, lv == 3 ? nullptr : &f);
+        if (lv == 3) { int n = 0; for (char k : g.ok) n += k; if (n * 4 < (int)g.ok.size()) return no("too little of the two pictures agrees (are they the same stack?)."); }
+        settle(g);
+        f = std::move(g);
+    }
+    {   // once more at the last size with the nodes half as far apart: what changes within a part (two depths side by side)
+        Field g = matchLevel(A[0], B[0], 24, 2, 1, &f, 1.0);
+        for (char k : g.ok) measured += k;   // (before the nodes without detail take their neighbours')
+        settle(g);
+        f = std::move(g);
+    }
+    std::vector<double> len;
+    for (const QPointF& d : f.d) len.push_back(2 * std::hypot(d.x(), d.y()));
+    std::sort(len.begin(), len.end());
+    try { out.resize((size_t)W * H * 3); }
+    catch (const std::bad_alloc&) { return no("this PC ran out of memory (RAM)."); }
+    // each pixel of the reference's grid: where it lies in the image, and the image there (bicubic, Catmull-Rom)
+    auto rows = [&](int y0, int y1) {
+        for (int y = y0; y < y1; ++y)
+            for (int x = 0; x < W; ++x) {
+                const QPointF d = f.at(x / 2.0, y / 2.0) * 2.0;
+                const double u = (x + d.x() - pos.x()) / s, v = (y + d.y() - pos.y()) / s;
+                const int u0 = (int)std::floor(u), v0 = (int)std::floor(v);
+                uint16_t* o = out.data() + ((size_t)y * W + x) * 3;
+                if (u0 < 1 || v0 < 1 || u0 + 2 >= w || v0 + 2 >= h) {   // past the image: the reference's own pixel
+                    const uint16_t* r = refPx.data() + ((size_t)y * W + x) * 3;
+                    o[0] = r[0]; o[1] = r[1]; o[2] = r[2];
+                    continue;
+                }
+                const double tx = u - u0, ty = v - v0;
+                const double wx[4] = {((-tx + 2) * tx - 1) * tx / 2, ((3 * tx - 5) * tx * tx + 2) / 2, ((-3 * tx + 4) * tx + 1) * tx / 2, (tx - 1) * tx * tx / 2};
+                const double wy[4] = {((-ty + 2) * ty - 1) * ty / 2, ((3 * ty - 5) * ty * ty + 2) / 2, ((-3 * ty + 4) * ty + 1) * ty / 2, (ty - 1) * ty * ty / 2};
+                double acc[3] = {0, 0, 0};
+                for (int j = 0; j < 4; ++j) {
+                    const uint16_t* p = px.data() + ((size_t)(v0 - 1 + j) * w + (u0 - 1)) * 3;
+                    for (int i = 0; i < 4; ++i) {
+                        const double k = wx[i] * wy[j];
+                        acc[0] += k * p[i * 3]; acc[1] += k * p[i * 3 + 1]; acc[2] += k * p[i * 3 + 2];
+                    }
+                }
+                for (int c = 0; c < 3; ++c) o[c] = (uint16_t)std::lround(std::clamp(acc[c], 0.0, 65535.0));
+            }
+    };
+    {
+        std::vector<std::thread> th;
+        const int nt = std::max(1u, std::min(16u, std::thread::hardware_concurrency()));
+        for (int q = 0; q < nt; ++q) th.emplace_back(rows, (int)((qint64)H * q / nt), (int)((qint64)H * (q + 1) / nt));
+        for (auto& t : th) t.join();
+    }
+    if (how) *how = QString("scaled by %1, moved %2, %3 px, then part by part: %4 px in the middle of the range, up to %5 px; %6 % of the picture had detail to go by")
+                        .arg(s, 0, 'f', 4).arg(pos.x(), 0, 'f', 1).arg(pos.y(), 0, 'f', 1).arg(len[len.size() / 2], 0, 'f', 1).arg(len.back(), 0, 'f', 1)
+                        .arg((int)std::lround(100.0 * measured / std::max<size_t>(1, f.ok.size())));
+    return true;
+}
+
 void CompareWindow::testComposite(const QStringList& names) {
+    // (a file added a moment ago is still being read: the button is pressed once every named image is there)
+    bool waiting = false;
+    for (int i = 0; i < entries_.size(); ++i)
+        if (names.contains(entries_[i].name) && entries_[i].image.isNull() && entries_[i].fileBacked) { requestLoad(i); waiting = true; }
+    if (waiting) { QTimer::singleShot(400, this, [this, names] { testComposite(names); }); return; }
     for (Entry& e : entries_) e.pick = names.contains(e.name);
     rebuildList();
     makeComposite();
@@ -2219,30 +2745,83 @@ void CompareWindow::makeComposite() {
     if (compositing_ || refining_) return;
     QList<int> picks;
     for (int i = 0; i < entries_.size(); ++i) if (entries_[i].pick) picks << i;
-    if (picks.size() < 2) { statusBar()->showMessage("Make composite: tick two or more images in the list first.", 6000); return; }
+    if (picks.size() < 2) { refuse("Make composite: tick two or more images in the list first.", 6000); return; }
+    const QStringList methods = compositeMethods();
+    if (methods.isEmpty()) { refuse("Make composite: tick a method under Methods first.", 6000); return; }
     auto job = std::make_shared<CompositeJobData>();
+    job->outputs = methods;
     auto fail = [this, job](const QString& why) {
         if (!job->temp.isEmpty()) QDir(job->temp).removeRecursively();
-        statusBar()->showMessage(why, 12000);
+        refuse(why, 12000);
         emit compositeFinished(false);
     };
     QApplication::setOverrideCursor(Qt::WaitCursor);
     struct Restore { ~Restore() { QApplication::restoreOverrideCursor(); } } restore;
-    int W = 0, H = 0;
-    QStringList names;
+    // a 16-bit RGB TIFF of the composite's size is read as it is; anything else (an 8-bit file, a frame lined up here,
+    // an image held in memory only, an image of another size) goes in as a 16-bit copy, so the stack is of one kind
+    struct Src { int i = -1, w = 0, h = 0; QString file; };
+    std::vector<Src> srcs;
     for (int i : picks) {
         const Entry& e = entries_[i];
-        int w = 0, h = 0;
-        QString p;
-        // a 16-bit RGB TIFF is read as it is; anything else (an 8-bit file, a frame lined up here, an image held in
-        // memory only) goes in as a 16-bit copy, so the stack is of one kind of file
+        Src s;
+        s.i = i;
         if (!e.path.isEmpty() && !e.px16) {
             const TiffInfo t = tiff_probe(e.path.toStdWString());
-            if (t.ok() && t.samples == 3 && t.bits == 16 && !t.jpeg && !t.raw) { p = e.path; w = (int)t.width; h = (int)t.height; }
+            if (t.ok() && t.samples == 3 && t.bits == 16 && !t.jpeg && !t.raw) { s.file = e.path; s.w = (int)t.width; s.h = (int)t.height; }
         }
-        if (p.isEmpty()) {
+        if (s.file.isEmpty()) {
+            if (e.image.isNull()) { fail(QString("Make composite: %1 is not read yet. Show it in a pane once, then try again.").arg(e.name)); return; }
+            s.w = e.image.width(); s.h = e.image.height();
+        }
+        srcs.push_back(s);
+    }
+    // the composite's size: the one most of the ticked images have; of sizes with as many images each, the largest.
+    // An image of another size (another program's stack of the same frames) is lined up with the first image of
+    // that size and resampled onto its grid
+    size_t ref = 0;
+    {
+        auto share = [&](const Src& a) { int n = 0; for (const Src& b : srcs) if (b.w == a.w && b.h == a.h) ++n; return n; };
+        for (size_t k = 1; k < srcs.size(); ++k) {
+            // (of sizes with as many images each: the render's own, whose scale and frames the composite then keeps;
+            // failing that the larger)
+            auto own = [&](const Src& q) { return render_ && q.w == render_->result.w && q.h == render_->result.h; };
+            const int a = share(srcs[k]), b = share(srcs[ref]);
+            const bool larger = (qint64)srcs[k].w * srcs[k].h > (qint64)srcs[ref].w * srcs[ref].h;
+            if (a > b || (a == b && (own(srcs[k]) != own(srcs[ref]) ? own(srcs[k]) : larger))) ref = k;
+        }
+    }
+    const int W = srcs[ref].w, H = srcs[ref].h;
+    const Entry& re = entries_[srcs[ref].i];
+    std::vector<uint16_t> refPx;   // the reference's pixels, read when an image has to be lined up with it
+    QStringList names, placed;
+    for (const Src& s : srcs) {
+        const Entry& e = entries_[s.i];
+        QString p = s.file;
+        const bool other = s.w != W || s.h != H;
+        if (other || p.isEmpty()) {
             std::vector<uint16_t> px;
+            int w = 0, h = 0;
             if (!load16(e, px, w, h, nullptr)) { fail(QString("Make composite: %1 is not read yet. Show it in a pane once, then try again.").arg(e.name)); return; }
+            if (other) {
+                if (re.image.isNull() || e.image.isNull()) {
+                    fail(QString("Make composite: %1 is another size than %2 and has to be lined up with it. Show both in a pane once, then try again.").arg(e.name, re.name));
+                    return;
+                }
+                int rw = 0, rh = 0;
+                if (refPx.empty() && (!load16(re, refPx, rw, rh, nullptr) || rw != W || rh != H)) { fail(QString("Make composite: %1 could not be read.").arg(re.name)); return; }
+                statusBar()->showMessage(QString("Make composite: lining %1 up with %2…").arg(e.name, re.name));
+                QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+                std::vector<uint16_t> on;
+                QString why, how;
+                if (!placeOnto(re.image, refPx, W, H, e.image, px, w, h, on, &why, &how)) {
+                    fail(QString("Make composite: %1 could not be lined up with %2: %3").arg(e.name, re.name, why));
+                    return;
+                }
+                DiagLog::write(QString("composite: %1 (%2 x %3) lined up with %4 (%5 x %6): %7").arg(e.name).arg(w).arg(h).arg(re.name).arg(W).arg(H).arg(how));
+                placed << QString("%1 %2").arg(e.name, how);
+                px = std::move(on);
+                w = W; h = H;
+            }
             if (job->temp.isEmpty()) {
                 job->temp = QDir(QDir::tempPath()).filePath(QString("xlamina_composite_%1").arg(QCoreApplication::applicationPid()));
                 QDir(job->temp).removeRecursively();
@@ -2257,24 +2836,19 @@ void CompareWindow::makeComposite() {
                 return;
             }
         }
-        if (names.isEmpty()) { W = w; H = h; }
-        else if (w != W || h != H) {
-            fail(QString("Make composite: %1 is %2 x %3 px and %4 is %5 x %6. The images must be the same size (outputs of one render are).")
-                     .arg(names.first()).arg(W).arg(H).arg(e.name).arg(w).arg(h));
-            return;
-        }
         job->paths.emplace_back(p.toStdWString());
         names << e.name;
     }
     job->label = compositeLabel(picks);
-    job->sources = names.join(", ");
+    job->fovMm = fovOf(re);   // the composite is on the reference's grid
+    job->sources = names.join(", ") + (placed.isEmpty() ? QString() : QString(" (lined up: %1)").arg(placed.join("; ")));
     // beside the render's outputs; without a render, beside the first image that is a file
     if (render_ && !render_->outDir.isEmpty()) job->dir = render_->outDir;
     else for (int i : picks) if (!entries_[i].path.isEmpty()) { job->dir = QFileInfo(entries_[i].path).absolutePath(); break; }
     compositeTemp_ = job->temp;
     compositing_ = true;
     updateCompositeButton();
-    statusBar()->showMessage(QString("Composite %1: stacking %2…").arg(job->label, job->sources));
+    statusBar()->showMessage(QString("Composite %1 (%3): stacking %2…").arg(job->label, job->sources, methods.join(", ")));
     emit compositeRequested(job);
 }
 
@@ -2284,14 +2858,15 @@ void CompareWindow::compositeFailedToStart(const QString& why) {
     if (!compositeTemp_.isEmpty()) QDir(compositeTemp_).removeRecursively();
     compositeTemp_.clear();
     updateCompositeButton();
-    statusBar()->showMessage(why, 12000);
+    refuse(why, 12000);
     emit compositeFinished(false);
 }
 
 void CompareWindow::compositeDone(std::shared_ptr<JobResultData> data) {
     if (!compositing_) return;
     compositing_ = false;
-    if (!compositeTemp_.isEmpty()) QDir(compositeTemp_).removeRecursively();
+    // (developer aid: XLAMINA_KEEP_TEMP leaves the copies, to look at an image as it was lined up)
+    if (!compositeTemp_.isEmpty() && !qEnvironmentVariableIsSet("XLAMINA_KEEP_TEMP")) QDir(compositeTemp_).removeRecursively();
     compositeTemp_.clear();
     updateCompositeButton();
     const auto job = data ? data->composite : nullptr;
@@ -2327,6 +2902,7 @@ void CompareWindow::compositeDone(std::shared_ptr<JobResultData> data) {
         QImage d = toQImage(R.images[k].data(), R.w, R.h);
         if (cs.isValid()) { d.setColorSpace(cs); d.convertToColorSpace(QColorSpace::SRgb); }   // as the outputs are shown
         addImage(nm, d.convertToFormat(QImage::Format_RGB32), "composite of " + job->sources, file);
+        if (const int at = indexOf(nm); at >= 0) entries_[at].fovMm = job->fovMm;
         made << nm;
     }
     if (made.isEmpty()) { statusBar()->showMessage("The composite came back empty.", 12000); emit compositeFinished(false); return; }
@@ -2349,7 +2925,7 @@ void CompareWindow::refineFailedToStart(const QString& why) {
     jobMap_.clear();
     setRefining(false);
     showRegions();
-    statusBar()->showMessage(why, 12000);
+    refuse(why, 12000);
     emit refineFinished(false);
 }
 
@@ -2389,7 +2965,7 @@ void CompareWindow::regionsDone(std::shared_ptr<JobResultData> data) {
     emit refineFinished(!cancelled && bad == 0 && ok > 0);
 }
 
-// A region's patch from its tile's B: the rectangle of its outline and soft edge (inside the image and the tile), the
+// A region's patch from its tile's image: the rectangle of its outline and soft edge (inside the image and the tile), the
 // pixels at 16 bits as a render writes them and on screen as the outputs are shown, and its share per pixel: 1 inside
 // the outline, falling to 0 across the soft edge
 void CompareWindow::buildPatch(Region& g, const stackcore::RegionTile& t, const std::vector<float>& b) {
@@ -2468,10 +3044,344 @@ void CompareWindow::rebuildTarget(const QRect& rect) {
 void CompareWindow::retouchStatus() {
     if (!rt_.on) return;
     size_t painted = 0;
-    for (uint8_t m : rt_.mask) if (m) ++painted;
+    for (size_t i = 0; i < rt_.mask.size(); ++i) if (rt_.mask[i] || (rt_.hasClone() && rt_.ca[i])) ++painted;   // painted or copied
     status_->setText(QString("Retouch: %1  <-  %2   |   brush %3 px, hardness %4   |   %5 % painted, %6 stroke%7")
                          .arg(entries_[rt_.target].name, entries_[rt_.source].name).arg((int)view_[0]->brushRadius()).arg(brushHard_->value(), 0, 'f', 1)
                          .arg(100.0 * painted / std::max<size_t>(1, rt_.mask.size()), 0, 'f', 2).arg(rt_.undo.size()).arg(rt_.undo.size() == 1 ? "" : "s"));
+}
+
+// ----------------------------------------------------------------------------- rows
+
+// Each toolbar row in its section's colour: faint as a rule, strong (with a line above and below) while its mode is
+// on, so that it is plain at a glance whether the left button paints, marks regions or pans. A checked button is
+// filled with the colour, and the row's main button ("primary": Refine) is drawn as a button.
+static QString rowStyle(const QColor& c, bool active) {
+    const QString rgb = QString("%1, %2, %3").arg(c.red()).arg(c.green()).arg(c.blue());
+    QString s = QStringLiteral(
+        "QToolBar { background: rgba(RGB, BG); border: 0; border-left: 4px solid rgba(RGB, EDGE); LINES }"
+        " QToolButton:checked { background: rgb(RGB); color: white; border: 1px solid rgba(255, 255, 255, 110); border-radius: 3px; }"
+        " QToolButton:checked:disabled { background: rgba(RGB, 45); color: rgba(128, 128, 128, 220); border: 1px solid rgba(128, 128, 128, 90); }"
+        " QToolButton#primary { background: rgba(RGB, 215); color: white; font-weight: bold; border: 1px solid rgba(255, 255, 255, 90);"
+        " border-radius: 4px; padding: 2px 16px; margin: 0 6px; }"
+        " QToolButton#primary:hover { background: rgb(RGB); border-color: white; }"
+        " QToolButton#primary:pressed { background: rgba(RGB, 140); }"
+        " QToolButton#primary:disabled { background: rgba(128, 128, 128, 50); color: rgba(128, 128, 128, 210); border-color: transparent; }");
+    s.replace("LINES", active ? "border-top: 1px solid rgb(RGB); border-bottom: 1px solid rgb(RGB);" : "");
+    s.replace("BG", active ? "95" : "24");
+    s.replace("EDGE", active ? "255" : "150");
+    s.replace("RGB", rgb);
+    return s;
+}
+
+void CompareWindow::markRows() {
+    auto set = [](QToolBar* tb, const QString& s) { if (tb && tb->styleSheet() != s) tb->setStyleSheet(s); };
+    set(mainTb_, rowStyle(QColor(64, 128, 224), false));                                              // comparing: blue
+    set(retouchTb_, rowStyle(QColor(138, 79, 224), rt_.on));                                          // retouch: purple (the source pane's frame)
+    set(regionTb_, rowStyle(QColor(40, 160, 104), rectAct_->isChecked() || lassoAct_->isChecked() || refining_));   // refine: green (the regions' outlines)
+}
+
+// ----------------------------------------------------------------------------- clone (retouch: a copy from another place)
+
+namespace {
+// The sum of each cell's (2r+1)^2 neighbourhood, for a w x h plane of ch values per cell
+void boxSum(std::vector<float>& v, int w, int h, int ch, int r) {
+    std::vector<float> t(v.size());
+    for (int y = 0; y < h; ++y)
+        for (int c = 0; c < ch; ++c) {
+            const float* in = v.data() + (size_t)y * w * ch + c;
+            float* out = t.data() + (size_t)y * w * ch + c;
+            double s = 0;
+            for (int x = 0; x <= std::min(r, w - 1); ++x) s += in[(size_t)x * ch];
+            for (int x = 0; x < w; ++x) {
+                out[(size_t)x * ch] = (float)s;
+                if (x + r + 1 < w) s += in[(size_t)(x + r + 1) * ch];
+                if (x - r >= 0) s -= in[(size_t)(x - r) * ch];
+            }
+        }
+    const size_t row = (size_t)w * ch;
+    for (int x = 0; x < w; ++x)
+        for (int c = 0; c < ch; ++c) {
+            const float* in = t.data() + (size_t)x * ch + c;
+            float* out = v.data() + (size_t)x * ch + c;
+            double s = 0;
+            for (int y = 0; y <= std::min(r, h - 1); ++y) s += in[y * row];
+            for (int y = 0; y < h; ++y) {
+                out[y * row] = (float)s;
+                if (y + r + 1 < h) s += in[(y + r + 1) * row];
+                if (y - r >= 0) s -= in[(y - r) * row];
+            }
+        }
+}
+
+// the known cells' values averaged over the known cells within r of each: what is left is the tone, not the texture
+void blurKnown(std::vector<float>& v, const std::vector<uint8_t>& k, int w, int h, int ch, int r) {
+    std::vector<float> n(k.size());
+    for (size_t i = 0; i < k.size(); ++i) {
+        n[i] = k[i] ? 1.f : 0.f;
+        if (!k[i]) for (int c = 0; c < ch; ++c) v[i * ch + c] = 0.f;
+    }
+    boxSum(v, w, h, ch, r);
+    boxSum(n, w, h, 1, r);
+    for (size_t i = 0; i < k.size(); ++i)
+        for (int c = 0; c < ch; ++c) v[i * ch + c] = k[i] && n[i] > 0.5f ? v[i * ch + c] / n[i] : 0.f;
+}
+
+// The unknown cells (k == 0) of a w x h plane take the values of a membrane stretched over the known ones: no
+// detail of their own, and no step where they meet the known cells. Coarse to fine: the half-size plane is filled
+// first and gives the start; a few sweeps of "the mean of the four neighbours" settle each size.
+void fillSmooth(std::vector<float>& v, const std::vector<uint8_t>& k, int w, int h, int ch) {
+    size_t unknown = 0;
+    for (uint8_t f : k) if (!f) ++unknown;
+    if (unknown == 0) return;
+    if (unknown == k.size()) { std::fill(v.begin(), v.end(), 0.f); return; }   // nothing to go by
+    const int w2 = (w + 1) / 2, h2 = (h + 1) / 2;
+    std::vector<float> v2((size_t)w2 * h2 * ch, 0.f);
+    std::vector<uint8_t> k2((size_t)w2 * h2, 0);
+    {
+        std::vector<int> n2((size_t)w2 * h2, 0);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                const size_t i = (size_t)y * w + x, j = (size_t)(y / 2) * w2 + x / 2;
+                if (!k[i]) continue;
+                for (int c = 0; c < ch; ++c) v2[j * ch + c] += v[i * ch + c];
+                ++n2[j];
+            }
+        for (size_t j = 0; j < n2.size(); ++j)
+            if (n2[j]) { for (int c = 0; c < ch; ++c) v2[j * ch + c] /= (float)n2[j]; k2[j] = 1; }
+    }
+    fillSmooth(v2, k2, w2, h2, ch);
+    std::vector<int> u;
+    u.reserve(unknown);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const size_t i = (size_t)y * w + x;
+            if (k[i]) continue;
+            u.push_back((int)i);
+            const size_t j = (size_t)(y / 2) * w2 + x / 2;
+            for (int c = 0; c < ch; ++c) v[i * ch + c] = v2[j * ch + c];
+        }
+    auto relax = [&](int i) {
+        const int x = i % w, y = i / w;
+        for (int c = 0; c < ch; ++c) {
+            float s = 0;
+            int n = 0;
+            if (x > 0) { s += v[(size_t)(i - 1) * ch + c]; ++n; }
+            if (x + 1 < w) { s += v[(size_t)(i + 1) * ch + c]; ++n; }
+            if (y > 0) { s += v[(size_t)(i - w) * ch + c]; ++n; }
+            if (y + 1 < h) { s += v[(size_t)(i + w) * ch + c]; ++n; }
+            if (n) v[(size_t)i * ch + c] = s / n;
+        }
+    };
+    for (int it = 0; it < 12; ++it) {
+        if (it % 2 == 0) for (size_t q = 0; q < u.size(); ++q) relax(u[q]);
+        else for (size_t q = u.size(); q-- > 0;) relax(u[q]);
+    }
+}
+}  // namespace
+
+void CompareWindow::showCloneMark() {
+    const bool on = rt_.on && cloneAct_->isChecked() && clone_.have;
+    view_[0]->setCloneMark(!on ? 0 : clone_.pending ? 1 : 2, clone_.pending ? clone_.src : QPointF(clone_.off));
+}
+
+void CompareWindow::setCloneSource(QPointF p) {
+    if (!rt_.on || !cloneAct_->isChecked()) return;
+    clone_.have = clone_.pending = true;
+    clone_.src = p;
+    showCloneMark();
+    statusBar()->showMessage(QString("Clone: copying from %1, %2. Paint over the spot; the place copied from moves with the brush. Alt + click picks another.")
+                                 .arg((int)p.x()).arg((int)p.y()), 12000);
+}
+
+bool CompareWindow::ensureCloneLayer() {
+    if (rt_.hasClone()) return true;
+    try {
+        const size_t n = (size_t)rt_.w * rt_.h;
+        rt_.cl16.assign(n * 3, 0);
+        rt_.sa.assign(n, 0);
+        rt_.clDisp = QImage(rt_.w, rt_.h, QImage::Format_RGB32);
+        if (rt_.clDisp.isNull()) throw std::bad_alloc();
+        rt_.clDisp.fill(0);
+        rt_.ca.assign(n, 0);
+        if (!rt_.peek) view_[0]->setSecondMask(&rt_.ca);   // Show mask tints the copied pixels too
+    } catch (const std::bad_alloc&) {
+        rt_.cl16 = {}; rt_.sa = {}; rt_.ca = {}; rt_.clDisp = QImage();
+        statusBar()->showMessage("Clone: this PC has not enough free memory for it on an image this large.", 12000);
+        return false;
+    }
+    return true;
+}
+
+// One dab of the clone brush at p, on the screen only: the display takes the pixels from `off` away by the stroke's
+// share so far. The layers are not touched until the stroke ends, so every dab copies the image as it was.
+void CompareWindow::cloneDab(QPointF p) {
+    const double rad = view_[0]->brushRadius(), hard = brushHard_->value();
+    const int x0 = std::max(0, (int)std::floor(p.x() - rad)), x1 = std::min(rt_.w - 1, (int)std::ceil(p.x() + rad));
+    const int y0 = std::max(0, (int)std::floor(p.y() - rad)), y1 = std::min(rt_.h - 1, (int)std::ceil(p.y() + rad));
+    if (x0 > x1 || y0 > y1) return;
+    const QRect r(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+    growSnapshot(r);
+    const QPoint off = clone_.off;
+    for (int y = y0; y <= y1; ++y) {
+        uint8_t* sa = rt_.sa.data() + (size_t)y * rt_.w;
+        QRgb* rd = reinterpret_cast<QRgb*>(rt_.resDisp.scanLine(y));
+        for (int x = x0; x <= x1; ++x) {
+            const double d = std::hypot(x + 0.5 - p.x(), y + 0.5 - p.y()) / rad;
+            if (d >= 1.0) continue;
+            double a = d <= hard ? 1.0 : (1.0 - d) / std::max(1e-6, 1.0 - hard);
+            a = a * a * (3 - 2 * a);   // smoothstep
+            const int v = (int)std::lround(a * 255);
+            if (v <= sa[x]) continue;
+            sa[x] = (uint8_t)v;
+            const int qx = x + off.x(), qy = y + off.y();
+            if (qx < 0 || qy < 0 || qx >= rt_.w || qy >= rt_.h) continue;   // nothing to copy from there
+            const QRgb b = dispAt(x, y), c = dispAt(qx, qy);
+            rd[x] = qRgb((qRed(b) * (255 - v) + qRed(c) * v + 127) / 255, (qGreen(b) * (255 - v) + qGreen(c) * v + 127) / 255, (qBlue(b) * (255 - v) + qBlue(c) * v + 127) / 255);
+        }
+    }
+    view_[0]->patch(r);
+}
+
+// The end of a clone stroke. The copy is the image `off` away plus, with Match tone, a smooth correction: the
+// difference between the two places is taken in the ring around the stroke (averaged, so that it carries tone and no
+// texture) and stretched across the stroke as a membrane. The copy then meets its surroundings in colour and
+// brightness, and its detail is the copied place's. It goes into the clone layer by the stroke's share.
+void CompareWindow::cloneCommit() {
+    Stroke& s = rt_.current;
+    rt_.cloning = false;
+    if (s.r.isEmpty()) return;
+    const QRect R = s.r, img(0, 0, rt_.w, rt_.h);
+    composite(R);   // the preview out of the display: both images as they were before the stroke
+    const QPoint off = clone_.off;
+    const int W = rt_.w;
+    const QRect Q = R.adjusted(-8, -8, 8, 8).intersected(img);
+    const int w = Q.width(), h = Q.height();
+    const bool match = matchAct_->isChecked();
+    auto dispRow = [this](int y) { return reinterpret_cast<const QRgb*>(rt_.resDisp.constScanLine(y)); };
+    std::vector<float> d16, dD;
+    if (match) {
+        d16.assign((size_t)w * h * 3, 0.f);
+        dD.assign((size_t)w * h * 3, 0.f);
+        std::vector<uint8_t> known((size_t)w * h, 0);
+        for (int y = Q.top(); y <= Q.bottom(); ++y) {
+            const int qy = y + off.y();
+            if (qy < 0 || qy >= rt_.h) continue;
+            const QRgb* bd = dispRow(y);
+            const QRgb* sd = dispRow(qy);
+            for (int x = Q.left(); x <= Q.right(); ++x) {
+                const int qx = x + off.x();
+                if (qx < 0 || qx >= W || rt_.sa[(size_t)y * W + x]) continue;   // (inside the stroke: to be found)
+                const size_t i = (size_t)(y - Q.top()) * w + (x - Q.left());
+                known[i] = 1;
+                const uint16_t* b = rt_.res16.data() + ((size_t)y * W + x) * 3;
+                const uint16_t* c = rt_.res16.data() + ((size_t)qy * W + qx) * 3;
+                for (int k = 0; k < 3; ++k) d16[i * 3 + k] = (float)b[k] - (float)c[k];
+                dD[i * 3] = (float)(qRed(bd[x]) - qRed(sd[qx]));
+                dD[i * 3 + 1] = (float)(qGreen(bd[x]) - qGreen(sd[qx]));
+                dD[i * 3 + 2] = (float)(qBlue(bd[x]) - qBlue(sd[qx]));
+            }
+        }
+        blurKnown(d16, known, w, h, 3, 3);
+        blurKnown(dD, known, w, h, 3, 3);
+        fillSmooth(d16, known, w, h, 3);
+        fillSmooth(dD, known, w, h, 3);
+    }
+    // the clone layer inside R as it was, for Undo
+    const size_t n = (size_t)R.width() * R.height();
+    s.ca.resize(n); s.cl.resize(n * 3); s.cd.resize(n);
+    for (int y = 0; y < R.height(); ++y) {
+        const size_t at = (size_t)(R.y() + y) * W + R.x(), row = (size_t)y * R.width();
+        memcpy(s.ca.data() + row, rt_.ca.data() + at, R.width());
+        memcpy(s.cl.data() + row * 3, rt_.cl16.data() + at * 3, (size_t)R.width() * 6);
+        memcpy(s.cd.data() + row, reinterpret_cast<const QRgb*>(rt_.clDisp.constScanLine(R.y() + y)) + R.x(), (size_t)R.width() * sizeof(QRgb));
+    }
+    // (the result is read below and not written: a place copied from inside the stroke is still the image as it was)
+    for (int y = R.top(); y <= R.bottom(); ++y) {
+        const int qy = y + off.y();
+        QRgb* cd = reinterpret_cast<QRgb*>(rt_.clDisp.scanLine(y));
+        for (int x = R.left(); x <= R.right(); ++x) {
+            const size_t p = (size_t)y * W + x;
+            const int a = rt_.sa[p];
+            if (!a) continue;
+            rt_.sa[p] = 0;
+            const int qx = x + off.x();
+            if (qx < 0 || qy < 0 || qx >= W || qy >= rt_.h) continue;
+            const size_t i = (size_t)(y - Q.top()) * w + (x - Q.left());
+            const uint16_t* c16 = rt_.res16.data() + ((size_t)qy * W + qx) * 3;
+            const QRgb cq = dispRow(qy)[qx];
+            const int cdv[3] = {qRed(cq), qGreen(cq), qBlue(cq)};
+            // the layer's pixel and share after this stroke: over the old ones by the stroke's share
+            const int c = rt_.ca[p];
+            const uint64_t wOld = (uint64_t)(255 - a) * c, wNew = (uint64_t)a * 255, den = wOld + wNew;
+            uint16_t* cl = rt_.cl16.data() + p * 3;
+            const int old[3] = {qRed(cd[x]), qGreen(cd[x]), qBlue(cd[x])};
+            int nd[3];
+            for (int k = 0; k < 3; ++k) {
+                const float v16 = std::clamp((float)c16[k] + (match ? d16[i * 3 + k] : 0.f), 0.f, 65535.f);
+                const float vd = std::clamp((float)cdv[k] + (match ? dD[i * 3 + k] : 0.f), 0.f, 255.f);
+                cl[k] = (uint16_t)((wOld * cl[k] + wNew * (uint64_t)std::lround(v16) + den / 2) / den);
+                nd[k] = (int)((wOld * old[k] + wNew * (uint64_t)std::lround(vd) + den / 2) / den);
+            }
+            cd[x] = qRgb(nd[0], nd[1], nd[2]);
+            rt_.ca[p] = (uint8_t)((den + 127) / 255);
+        }
+    }
+    composite(R);
+    view_[0]->patch(R);
+}
+
+// The end of a paint stroke that ran over cloned pixels: their share goes down by the stroke's (composite() showed
+// it so while the stroke ran)
+void CompareWindow::eraseCommit() {
+    Stroke& s = rt_.current;
+    rt_.erasing = false;
+    if (s.r.isEmpty() || !rt_.hasClone()) return;
+    const QRect R = s.r;
+    s.ca.resize((size_t)R.width() * R.height());
+    for (int y = 0; y < R.height(); ++y) {
+        uint8_t* ca = rt_.ca.data() + (size_t)(R.y() + y) * rt_.w + R.x();
+        uint8_t* sa = rt_.sa.data() + (size_t)(R.y() + y) * rt_.w + R.x();
+        memcpy(s.ca.data() + (size_t)y * R.width(), ca, R.width());
+        for (int x = 0; x < R.width(); ++x) {
+            if (!sa[x]) continue;
+            ca[x] = (uint8_t)((ca[x] * (255 - sa[x]) + 127) / 255);
+            sa[x] = 0;
+        }
+    }
+}
+
+QString CompareWindow::testPickLeft(const QString& name) {
+    pickLeft(indexOf(name));
+    return QString("retouch %1 on %2 | clone %3 | %4").arg(rt_.on ? "on" : "off", rt_.on ? entries_[rt_.target].name : QString("-"), cloneAct_->isChecked() ? "on" : "off", statusBar()->currentMessage());
+}
+
+// a stroke begun with the mouse, and a tool switched on (as its shortcut would) before the button is let go
+QString CompareWindow::testBrokenStroke() {
+    QWidget* vp = view_[0]->viewport();
+    auto send = [vp](QEvent::Type t, QPointF p, Qt::MouseButton b, Qt::MouseButtons held) {
+        QMouseEvent e(t, p, vp->mapToGlobal(p), b, held, Qt::NoModifier);
+        QCoreApplication::sendEvent(vp, &e);
+    };
+    const QPointF a(vp->width() * 0.4, vp->height() * 0.5), b(vp->width() * 0.5, vp->height() * 0.5);
+    const size_t before = rt_.undo.size();
+    send(QEvent::MouseButtonPress, a, Qt::LeftButton, Qt::LeftButton);
+    send(QEvent::MouseMove, b, Qt::NoButton, Qt::LeftButton);
+    measureAct_->setChecked(true);
+    const QString said = QString("strokes %1 -> %2 | in a stroke: %3").arg(before).arg(rt_.undo.size()).arg(rt_.inStroke ? "STILL" : "no");
+    send(QEvent::MouseButtonRelease, b, Qt::LeftButton, Qt::NoButton);
+    measureAct_->setChecked(false);
+    return said;
+}
+
+QString CompareWindow::testClone(QPointF from, QPointF a, QPointF b, bool matchTone) {
+    cloneAct_->setChecked(true);
+    matchAct_->setChecked(matchTone);
+    setCloneSource(from);
+    emit view_[0]->strokeBegin(a);
+    emit view_[0]->strokeTo(b);
+    emit view_[0]->strokeEnd();
+    return QString("clone %1 | offset %2, %3 | strokes %4 | layer %5 | %6").arg(cloneAct_->isChecked() ? "on" : "off").arg(clone_.off.x()).arg(clone_.off.y())
+        .arg(rt_.undo.size()).arg(rt_.hasClone() ? "there" : "none").arg(statusBar()->currentMessage());
 }
 
 // ----------------------------------------------------------------------------- drops

@@ -17,6 +17,9 @@
 #include <QStatusBar>
 #include <QTableWidget>
 #include <QToolBar>
+#include <QToolButton>
+
+class QCheckBox;
 
 #include <cstdint>
 #include <functional>
@@ -54,7 +57,8 @@ public:
     void setScale(double um, QSize size);
     void setScaleBar(bool on);
     void setUnits(int measure, int bar);        // the units of the measured lines and of the scale bar (ImageView::Unit): no signal back
-    // Refine: regions marked on the render's B (a rectangle or a lasso outline each) are rendered again with a recipe
+    // Refine: regions marked on one of the render's outputs (a rectangle or a lasso outline each; the output in the
+    // left pane: B, C, CBn …) are rendered again with a recipe
     // and laid into the retouch result; everything outside them stays as it is. `render` is the render whose outputs
     // the list holds (null = none: Refine is not offered), `space` the frames' colour space, for the patches on screen
     void setRender(std::shared_ptr<JobResultData> render, const QColorSpace& space);
@@ -67,6 +71,10 @@ public:
     void compositeDone(std::shared_ptr<JobResultData> data);        // its end: data->result holds the outputs
     void compositeFailedToStart(const QString& why);                // the main window could not start it
     void testComposite(const QStringList& names);                   // developer aid: these entries ticked, the button pressed
+    // the methods offered for a composite: B, C and CBn always, the others with the developer controls; and a
+    // method's description, for its tick box
+    void setMoreMethods(bool on);
+    void setMethodHelp(const QString& name, const QString& help);
     void refineFailedToStart(const QString& why);                   // the main window could not start it
     bool refining() const { return refining_; }
     // developer aids (unattended tests): a region by its outline in image pixels, the Refine button, a region's
@@ -83,10 +91,22 @@ public:
     // returns what the window then shows and says
     QString testSource(const QString& path, const QString& savePng = {});
     QString testStroke(QPointF a, QPointF b);
+    // ... and a clone stroke: the place copied from picked as Alt + click would, then the brush dragged from a to b
+    QString testClone(QPointF from, QPointF a, QPointF b, bool matchTone);
+    void testUndo() { retouchUndo(); }
+    ImageView* testView(int pane) { return view_[std::clamp(pane, 0, kPanes - 1)]; }   // a pane's view (0 = the left one), for the manual's grabs
+    QString testPickLeft(const QString& name);   // ... the image picked for the left pane, as a double-click in the list picks it
+    QString testBrokenStroke();                  // ... a stroke cut short by a tool switched on during the drag
+    QString testSaveName() const { return retouchedName(); }
+    // ... the newest image of the list (a composite just made) retouched from itself: what Save result would call it
+    QString testRetouchLast() { setRetouch(false); showIn(0, entries_.size() - 1); showIn(1, entries_.size() - 1); setRetouch(true); return entries_.isEmpty() ? QString() : entries_.last().name + " -> " + retouchedName(); }
+    void testCloneOff() { cloneAct_->setChecked(false); }
     // ... the number of panes, every frame added to the list, and Frame here at an image position
     void testPanes(int n) { setPaneCount(n); }
     QString testActive(int pane) { setActive(pane); return QString("active pane %1 | source %2 | blocked %3 | %4").arg(active_ + 1).arg(rt_.on && rt_.source >= 0 ? entries_[rt_.source].name : QString("-")).arg(rt_.blocked ? 1 : 0).arg(statusBar()->currentMessage()); }
     int testAddFrames() { addFrames(); return (int)entries_.size(); }
+    QString testHideFrames(bool hidden);   // ... the frames hidden or shown: what the list and the button then say
+    QString testTool(int mode);            // ... a region tool pressed (1 rectangle, 2 lasso): whether it came on, and what the window says
     QString testFrameHere(int x, int y);
     QString testStep(int delta) { step(active_, delta); return QString("pane %1: %2 | %3").arg(active_ + 1).arg(sel_[active_] >= 0 ? entries_[sel_[active_]].name : QString("-"), statusBar()->currentMessage()); }
     // one of the stack's frames (by its file) shown in the pane the list fills, lined up with the render when it is
@@ -129,12 +149,21 @@ private:
         int frame = -1;
         QString frameFile;    // the frame's file (the entry itself has no path: its pixels are the lined-up ones)
         bool pick = false;    // ticked for Make composite
+        double fovMm = 0;     // the width the image stands for, mm, when neither its name nor its size says it (a composite: its reference's)
         double change = -1;   // a sweep variant: % of B's pixels differing > 2 % from the base (sweep.json change_pct); -1 = unknown
     };
     int indexOf(const QString& name) const;
+    // the width an image stands for, in mm; 0 = not known. From its file name ("..._1.46mm", as Save as writes it),
+    // what it was made from (a composite), or its size being the render's outputs' (the Field of view of the main window)
+    double fovOf(const Entry& e) const;
+    QString retouchedName() const;   // the name Save result offers
     void addEntry(Entry e);
     void rebuildList();
     void showIn(int pane, int index);
+    void pickLeft(int index);    // the user picked an image for the left pane: while retouching, the retouch moves to it
+    // a control could not do what was asked: why, in the status bar and beside the cursor (the line at the bottom of
+    // the window alone goes unseen, and the control looks broken)
+    void refuse(const QString& why, int ms = 9000);
     void refresh(int pane);
     void flip();
     void step(int pane, int delta);
@@ -167,7 +196,8 @@ private:
     bool markLayer();                    // the held layer over the panes; false when none is held
 
     // ---- retouch
-    struct Stroke { QRect r; std::vector<uint8_t> mask; };   // the mask before the stroke, inside r
+    // the mask before the stroke, inside r; and, when the stroke changed the clone layer there, that layer before it
+    struct Stroke { QRect r; std::vector<uint8_t> mask, ca; std::vector<uint16_t> cl; std::vector<QRgb> cd; };
     struct Retouch {
         bool on = false;
         int w = 0, h = 0;
@@ -186,7 +216,29 @@ private:
         // patches that are switched on
         std::vector<uint16_t> base16;
         QImage baseDisp;
+        // the clone layer: parts of the result copied to another place of it, laid over the painted result with
+        // their share ca (0..255). Empty until the first clone stroke. sa is the running stroke's own share
+        std::vector<uint16_t> cl16;
+        QImage clDisp;
+        std::vector<uint8_t> ca, sa;
+        bool cloning = false;   // the running stroke is a clone stroke
+        bool erasing = false;   // the running stroke paints from the source over cloned pixels: they give way under it
+        bool hasClone() const { return !ca.empty(); }
     } rt_;
+    // the clone brush: copies from the place `off` away from the brush (set by the first stroke after a place was picked)
+    struct Clone { bool have = false, pending = false; QPointF src; QPoint off; } clone_;
+    QAction* cloneAct_ = nullptr;
+    QAction* matchAct_ = nullptr;
+    void setCloneSource(QPointF p);     // Alt + click
+    bool ensureCloneLayer();
+    void cloneDab(QPointF p);           // the running clone stroke on the screen
+    void cloneCommit();                 // ... fitted to its surroundings and laid into the clone layer
+    void eraseCommit();                 // a paint stroke over cloned pixels: their share taken down
+    QRgb dispAt(int x, int y) const;    // the result's pixel on screen, from its layers (as composite makes it)
+    void showCloneMark();
+    QToolBar* mainTb_ = nullptr;
+    QToolBar* retouchTb_ = nullptr;
+    void markRows();                    // each toolbar row in its section's colour, stronger while its mode is on
 
     // ---- regions (Refine)
     struct Region {
@@ -212,6 +264,10 @@ private:
     int adoptFrame(int i);            // entry i is a file of one of the render's frames: it becomes that frame's row (or the row there is, returned)
     bool loadFrame(int i);            // the pixels of a frame's row; false (and why, in the status bar) when they cannot be made now
     void addFrames();                 // a row for every frame of the render
+    QPushButton* framesBtn_ = nullptr;   // above the list: the frames' rows hidden or shown
+    bool framesHidden_ = false;
+    void setFramesHidden(bool hidden);
+    void applyFramesHidden();         // the rows and the pickers' items as framesHidden_ says, and the button's text
     void frameHere(int pane, int x, int y);   // the frame sharpest at that spot, into the active pane
     int sharpestAt(int x, int y, int* second, int* how) const;   // how: 1 measured on the frames, 0 the depth map's (frames not in memory), 2 the depth map's (nothing stands out there)
     QAction* frameHereAct_ = nullptr;
@@ -220,6 +276,12 @@ private:
     bool refining_ = false;
     bool compositing_ = false, fillingList_ = false;
     QPushButton* compositeBtn_ = nullptr;
+    static constexpr int kFirstMethods = 3;     // B, C, CBn: on offer to everyone, and ticked to begin with
+    QToolButton* methodsBtn_ = nullptr;         // "Methods: B, C, CBn": its menu holds a tick box per method
+    QList<QCheckBox*> methodBox_;
+    QList<QAction*> methodAct_;
+    bool moreMethods_ = false;
+    QStringList compositeMethods() const;       // the ticked methods on offer
     QString compositeTemp_;                     // the running composite's folder of copies
     void makeComposite();
     void updateCompositeButton();
@@ -237,8 +299,12 @@ private:
     QTableWidget* regionList_ = nullptr;
     bool fillingRegions_ = false;
     void regionTool(int mode);          // 0 off, 1 rectangle, 2 lasso: the toolbar's two buttons
-    bool regionsReady();                // the left pane is the render's B, retouching on (switched on when it can be)
-    void regionDrawn(const QPolygonF& frac);
+    bool regionsReady();                // the left pane is one of the render's outputs, retouching on (switched on when it can be)
+    bool refinable(int i) const;        // entry i is an output of the render that a region can be rendered of
+    QLabel* regionLabel_ = nullptr;     // "Refine regions of CBn:"
+    void nameRegionRow();
+    void restBrush();                   // the brush on while retouching, unless a tool has the left button
+    void regionDrawn(int pane, const QPolygonF& frac);
     void removeRegion(int i);
     void clearRegions();
     void buildPatch(Region& g, const stackcore::RegionTile& t, const std::vector<float>& b);

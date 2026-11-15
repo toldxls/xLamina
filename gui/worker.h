@@ -38,6 +38,8 @@ struct RegionJobData {
 struct CompositeJobData {
     std::vector<std::filesystem::path> paths;   // the images, each a file the engine reads
     QString label;                              // what they are: "2B1C"
+    double fovMm = 0;                           // the width the composite stands for, mm (its reference image's); 0 = not known
+    QStringList outputs;                        // the methods to stack them with ("B", "C", "CBn"); empty = the Render panel's
     QString sources;                            // their names in the list, for the note
     QString dir;                                // where the composite's TIFFs go
     QString temp;                               // a folder of copies made for the job (images that had no such file), removed after it
