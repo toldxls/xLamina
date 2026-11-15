@@ -1,6 +1,7 @@
-// "Run sweep…": render B under a fixed set of alternative settings, chosen from what measurably changes B on real
-// stacks (FINDINGS 35: a one-at-a-time sweep over every depth parameter), over one alignment and one pass 1 per
-// group. The user picks the quick or the thorough set and the output folder; the two-up viewer opens on the result.
+// "Run sweep…": render B under a set of alternative settings, each changed on its own from the Render panel's, over
+// one alignment and one pass 1 per group. The sets are the settings a user reaches for when B has a fault: the depth
+// resolution, the fine focus's range and window, and the two radii. The user picks the quick or the thorough set and
+// the output folder; the two-up viewer opens on the result.
 #pragma once
 
 #include <QDialog>
@@ -21,6 +22,9 @@ public:
 
 private:
     void updateSummary();
+    // the two sets, made from the panel's own values (half and double of what is set), and the pass-1 groups of each
+    std::vector<stackcore::SweepVariant> quickSet_, extraSet_;
+    int quickGroups_ = 1, extraGroups_ = 0;
     QRadioButton* quick_ = nullptr;
     QRadioButton* thorough_ = nullptr;
     QLineEdit* out_ = nullptr;

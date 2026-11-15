@@ -68,11 +68,76 @@ __global__ void k_refine_acc(float* __restrict__ bw, int16_t* __restrict__ iw, c
     if (fw > bw[i] || (fw == bw[i] && k < iw[i])) { bw[i] = fw; iw[i] = (int16_t)k; }
 }
 
+// the same with the three bests of the twin rejection: below the smooth depth, above it, and within 1.5 frames of it
+// (every running best by the full rule: greater, or equal with the lower frame, as frames arrive in any order)
+__global__ void k_refine_acc_twin(float* __restrict__ bw, int16_t* __restrict__ iw, float* __restrict__ bb, int16_t* __restrict__ ib,
+                                  float* __restrict__ ba, int16_t* __restrict__ ia, float* __restrict__ bc, int16_t* __restrict__ ic,
+                                  const float* __restrict__ fm, const float* __restrict__ D, size_t n, int k, float R) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float off = (float)k - D[i];
+    if (fabsf(off) > R) return;
+    const float fw = fm[i];
+    if (fw > bw[i] || (fw == bw[i] && k < iw[i])) { bw[i] = fw; iw[i] = (int16_t)k; }
+    if (fabsf(off) <= 1.5f) { if (fw > bc[i] || (fw == bc[i] && k < ic[i])) { bc[i] = fw; ic[i] = (int16_t)k; } }
+    else if (off < 0.f) { if (fw > bb[i] || (fw == bb[i] && k < ib[i])) { bb[i] = fw; ib[i] = (int16_t)k; } }
+    else { if (fw > ba[i] || (fw == ba[i] && k < ia[i])) { ba[i] = fw; ia[i] = (int16_t)k; } }
+}
+// refined with the twin rejection: where the best below and the best above the smooth depth are a pair (the weaker at
+// least `rho` of the stronger, and their distances from the smooth depth within 2 frames or a third of each other),
+// the pixel takes the centre's frame; anywhere else the overall best, as k_refined
+__global__ void k_refined_twin(const float* bw, const int16_t* iw, const float* bb, const int16_t* ib, const float* ba, const int16_t* ia,
+                               const float* bc, const int16_t* ic, const float* ds, float* out, size_t n, float rho) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    if (!isfinite(bw[i])) { out[i] = ds[i]; return; }
+    float pick = (float)iw[i];
+    if (isfinite(bb[i]) && isfinite(ba[i])) {
+        const float lo = fminf(bb[i], ba[i]), hi = fmaxf(bb[i], ba[i]);
+        const float db = ds[i] - (float)ib[i], da = (float)ia[i] - ds[i];
+        const bool pair = lo >= rho * hi && fabsf(db - da) <= fmaxf(2.f, 0.34f * fmaxf(db, da));
+        // (a centre that beats both sides is the overall best already)
+        if (pair && !(isfinite(bc[i]) && bc[i] >= hi)) pick = isfinite(bc[i]) ? (float)ic[i] : rintf(ds[i]);
+    }
+    out[i] = pick;
+}
+
 // depth_s = where(confs > 0.5 & spill < 0.3, med3(refined), depth_s); refined = isfinite(bw) ? iw : depth_s
 __global__ void k_refined(const float* bw, const int16_t* iw, const float* ds, float* out, size_t n) {
     size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) out[i] = isfinite(bw[i]) ? (float)iw[i] : ds[i];
 }
+// island rejection (refine_depth): sup = 1 where the fine focus stayed within c frames of the smooth depth
+__global__ void k_support_init(const float* ref, const float* ds, uint8_t* sup, size_t n, float c) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) sup[i] = fabsf(ref[i] - ds[i]) <= c ? 1 : 0;
+}
+// one sweep of the spread: a pixel joins when one of its 8 neighbours is in and was moved to within t frames of it.
+// In place: a pixel only ever goes from 0 to 1, so reading a neighbour another thread has just set is the next sweep's
+// result arriving early. *changed is set when any pixel joined
+__global__ void k_support_spread(const float* ref, uint8_t* sup, int w, int h, float t, int* changed) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= w || y >= h) return;
+    size_t i = (size_t)y * w + x;
+    if (sup[i]) return;
+    const float r = ref[i];
+    for (int dy = -1; dy <= 1; ++dy) {
+        int yy = y + dy;
+        if (yy < 0 || yy >= h) continue;
+        for (int dx = -1; dx <= 1; ++dx) {
+            int xx = x + dx;
+            if (xx < 0 || xx >= w || (dx == 0 && dy == 0)) continue;
+            size_t j = (size_t)yy * w + xx;
+            if (sup[j] && fabsf(ref[j] - r) <= t) { sup[i] = 1; *changed = 1; return; }
+        }
+    }
+}
+// a pixel that never joined gives its move up: the best frame within 1.5 of the smooth depth, or the smooth depth
+__global__ void k_support_apply(float* ref, const uint8_t* sup, const float* bc, const int16_t* ic, const float* ds, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n && !sup[i]) ref[i] = isfinite(bc[i]) ? (float)ic[i] : ds[i];
+}
+
 __global__ void k_select(const float* confs, const float* spill, const float* med, float* ds, size_t n) {
     size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n && confs[i] > 0.5f && spill[i] < 0.3f) ds[i] = med[i];
@@ -296,7 +361,30 @@ void RefineState::alloc(int dev_, int w_, int h_) {
     CK(cudaMemset(iw, 0, n * sizeof(int16_t)));
     CK(cudaDeviceSynchronize());
 }
-void RefineState::free() { if (dev >= 0) { cudaSetDevice(dev); cudaFree(bw); cudaFree(iw); dev = -1; } }
+bool RefineState::alloc_twin() {
+    if (dev < 0) return false;
+    size_t n = (size_t)w * h;
+    CK(cudaSetDevice(dev));
+    size_t fr = 0, tot = 0;   // six planes of the output, and room left beside them for the pass itself
+    if (cudaMemGetInfo(&fr, &tot) != cudaSuccess || fr < n * 18 + ((size_t)1536 << 20)) { cudaGetLastError(); return false; }
+    float** fp[3] = {&bb, &ba, &bc};
+    int16_t** ip[3] = {&ib, &ia, &ic};
+    for (int j = 0; j < 3; ++j) {
+        if (cudaMalloc(fp[j], n * sizeof(float)) != cudaSuccess || cudaMalloc(ip[j], n * sizeof(int16_t)) != cudaSuccess) { cudaGetLastError(); free_twin(); return false; }
+        k_fill<<<blocks1(n), 256>>>(*fp[j], n, -INFINITY);
+        CK(cudaMemset(*ip[j], 0, n * sizeof(int16_t)));
+    }
+    CK(cudaDeviceSynchronize());
+    return true;
+}
+void RefineState::free_twin() {
+    if (dev < 0) return;
+    cudaSetDevice(dev);
+    cudaFree(bb); cudaFree(ba); cudaFree(bc); cudaFree(ib); cudaFree(ia); cudaFree(ic);
+    bb = ba = bc = nullptr;
+    ib = ia = ic = nullptr;
+}
+void RefineState::free() { if (dev >= 0) { free_twin(); cudaSetDevice(dev); cudaFree(bw); cudaFree(iw); dev = -1; } }
 
 void RefineScratch::alloc(int w_, int h_, float fm_sigma) {
     w = w_; h = h_;
@@ -318,7 +406,8 @@ void refine_measure(const float* d_img, RefineScratch& sc, cudaStream_t s) {
 
 void refine_accumulate(RefineState& st, int k, const float* d_fm, const float* d_depth, int R, cudaStream_t s) {
     size_t n = (size_t)st.w * st.h;
-    k_refine_acc<<<blocks1(n), 256, 0, s>>>(st.bw, st.iw, d_fm, d_depth, n, k, (float)R);
+    if (st.bb) k_refine_acc_twin<<<blocks1(n), 256, 0, s>>>(st.bw, st.iw, st.bb, st.ib, st.ba, st.ia, st.bc, st.ic, d_fm, d_depth, n, k, (float)R);
+    else k_refine_acc<<<blocks1(n), 256, 0, s>>>(st.bw, st.iw, d_fm, d_depth, n, k, (float)R);
 }
 
 HostRefine download(const RefineState& st) {
@@ -348,11 +437,26 @@ void merge_device(RefineState& a, const RefineState& b) {
     }
     merge_take(a.bw, a.iw, nullptr, sb, si, nullptr, n, 0);
     CK(cudaDeviceSynchronize());
+    if (a.bb && b.bb) {   // the three bests of the twin rejection, each merged like the overall one
+        float* af[3] = {a.bb, a.ba, a.bc};
+        int16_t* ai[3] = {a.ib, a.ia, a.ic};
+        const float* bf[3] = {b.bb, b.ba, b.bc};
+        const int16_t* bi[3] = {b.ib, b.ia, b.ic};
+        for (int j = 0; j < 3; ++j) {
+            {
+                CrossCopier cc(a.dev, b.dev);
+                cc.copy(sb, bf[j], n * sizeof(float));
+                cc.copy(si, bi[j], n * sizeof(int16_t));
+            }
+            merge_take(af[j], ai[j], nullptr, sb, si, nullptr, n, 0);
+            CK(cudaDeviceSynchronize());
+        }
+    }
     cudaFree(sb); cudaFree(si);
 }
 
 void refine_depth(std::vector<float>& depth_s, const std::vector<float>& conf, const std::vector<float>& spill, int dw, int dh,
-                  const RefineState& r, int ow, int oh, double scale, cudaStream_t s) {
+                  const RefineState& r, int ow, int oh, double scale, cudaStream_t s, float island) {
     size_t n = (size_t)ow * oh;
     float* d_ds = upload(depth_s);
     float* d_conf = upload(conf);
@@ -364,7 +468,27 @@ void refine_depth(std::vector<float>& depth_s, const std::vector<float>& conf, c
     g.build(std::max(1.0, 6 * scale));
     gaussian_blur(d_conf, confs, tmp, ow, oh, g, s);
     resize_linear(d_sp, dw, dh, spup, ow, oh, s);
-    k_refined<<<blocks1(n), 256, 0, s>>>(d_bw, d_iw, d_ds, ref, n);
+    if (r.bb) k_refined_twin<<<blocks1(n), 256, 0, s>>>(d_bw, d_iw, r.bb, r.ib, r.ba, r.ia, r.bc, r.ic, d_ds, ref, n, 0.3f);
+    else k_refined<<<blocks1(n), 256, 0, s>>>(d_bw, d_iw, d_ds, ref, n);
+    if (island > 0.f && r.bc) {   // far moves that are islands on a surface give way (see compose.h)
+        uint8_t* sup = dalloc<uint8_t>(n);
+        int* d_changed = dalloc<int>(1);
+        k_support_init<<<blocks1(n), 256, 0, s>>>(ref, d_ds, sup, n, island);
+        const dim3 blk(32, 8), grd((ow + 31) / 32, (oh + 7) / 8);
+        // sweeps in batches until none joins any more (a join travels a pixel or more per sweep; the longest way round
+        // a region is a few thousand pixels at most)
+        for (int batch = 0; batch < 200; ++batch) {
+            CK(cudaMemsetAsync(d_changed, 0, sizeof(int), s));
+            for (int it = 0; it < 32; ++it) k_support_spread<<<grd, blk, 0, s>>>(ref, sup, ow, oh, 1.5f, d_changed);
+            int changed = 0;
+            CK(cudaMemcpyAsync(&changed, d_changed, sizeof(int), cudaMemcpyDeviceToHost, s));
+            CK(cudaStreamSynchronize(s));
+            if (!changed) break;
+        }
+        k_support_apply<<<blocks1(n), 256, 0, s>>>(ref, sup, r.bc, r.ic, d_ds, n);
+        CK(cudaStreamSynchronize(s));
+        cudaFree(sup); cudaFree(d_changed);
+    }
     median3(ref, med, ow, oh, s);
     k_select<<<blocks1(n), 256, 0, s>>>(confs, spup, med, d_ds, n);
     CK(cudaMemcpyAsync(depth_s.data(), d_ds, n * sizeof(float), cudaMemcpyDeviceToHost, s));

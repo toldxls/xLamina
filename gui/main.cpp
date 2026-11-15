@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QIcon>
 #include <QTimer>
@@ -24,6 +25,8 @@
 //   --manual DIR        developer aid: with --render, save the manual's screen grabs and rects.js to DIR, then quit
 //                       (manualshots.h; tools\manual.cmd runs it off screen)
 //   --report DIR        save the problem report (Help > Report a problem) into DIR and quit
+//   --regions SPEC --regions-out DIR   developer aid: after the render, mark these regions of B in the two-up viewer,
+//                       press Refine, save grabs and the result into DIR, then quit (MainWindow::testRegions)
 //   --hover FX,FY       developer aid: after the render, show the last tab and move a synthetic cursor to that
 //                       fraction of the view (the depth map's note and highlight, for an unattended grab)
 // An exception that reaches the event loop (a slot that ran out of memory converting a whole image, say) ended the
@@ -62,7 +65,8 @@ int main(int argc, char** argv) {
     for (int s : {16, 24, 32, 48, 64, 128, 256}) icon.addFile(QString(":/xlamina-%1.png").arg(s), QSize(s, s));
     app.setWindowIcon(icon);
     applyTheme(appSettings().value("ui/theme", "dark").toString());
-    for (int i = 1; i < argc; ++i) if (QString::fromLocal8Bit(argv[i]) == "--manual") ManualShots::keepOffScreen();
+    for (int i = 1; i < argc; ++i)   // the unattended runs keep every window off the screen
+        if (const QString a = QString::fromLocal8Bit(argv[i]); a == "--manual" || a == "--regions") { ManualShots::keepOffScreen(); break; }
     for (int i = 1; i + 1 < argc; ++i)
         if (QString::fromLocal8Bit(argv[i]) == "--report") {   // the report Help > Report a problem saves, into DIR, with no window
             QString why;
@@ -70,11 +74,25 @@ int main(int argc, char** argv) {
             DiagLog::write(p.isEmpty() ? "report: " + why : "report saved: " + p);
             return p.isEmpty() ? 1 : 0;
         }
+    // --align-test LEFT RIGHT OUT.txt: developer aid: where RIGHT lies in LEFT (the two-up viewer's Align), written to OUT
+    for (int i = 1; i + 3 < argc; ++i)
+        if (QString::fromLocal8Bit(argv[i]) == "--align-test") {
+            QString why;
+            const QImage l = readImageViaWindows(QString::fromLocal8Bit(argv[i + 1]), &why), r = readImageViaWindows(QString::fromLocal8Bit(argv[i + 2]), &why);
+            double s = 1, m = 0;
+            QPointF p;
+            const bool ok = !l.isNull() && !r.isNull() && estimatePlacement(l, r, s, p, &m, qEnvironmentVariableIsSet("XLAMINA_ALIGN_FIXED"));
+            QFile f(QString::fromLocal8Bit(argv[i + 3]));
+            if (f.open(QIODevice::WriteOnly | QIODevice::Text))
+                f.write(QString("ok %1\nleft %2 %3\nright %4 %5\nscale %6\npos %7 %8\nmatch %9\n%10\n").arg(ok).arg(l.width()).arg(l.height()).arg(r.width()).arg(r.height())
+                            .arg(s, 0, 'f', 6).arg(p.x(), 0, 'f', 2).arg(p.y(), 0, 'f', 2).arg(m, 0, 'f', 4).arg(why).toUtf8());
+            return ok ? 0 : 1;
+        }
     MainWindow w;
     w.show();
     bool autoRender = false, sample = false, selfUpdate = false;
     QStringList batchDirs, positional;
-    QString folder, shots, bench, updatedFrom, hover, manual, report;
+    QString folder, shots, bench, updatedFrom, hover, manual, report, regions, regionsOut;
     double every = 3, renderIn = -1;
     for (int i = 1; i < argc; ++i) {
         QString a = QString::fromLocal8Bit(argv[i]);
@@ -90,6 +108,8 @@ int main(int argc, char** argv) {
         else if (a == "--hover" && i + 1 < argc) hover = QString::fromLocal8Bit(argv[++i]);
         else if (a == "--manual" && i + 1 < argc) manual = QString::fromLocal8Bit(argv[++i]);
         else if (a == "--report" && i + 1 < argc) report = QString::fromLocal8Bit(argv[++i]);
+        else if (a == "--regions" && i + 1 < argc) regions = QString::fromLocal8Bit(argv[++i]);
+        else if (a == "--regions-out" && i + 1 < argc) regionsOut = QString::fromLocal8Bit(argv[++i]);
         else { folder = a; positional << a; }
     }
     if (!updatedFrom.isEmpty()) w.notifyUpdated(updatedFrom);
@@ -107,6 +127,7 @@ int main(int argc, char** argv) {
     if (renderIn >= 0) QTimer::singleShot((int)(renderIn * 1000), &w, &MainWindow::render);
     if (!bench.isEmpty()) QMetaObject::invokeMethod(&w, [&w, sample, bench] { w.autoBenchmark(sample, bench); }, Qt::QueuedConnection);
     if (!manual.isEmpty()) new ManualShots(w, manual);   // grabs for docs/manual, then quits (manualshots.h)
+    if (!regions.isEmpty() && !regionsOut.isEmpty()) w.testRegions(regions, regionsOut);
     if (hover.contains(',')) {   // once the render is done, and again every 2 s (the window may still be laying out)
         const double fx = hover.section(',', 0, 0).toDouble(), fy = hover.section(',', 1, 1).toDouble();
         QTimer* ht = new QTimer(&w);

@@ -10,6 +10,7 @@
 #include <QGraphicsScene>
 #include <QGraphicsView>
 #include <QImage>
+#include <QPolygonF>
 
 #include <vector>
 
@@ -24,10 +25,18 @@ public:
     // frame, so zoom and position mean the same as for the whole image, and the crop is drawn at its place and scale
     void setLiveWindow(const QImage& img, const QRect& win, const QSize& full);
     QRectF visibleSceneRect() const;      // what the viewport shows, in scene (image) coordinates
+    // The image drawn at another place and size than its own (the two-up viewer lining one image up with another of
+    // another crop or scale): its top left at `pos`, each of its pixels `scale` scene units, in a scene of `scene` size
+    // (the other image's). clearPlacement() puts it back; a new image keeps the placement until then.
+    void setPlacement(QPointF pos, double scale, QSizeF scene);
+    void clearPlacement();
+    bool placed() const { return placed_; }
     void fit();
     void actualSize();
     double zoom() const { return transform().m11(); }
     QImage image() const { return image_; }
+    // a faint frame round the view (the compare window's pane that is painted from); an invalid colour = none
+    void setFrameTint(const QColor& c);
     void setLabel(const QString& text);   // the image's name, drawn in the corner so the active output is never in doubt
     void syncFrom(const ImageView* o);    // take o's transform and scroll position (the two-up viewer's shared view)
     bool fitted() const { return fitted_; }
@@ -54,6 +63,14 @@ public:
     // measured lines theirs
     void setSceneWidthUm(double um);
     void setScaleBar(bool on);
+    // The unit lengths are written in, one for the measured lines and one for the scale bar: 0 automatic (µm or mm,
+    // whichever reads best), 1 pixels of the image, 2 µm, 3 mm, 4 cm. While the width is not known everything is in
+    // pixels, and the bar is drawn only when its unit is pixels. A click on the scale bar steps its unit (barUnitChanged)
+    enum Unit { UnitAuto = 0, UnitPx, UnitUm, UnitMm, UnitCm, UnitCount };
+    void setMeasureUnit(int u);
+    void setBarUnit(int u);
+    int measureUnit() const { return measureUnit_; }
+    int barUnit() const { return barUnit_; }
     // measure mode: the left button draws a line whose length is written beside it (Shift keeps it level, upright or
     // at 45 degrees), the middle or right button pans, Backspace takes the last line away. The lines stay, at their
     // places in the image, until clearMeasures().
@@ -64,8 +81,20 @@ public:
     int measureCount() const { return (int)lines_.size(); }
     const std::vector<QLineF>& measures() const { return lines_; }
     void setMeasures(const std::vector<QLineF>& lines);   // another view's lines (the two-up viewer): no signal
+    // regions (the two-up viewer's Refine): with the tool on, the left button drags a rectangle (mode 1) or draws a
+    // closed outline (mode 2), reported by regionDrawn; the middle or right button pans. The regions on show are the
+    // owner's: outlines as fractions of the image, numbered from 1, drawn by their state
+    struct RegionMark {
+        QPolygonF frac;
+        int state = 0;        // 0 marked, 1 being rendered, 2 rendered and applied, 3 rendered and switched off, 4 failed
+    };
+    void setRegionTool(int mode);   // 0 = off
+    int regionTool() const { return region_; }
+    void setRegions(const std::vector<RegionMark>& marks, int selected = -1);
 
 signals:
+    void barUnitChanged(int unit);        // the scale bar was clicked: its unit stepped to this one
+    void regionDrawn(QPolygonF frac);     // an outline was finished, as fractions of the image
     void measured(QString length);        // a line was drawn: its length in words
     void measuresChanged();               // a line was drawn, removed, or all were cleared (not by setMeasures)
     void clicked(int x, int y);           // the left button pressed and released in one place (not a drag): image coordinates
@@ -97,6 +126,7 @@ private:
     LiveImageItem* live_ = nullptr;
     QImage image_;
     QString label_;
+    QColor tint_;
     QString note_;
     bool precise_ = false;
     bool fitted_ = true;
@@ -113,10 +143,24 @@ private:
     bool scaleBar_ = true, measure_ = false, drawing_ = false;
     std::vector<QLineF> lines_;           // as fractions of the image's width and height, so they hold for any size of it
     QLineF cur_;                          // the line being drawn
+    bool placed_ = false;                 // setPlacement is in effect
+    QPointF placePos_;
+    double placeScale_ = 1.0;
+    QSizeF placeScene_;
+    int region_ = 0;                      // the region tool: 0 off, 1 rectangle, 2 lasso
+    bool outlining_ = false;
+    QPointF regionStart_;                 // viewport position of the press
+    QPolygonF curRegion_;                 // the outline being drawn, as fractions
+    std::vector<RegionMark> marks_;
+    int markSel_ = -1;
+    void drawRegion(QPainter* p, const QPolygonF& frac, int state, int number, bool selected) const;
     bool hasImage() const;
     QPointF toFrac(QPointF scene) const;
     QPointF fromFrac(QPointF frac) const; // -> viewport
     QString lengthText(const QLineF& frac) const;
+    QString unitText(double px, int unit) const;   // a length of px image pixels in a unit
+    int measureUnit_ = UnitAuto, barUnit_ = UnitAuto;
+    QRectF barRect_;                      // the scale bar's plate in the viewport while it is drawn (a click steps its unit)
     void drawMeasure(QPainter* p, const QLineF& frac, bool live) const;
 };
 

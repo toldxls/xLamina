@@ -90,7 +90,62 @@ void Worker::start(const JobOptions& jo_in, int liveDown, bool quiet) {
         int rc = run_job(j, d.align, hooks);
         if (rc == 0) d.reportJson = QString::fromStdString(report_json(j.align, d.align));   // a failed job has no alignment to report
         d.outDir = QString::fromStdString(j.stack.out.empty() ? j.out : j.stack.out);
+        if (rc == 0 || rc == 6) {   // the options as they ran, for the regions rendered again later (Refine)
+            d.stack = std::make_shared<StackOptions>(j.stack);
+            d.stack->result = nullptr;
+            d.stack->hooks = Hooks{};      // (they point into this job)
+            d.stack->po.hooks = Hooks{};
+        }
         return rc;
+    });
+}
+
+void Worker::startRegions(std::shared_ptr<RegionJobData> job) {
+    if (running_ || !job || !job->render || !job->render->stack) return;
+    running_ = true;
+    cancel_.store(false);
+    auto jo = std::make_shared<JobOptions>();   // (launch's shape; the job's options are the render's)
+    auto data = std::make_shared<JobResultData>();
+    data->regions = job;
+    data->outDir = job->render->outDir;
+    launch(jo, data, 12, true, [this, job](JobOptions&, JobResultData&, Hooks& hooks) {
+        StackOptions so = *job->render->stack;
+        so.hooks = hooks;
+        so.po.opt.cache = so.cache_frames ? &cache_ : nullptr;   // the stack the render left resident
+        return run_region(so, job->render->result, job->tiles);
+    });
+}
+
+void Worker::startComposite(const JobOptions& jo_in, std::shared_ptr<CompositeJobData> job) {
+    if (running_ || !job || job->paths.size() < 2) return;
+    running_ = true;
+    cancel_.store(false);
+    auto jo = std::make_shared<JobOptions>(jo_in);
+    auto data = std::make_shared<JobResultData>();
+    data->composite = job;
+    data->outDir = job->dir;
+    jo->stack.result = &data->result;
+    launch(jo, data, 12, true, [job](JobOptions& j, JobResultData&, Hooks& hooks) {
+        StackOptions& so = j.stack;
+        if (so.po.opt.devices.empty()) so.po.opt.devices = j.align.devs;
+        so.po.opt.readers = j.align.readers;
+        so.po.opt.cache = nullptr;        // (the folder's frames stay resident; these few are read into a cache of the job's own)
+        const TiffInfo t = tiff_probe(job->paths.front());
+        if (!t.ok()) { stackcore::note_fail(stackcore::Fail::FileRead, job->paths.front().filename().string()); return 1; }
+        so.po.list.clear();
+        so.po.paths = job->paths;
+        so.po.T.assign(job->paths.size(), Similarity{});   // as they lie: outputs of one render are on one grid
+        so.po.g.W = (int)t.width; so.po.g.H = (int)t.height;
+        so.po.g.x0 = 0; so.po.g.y0 = 0; so.po.g.x1 = (int)t.width - 1; so.po.g.y1 = (int)t.height - 1;
+        so.po.g.scale = 1.0;
+        so.po.frames_sel.clear();
+        so.po.row_gain.clear(); so.po.rs_dx.clear(); so.po.rs_dy.clear();   // nothing of the frames' corrections applies to outputs
+        so.po.dust = nullptr;
+        so.fix_rs = so.fix_banding = false;
+        so.out.clear();                   // the viewer writes the files, under the composite's name
+        so.diagnostics = false;
+        so.hooks = hooks;
+        return run_stack(so);
     });
 }
 

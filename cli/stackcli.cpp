@@ -111,6 +111,8 @@ static int usage() {
             "  stackcli sweep LIST.txt --rect X0,Y0,X1,Y1 --out DIR --grid GRID.txt [stack options as the base]   one pass 1, then a B per variant\n"
             "                 GRID.txt: one line per set, '--sgm-p1 0.03,0.06 --dark-prior 0,1' = every combination of the comma lists;\n"
             "                 a line 'base' = the base options alone; # comments. Variants write DIR\\<name>\\B.tif; DIR\\sweep.json lists them\n"
+            "  stackcli region DIR --out DIR --region X0,Y0,X1,Y1 [--region ...] [--grid GRID.txt] [--margin 512] [run's options]\n"
+            "                 render DIR as run does, then each region (output px) again: with the same settings, and per grid variant\n"
             "  stackcli align DIR --out DIR [--prefix IMG_] [--align-scale 0.25] [--baselines 1,2,4,8] [--ref middle]\n"
             "                 [--gpus 0,1] [--pairs i:j,...]      alignment -> report.json + list.txt (+ per-pair dump)\n");
     return 2;
@@ -744,6 +746,104 @@ static int cmd_run(int argc, char** argv) {
     return worst;
 }
 
+// ----------------------------------------------------------------------------- region: a render, then parts of it again
+
+// stackcli region DIR --out DIR --region X0,Y0,X1,Y1 [--region ...] [--grid GRID.txt] [--margin 512] [run's options]
+// Renders DIR as `run` does, then renders each region (output px of that render, inclusive) again through run_region:
+// once with the render's own settings ("same": how far a region is from the render it came from) and once per
+// variant of the grid file (the sweep's format). Writes region<N>_render.tif (the render's pixels of the tile) and
+// region<N>_<variant>.tif into --out, and prints each one's difference from the render.
+static int cmd_region(int argc, char** argv) {
+    if (argc < 3) return usage();
+    JobOptions jo;
+    jo.align.dir = argv[2];
+    jo.stack.po.opt.streams_per_gpu = 2;
+    std::vector<std::vector<double>> regions;
+    std::string grid;
+    double margin = 512;
+    int i = 3;
+    for (; i + 1 < argc; i += 2) {
+        std::string a = argv[i], v = argv[i + 1];
+        if (a == "--out") jo.out = v;
+        else if (a == "--region") { auto d = parse_doubles(v); if (d.size() != 4) return usage(); regions.push_back(d); }
+        else if (a == "--grid") grid = v;
+        else if (a == "--margin") margin = atof(v.c_str());
+        else if (parse_align_option(a, v, jo.align)) continue;
+        else if (parse_stack_option(a, v, jo.stack)) continue;
+        else return usage();
+    }
+    if (i < argc) { fprintf(stderr, "option %s has no value\n", argv[i]); return usage(); }
+    if (jo.out.empty() || regions.empty()) return usage();
+    std::vector<SweepVariant> variants;
+    variants.push_back({"same", {}});
+    if (!grid.empty())
+        for (auto& v : read_grid(grid)) if (v.name != "base") variants.push_back(v);
+
+    FrameCache cache;   // the frames stay resident from the render to the regions, as in the window
+    jo.cache = &cache;
+    StackOptions::Result whole;
+    jo.stack.result = &whole;
+    if (std::find(jo.stack.outputs.begin(), jo.stack.outputs.end(), "B") == jo.stack.outputs.end()) jo.stack.outputs.push_back("B");
+    AlignOut A;
+    if (int rc = run_job(jo, A, Hooks{})) { printf("region: the render failed (code %d)\n", rc); return rc; }
+    const size_t jb = std::find(whole.names.begin(), whole.names.end(), "B") - whole.names.begin();
+    if (jb >= whole.names.size()) { printf("region: the render has no B\n"); return 1; }
+    const std::vector<float>& B = whole.images[jb];
+    const Grid g = jo.stack.po.g;
+    printf("region: the render is %d x %d; noise floor %.4f, flat thresholds %.4g .. %.4g, %d levels\n", whole.w, whole.h, whole.depth_floor,
+           whole.flat_lo, whole.flat_hi, whole.levels);
+
+    std::vector<RegionTile> tiles;
+    for (auto& r : regions) {   // output px -> sensor px
+        RegionTile t;
+        t.x0 = g.x0 + (int)std::floor(r[0] / g.scale); t.y0 = g.y0 + (int)std::floor(r[1] / g.scale);
+        t.x1 = g.x0 + (int)std::ceil((r[2] + 1) / g.scale) - 1; t.y1 = g.y0 + (int)std::ceil((r[3] + 1) / g.scale) - 1;
+        t.variants = variants;
+        tiles.push_back(std::move(t));
+    }
+    jo.stack.result = nullptr;
+    const int rc = run_region(jo.stack, whole, tiles, margin);
+    if (rc == 3) return rc;
+
+    fs::path od(jo.out);
+    for (size_t ti = 0; ti < tiles.size(); ++ti) {
+        const RegionTile& t = tiles[ti];
+        if (t.w <= 0 || t.h <= 0) { printf("region %zu: not rendered\n", ti + 1); continue; }
+        const auto& r = regions[ti];
+        printf("region %zu: tile %d x %d at output px %d,%d (asked for %g,%g .. %g,%g)\n", ti + 1, t.w, t.h, t.ox, t.oy, r[0], r[1], r[2], r[3]);
+        std::vector<float> crop((size_t)t.w * t.h * 3);
+        for (int y = 0; y < t.h; ++y) memcpy(crop.data() + (size_t)y * t.w * 3, B.data() + ((size_t)(t.oy + y) * whole.w + t.ox) * 3, (size_t)t.w * 3 * sizeof(float));
+        std::string why;
+        const std::string stem = "region" + std::to_string(ti + 1) + "_";
+        if (!write_tiff_rgb16((od / (stem + "render.tif")).string(), crop, t.w, t.h, whole.icc, &why)) printf("  cannot write the render's crop: %s\n", why.c_str());
+        for (auto& o : t.out) {
+            if (o.rc != 0) { printf("  %-28s failed (code %d)\n", o.name.c_str(), o.rc); continue; }
+            // the difference from the render, over the whole tile and inside the rectangle asked for (the part a patch uses)
+            auto stats = [&](int ax0, int ay0, int ax1, int ay1) {
+                double sum = 0, mx = 0;
+                size_t n = 0, over16 = 0, over8 = 0;
+                for (int y = std::max(0, ay0); y <= std::min(t.h - 1, ay1); ++y)
+                    for (int x = std::max(0, ax0); x <= std::min(t.w - 1, ax1); ++x, ++n) {
+                        double d = 0;
+                        for (int c = 0; c < 3; ++c) d = std::max(d, (double)std::fabs(o.b[((size_t)y * t.w + x) * 3 + c] - crop[((size_t)y * t.w + x) * 3 + c]));
+                        sum += d; mx = std::max(mx, d);
+                        if (d > 0.5 / 65535) ++over16;
+                        if (d > 1.0 / 255) ++over8;
+                    }
+                printf("%.3f %% of pixels differ at 16 bits, %.3f %% by more than 1/255; mean %.5f, largest %.4f", n ? 100.0 * over16 / n : 0.0,
+                       n ? 100.0 * over8 / n : 0.0, n ? sum / n : 0.0, mx);
+            };
+            printf("  %-28s tile: ", o.name.c_str());
+            stats(0, 0, t.w - 1, t.h - 1);
+            printf("\n  %-28s asked: ", "");
+            stats((int)r[0] - t.ox, (int)r[1] - t.oy, (int)r[2] - t.ox, (int)r[3] - t.oy);
+            printf("\n");
+            if (!write_tiff_rgb16((od / (stem + o.name + ".tif")).string(), o.b, t.w, t.h, whole.icc, &why)) printf("  cannot write %s: %s\n", o.name.c_str(), why.c_str());
+        }
+    }
+    return rc;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) return usage();
     std::string cmd = argv[1];
@@ -765,6 +865,10 @@ int main(int argc, char** argv) {
     if (cmd == "align") {
         try { return cmd_align(argc, argv); }
         catch (const std::exception& e) { fprintf(stderr, "align failed: %s\n", e.what()); return 1; }
+    }
+    if (cmd == "region") {
+        try { return cmd_region(argc, argv); }
+        catch (const std::exception& e) { fprintf(stderr, "region failed: %s\n", e.what()); return 1; }
     }
     if (cmd == "run") {
         try { return cmd_run(argc, argv); }

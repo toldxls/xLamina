@@ -28,10 +28,10 @@ Cn. Three more outputs sit under Tools > Developer outputs: A (focus-weighted av
 raw depth, unsmoothed) and CB (CBn without the noise rule).
 
 With View > Developer controls on, the depth map is a tab beside the outputs and an entry in the
-two-up viewer: the frame each pixel of B comes from, drawn in a palette (Grey, Viridis, Inferno,
+compare window: the frame each pixel of B comes from, drawn in a palette (Grey, Viridis, Inferno,
 Magma, Turbo) over a chosen range of frames, optionally in bands that repeat every few frames.
 Brightness and contrast spread a few frames' difference over more colours, the frame under the
-cursor is named beside it, and the two-up viewer can lay the map over another image.
+cursor is named beside it, and the compare window can lay the map over another image.
 
 ## Hardware
 
@@ -116,6 +116,7 @@ has the two settings: the sensitivity (how much darker than its surroundings cou
 does the same.
 
 Smoothing (C): 0 is the raw selection (in flat areas it picks the noisiest frame), 2 is the
+default, 3 is Cn.
 
 File > Batch render… queues several folders (add them one by one, add every subfolder of a
 folder, or drop several folders onto the window) and renders them one after the other with the
@@ -126,14 +127,36 @@ Add comparison image… (File menu, or drop a file onto a finished render) loads
 stacker's output as a tab beside xLamina's, so the two flip at the same zoom and position;
 PgUp / PgDown step through the tabs.
 
+### The compare window
+
+Compare (Ctrl+2) opens the render's outputs in two, three or four panes that share one pan and
+zoom. Other images can be added or dropped in, and a sweep's variants are listed by how much
+they differ.
+
+| Tool | What it does |
+|---|---|
+| Flip, Difference | Swap the first two panes under the eye; tint the pixels where they differ. |
+| Align, Align here | Line up an image of another crop or scale (another program's stack of the same frames) with the left one, for the whole image or exactly for the part on screen. |
+| Measure, scale bar | Lengths in px, µm, mm or cm, from the field of view. |
+| Retouch | Paint one image into another with a soft brush, on the 16-bit data. The left pane is the result; the source is the right pane, or with more panes the one clicked last. |
+| Add frames, Frame here | The stack's frames in the list, each shown as the render placed it, so a frame can be painted from. Frame here finds the frame that is sharpest at a clicked spot; PgUp / PgDn step to its neighbours. |
+| Refine regions of B | Mark rectangles or lasso outlines on B and render only those again with settings that keep more weak detail. The rest of the image is untouched. |
+| Make composite | Tick two or more images of one size (a B and a C, two B's from different settings) and stack them again as if they were frames, with the Render panel's settings. The result is named by what went in: 2B1C. |
+
+Run sweep… at the bottom of the Render panel renders B several times, each with one setting
+changed, and opens the variants in the compare window.
+
 Advanced (depth and composition), unticked by default, exposes the parameters of B's depth
 pipeline and of the composition (depth resolution, focus window and power, depth window,
 volume aggregation, refinement range and window, label softness, halo and dark priors, the
-dark prior's reach, flat smoothing) at their defaults, for one-at-a-time experiments against
+dark prior's reach, flat smoothing, surroundings from the nearest end frame) at their defaults, for one-at-a-time experiments against
 a 1:1 comparison. The defaults in short: depth is estimated at 1/2 of the sensor resolution
 (1/4 left doubled outlines on bright edges); defocused background keeps the nearest sharp
 detail's frame for about 256 px and beyond that follows its own focus peak with soft
-transitions; flat regions blend up to 32 frames so a depth ramp draws no rings. The warp's
+transitions; flat regions blend up to 32 frames so a depth ramp draws no rings. On stacks of
+fewer than about 190 frames, where the step between frames is large, the fine focus uses a
+wider window and ignores isolated picks far from the smooth depth, which kept flat crystal
+faces from breaking into blobs. The warp's
 resampling filter is a choice (bicubic by default; Lanczos 3 or 8 for a little more fine
 detail; bilinear).
 

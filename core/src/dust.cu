@@ -107,6 +107,43 @@ bool load_dust_map(const std::filesystem::path& map, DustMapData& M, std::string
             ratio[(size_t)y * w + x] = (s / 9.f) / std::max(bg_at(x, y), 1e-3f);
         }
     lum.clear(); lum.shrink_to_fit();
+    // the ratio smoothed over 7 x 7 px, twice (a bell about 7 px wide), and its noise: the median distance from the
+    // median, over every 7th pixel of every 7th row
+    {
+        const int r = 3;
+        std::vector<float> wide = ratio, t(n);
+        for (int pass = 0; pass < 2; ++pass) {
+            for (int y = 0; y < h; ++y) {
+                const float* s = wide.data() + (size_t)y * w;
+                float* d = t.data() + (size_t)y * w;
+                double acc = 0;
+                for (int k = -r; k <= r; ++k) acc += s[std::min(std::max(k, 0), w - 1)];
+                for (int x = 0; x < w; ++x) {
+                    d[x] = (float)(acc / (2 * r + 1));
+                    acc += s[std::min(w - 1, x + r + 1)] - s[std::max(0, x - r)];
+                }
+            }
+            for (int x = 0; x < w; ++x) {
+                double acc = 0;
+                for (int k = -r; k <= r; ++k) acc += t[(size_t)std::min(std::max(k, 0), h - 1) * w + x];
+                for (int y = 0; y < h; ++y) {
+                    wide[(size_t)y * w + x] = (float)(acc / (2 * r + 1));
+                    acc += t[(size_t)std::min(h - 1, y + r + 1) * w + x] - t[(size_t)std::max(0, y - r) * w + x];
+                }
+            }
+        }
+        std::vector<float> sample;
+        for (int y = 3; y < h; y += 7) for (int x = 3; x < w; x += 7) sample.push_back(wide[(size_t)y * w + x]);
+        if (!sample.empty()) {
+            auto mid = sample.begin() + sample.size() / 2;
+            std::nth_element(sample.begin(), mid, sample.end());
+            const float med = *mid;
+            for (float& v : sample) v = std::fabs(v - med);
+            std::nth_element(sample.begin(), mid, sample.end());
+            M.wide_noise = 1.4826f * *mid;
+        }
+        M.wide = std::move(wide);
+    }
     M.w = w; M.h = h;
     M.ratio = std::move(ratio);
     M.name = map.filename().string();
@@ -131,10 +168,17 @@ bool detect_dust(const DustMapData& M, float darker, int margin, DustFix& out, s
     // shadow's soft edge, and the few pixels a speck sits away from where the map shows it), out to `margin`; inside
     // that, a pixel is corrected when it lost more than half a percent.
     const float seed = 1.f - out.darker;
+    // ... or a patch several pixels wide that is darker by 0.3 of that, and by 5 times the noise of the map smoothed
+    // that wide: a faint shadow. A white frame shows every shadow shallower than the photographs do (the tone curve
+    // near white), so a speck 1 % dark in the map can be 3 to 4 % dark in the frames, which is a trail in the stack;
+    // per pixel, 1 % is under an 8-bit map's steps. What a patch found this way really costs is measured on the
+    // frames like any other (calibrate_dust), and a patch that costs nothing there is left alone.
+    const bool has_wide = M.wide.size() == n && M.wide_noise > 0;
+    const float seed_wide = 1.f - std::max(0.3f * out.darker, 5.f * M.wide_noise);
     const int grow = out.margin;
     std::vector<uint8_t> mask(n, 0);   // 1 = dust seed, 2 = its surroundings
     size_t seeds = 0;
-    for (size_t i = 0; i < n; ++i) if (ratio[i] < seed) { mask[i] = 1; ++seeds; }
+    for (size_t i = 0; i < n; ++i) if (ratio[i] < seed || (has_wide && M.wide[i] < seed_wide)) { mask[i] = 1; ++seeds; }
     if (seeds > n / 50) return fail(std::to_string(100 * seeds / n) + " % of the image is that much darker than its surroundings: too much for dust (a less sensitive setting, or a more even white background)");
     for (int y = 0; y < h; ++y)
         for (int x = 0; x < w; ++x) {

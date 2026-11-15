@@ -20,7 +20,15 @@ struct RefineState {           // one per GPU, output resolution
     int dev = -1, w = 0, h = 0;
     float* bw = nullptr;       // best fine fm within range, init -inf
     int16_t* iw = nullptr;     // its frame
+    // Twin rejection (alloc_twin; FINDINGS 57): the best below the smooth depth, the best above it, and the best
+    // within 1.5 frames of it, each with its frame. A dark speck out of focus is a rim that passes a pixel beside it
+    // twice, as far before the speck's own depth as after it: two peaks of similar height, the same distance either
+    // side of the smooth depth. Such a pair is not a surface, and the pixel keeps the centre (refine_depth).
+    float *bb = nullptr, *ba = nullptr, *bc = nullptr;
+    int16_t *ib = nullptr, *ia = nullptr, *ic = nullptr;
     void alloc(int dev, int w, int h);
+    bool alloc_twin();         // after alloc; false (and nothing kept) when the card has no room for it
+    void free_twin();
     void free();
 };
 
@@ -53,7 +61,12 @@ void merge_device(RefineState& a, const RefineState& b);   // a = merge(a, b) on
 // depth_s <- where(blur(conf) > 0.5 & spill_up < 0.3, median3(where(isfinite(bw), iw, depth_s)), depth_s)
 // (all on the current device; host vectors in and out)
 void refine_depth(std::vector<float>& depth_s, const std::vector<float>& conf, const std::vector<float>& spill, int dw, int dh,
-                  const RefineState& r, int ow, int oh, double scale, cudaStream_t s);   // r on the current device
+                  const RefineState& r, int ow, int oh, double scale, cudaStream_t s, float island = 0.f);   // r on the current device
+// island > 0 (frames; needs r's twin planes): a pixel the fine focus moved further than that from the smooth depth
+// keeps the move only if it is joined, through pixels moved to within 1.5 frames of it, to a place the fine focus
+// left within `island` of the smooth depth: the side of a depth edge is, an isolated patch on a surface is not
+// (something sharp inside or behind a translucent crystal, FINDINGS 57). A patch that is not takes the best frame
+// within 1.5 of the smooth depth.
 
 // depth_smooth = clip(guided_filter(guide, median5(median5(depth_s)), max(2, round(40 scale)), 2e-3), 0, n-1)
 std::vector<float> smooth_depth(const std::vector<float>& depth_s, const float* d_guide_full, int ow, int oh, double scale, int n,

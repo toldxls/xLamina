@@ -193,6 +193,10 @@ struct Pass1 {
     double merge_seconds = 0, setup_seconds = 0;
     std::vector<float> guide, ga;
     std::vector<float> flat;               // the flat-region mask at depth resolution (when flat_blur_px > 0)
+    float flat_lo = -1.f, flat_hi = -1.f;  // the mask's two texture thresholds as used (ranked over the rectangle, or given)
+    // each depth pixel's own focus peak over the frames, from the aggregated slices pooled over 24 px BEFORE the flat
+    // regions' wide blur (when flat_blur_px > 0): the largest value, its frame, and the sum over the frames
+    std::vector<float> peak_best, peak_arg, peak_sum;
     PinnedVec<uint16_t> fm_all, lum_all;   // fm_all only when host_state (the fold command writes it; the fusion never reads it)
     PinnedVec<float> V_all;
     int slices = 0;
@@ -230,6 +234,16 @@ struct StackOptions {
     Pass1Options po;
     std::string out;                   // output folder; empty = write nothing
     int streams = 2, refine_r = 12;
+    // the fine focus's window widens as the stack gets shorter than 192 frames (refine_fm_px x 192 / frames, at most
+    // twice): see fuse_from_pass1
+    bool refine_scale = true;
+    // the fine focus's rim check (RefineState): a pair of matching peaks either side of the smooth depth is the rim of
+    // a speck out of focus, and the pixel keeps the centre; false = the strongest frame in range, whatever it is.
+    // Both checks run on stacks under 192 frames only (large steps between frames): see fuse_from_pass1
+    bool refine_twin = true;
+    // ... and its island check (refine_depth): a move of more than a quarter of the range away from the smooth depth
+    // stands only where it joins a neighbouring surface; needs the rim check's planes
+    bool refine_island = true;
     double refine_fm_px = 9.0, soft_px = 3.0;
     double c_smoothing = 0.0;          // C's smoothing (FinalParams::c_smoothing); 0 = the raw selection
     double soft_cutoff = 0.9;          // the soft-frame flag's cutoff (frame_sharpness): a frame under this share of its neighbours' focus energy
@@ -271,6 +285,13 @@ struct StackOptions {
     // the 0.6.17 composition). 16 from 0.6.18 (8 already removes the rings, 16 and 32 look alike);
     // 32 since 0.6.22, with flat_blur_px 256 (FINDINGS 44)
     double flat_blend = 32;
+    // surroundings nearest to focus at an end of the stack take that end frame (DepthParams::claim): a flat pixel
+    // whose own focus peak lies within a sixteenth of the stack of an end and stands end_claim_lo .. end_claim_hi
+    // times above its mean over the stack (0 .. 1). A featureless background has no such peak (a ratio near 1) and
+    // is left as it was. false (the default: not judged yet) = the background as before (the smoothed field and the
+    // band's fill everywhere)
+    bool end_claim = false;
+    double end_claim_lo = 2.0, end_claim_hi = 4.0;
     // strips, for stacks whose depth volume does not fit the GPUs: the output rectangle is cut along its longer side
     // into overlapping strips, each rendered on its own at the full depth resolution (one pass 1 + fusion per strip,
     // with the whole frame's noise estimate and pyramid depth), and the outputs are feathered together across the
@@ -290,6 +311,11 @@ struct StackOptions {
         std::vector<std::vector<float>> images;   // float RGB, output grid, only the requested outputs
         std::vector<float> depth, conf;
         std::vector<float> noise_mad;
+        // what else a render measures over its whole rectangle, and a region of it rendered again takes as given
+        // (run_region): the focus measure's noise floor behind the confidence ramp, the flat mask's two texture
+        // thresholds (-1 = none: flat regions off, or not known) and the pyramid depth
+        float depth_floor = 0.f, flat_lo = -1.f, flat_hi = -1.f;
+        int levels = 0;
         std::vector<double> frame_energy;         // per frame (stack order): pass 1's focus energy (Pass1::frame_energy)
         std::vector<uint8_t> icc;                 // the frames' ICC profile, embedded in the outputs
         double seconds = 0;
@@ -312,6 +338,44 @@ struct SweepVariant {
     std::vector<std::pair<std::string, std::string>> options;   // ("--sgm-p1", "0.06"), ...
 };
 int run_sweep(const StackOptions& base, const std::vector<SweepVariant>& variants, const std::string& out_dir);
+
+// ---- regions of a finished render, rendered again with other settings (the two-up viewer's Refine). A tile is a
+// rectangle of the render's own; it is rendered as a strip is: with the whole frame's noise, flat thresholds and
+// pyramid depth (`whole`: the render's Result, of which only those values are read), so that with unchanged settings
+// it gives the render's own pixels away from its edges. One pass 1 + volume per tile and group of pass-1 settings,
+// then a B per variant; nothing is written. `base` is the render's options as it ran them (the frames, their
+// transforms and row corrections, the dust map, the rectangle in po.g).
+struct RegionTile {
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;   // sensor px, inclusive; run_region replaces them with the rectangle it rendered
+    std::vector<SweepVariant> variants;   // a variant without options = the render's own settings
+    struct Out {
+        std::string name;
+        int rc = 0;                       // 0, or why this variant has no image (the codes of run_stack)
+        std::vector<float> b;             // float RGB, w x h
+        std::vector<float> depth;         // the frame per pixel, w x h
+    };
+    int ox = 0, oy = 0, w = 0, h = 0;     // where the rendered rectangle lies in the render's output grid, and its size
+    std::vector<Out> out;                 // one per variant, in their order
+};
+// The rectangle a tile is rendered as: the given one grown by margin_px (sensor px) each way, its start moved down to
+// the grid of the render's coarsest pyramid level, its sides multiples of 4, all within the render's rectangle `g`
+// (the rule the strips follow, FINDINGS 53/55). False when nothing of it lies inside.
+bool region_rect(const Grid& g, int levels, double margin_px, int& x0, int& y0, int& x1, int& y1);
+int run_region(const StackOptions& base, const StackOptions::Result& whole, std::vector<RegionTile>& tiles, double margin_px = 512);
+
+// One frame of a finished render as the render saw it: read, its dust taken out, and warped onto the render's output
+// grid with its transform and row corrections (`base`: the render's options, as for run_region; k: the frame's place
+// in base.po.paths). rgb: float RGB, w x h = the outputs' size. For painting a single frame into an output (the
+// two-up viewer's Retouch): a frame as it is on disk is another size and lies a little beside the output.
+// Returns 0, or a code of run_stack's (1 the file, 4 the card's memory).
+int warp_frame(const StackOptions& base, int k, std::vector<float>& rgb, int& w, int& h);
+
+// How sharp every frame of a finished render is at one place: energy[k] = the mean squared second difference of
+// frame k's green samples over a window of `radius` px around output pixel (x, y), taken at the frame's own place for
+// it (its transform; the row corrections, a few px, are left out). Read from the frames resident in the render's
+// cache, so it takes milliseconds; false when the render has no cache or a frame is not resident in it. For finding
+// the frame to retouch from: the depth map says which frame the render chose, this says which one is sharp.
+bool focus_at(const StackOptions& base, int x, int y, int radius, std::vector<double>& energy);
 
 // ---- alignment
 

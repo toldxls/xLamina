@@ -6,6 +6,7 @@
 #include <QThread>
 
 #include <atomic>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -23,9 +24,33 @@ QImage readImageViaWindows(const QString& path, QString* err = nullptr);
 // 8-bit conversion happens off the engine's threads, and the buffers come from a small pool handed back after
 // converting (a fresh 10 MB vector per frame cost ~3 ms of page faults on the GPU's worker thread, FINDINGS 30).
 
+struct JobResultData;
+
+// Regions of a finished render to render again (the two-up viewer's Refine; stackcore::run_region): the tiles go in
+// with their rectangles and variants and come back with a B per variant.
+struct RegionJobData {
+    std::shared_ptr<JobResultData> render;      // the render the regions are parts of
+    std::vector<stackcore::RegionTile> tiles;
+};
+
+// Finished images of one size stacked again as if they were frames (the two-up viewer's Make composite): no
+// alignment, they lie on each other already. The outputs come back in JobResultData::result; nothing is written.
+struct CompositeJobData {
+    std::vector<std::filesystem::path> paths;   // the images, each a file the engine reads
+    QString label;                              // what they are: "2B1C"
+    QString sources;                            // their names in the list, for the note
+    QString dir;                                // where the composite's TIFFs go
+    QString temp;                               // a folder of copies made for the job (images that had no such file), removed after it
+};
+
 struct JobResultData {
     stackcore::StackOptions::Result result;
     stackcore::AlignOut align;
+    // the fusion's options as the render ran them (the frames, their transforms and row corrections, the dust map,
+    // the rectangle): what a region of it is rendered again with. Null for a sweep, a region job and a failed render
+    std::shared_ptr<stackcore::StackOptions> stack;
+    std::shared_ptr<RegionJobData> regions;     // set for a region job: its tiles; `result` is empty
+    std::shared_ptr<CompositeJobData> composite;   // set for a composite: `result` holds its outputs
     QString reportJson;
     QString outDir;
     int rc = 0;           // 0 done, 1 failed, 2 a bad option, 3 cancelled, 4 the GPU memory ran out, 6 rendered but not written
@@ -49,6 +74,10 @@ public:
     void start(const stackcore::JobOptions& jo, int liveDown = 6, bool quiet = false);
     // a sweep: align as a render would, then a B per variant into outDir (run_sweep_job); finished() carries sweep = true
     void startSweep(const stackcore::JobOptions& jo, const std::vector<stackcore::SweepVariant>& variants, const QString& outDir, int liveDown = 6);
+    // regions of job->render rendered again (run_region), without live views; finished() carries `regions` = job
+    void startRegions(std::shared_ptr<RegionJobData> job);
+    // job->paths stacked with jo's fusion settings and outputs (run_stack, the frames as they lie); finished() carries `composite` = job
+    void startComposite(const stackcore::JobOptions& jo, std::shared_ptr<CompositeJobData> job);
     void cancel() { cancel_.store(true); }
     void releaseCache();                                 // frees the resident frames (when the cache is turned off)
     bool resident(const QStringList& files);             // true when every file is pinned in the cache already

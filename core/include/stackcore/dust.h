@@ -61,6 +61,10 @@ bool build_dust_fix(const std::filesystem::path& map, DustFix& out, std::string*
 struct DustMapData {
     int w = 0, h = 0;
     std::vector<float> ratio;             // w * h: 1 = as bright as its surroundings, 0.9 = 10 % darker
+    // the same smoothed over about 7 px, and that plane's own noise (a robust sigma): a faint shadow several pixels
+    // wide stands out of it where a single pixel of the map (8-bit steps, grain) does not
+    std::vector<float> wide;
+    float wide_noise = 0.f;
     float vignette = 0.f;
     std::string name;
 };

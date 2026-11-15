@@ -198,7 +198,7 @@ li.aside { list-style:none; color:var(--dim); }
 <figure class="shot" data-img="dust_map" data-cursor="slider 1" data-marks="view;slider 1;@0.565,0.935;@0.74,0.935;Use this dust map">
   <ol class="legend">
     <li><b>The map</b>, with its contrast raised so that faint specks show. <b>Red</b> is what would be corrected in every frame; each dust spot has a <b>yellow ring</b> so it can be found with the whole map in view. Wheel to zoom, drag to pan.</li>
-    <li><b>Sensitivity</b>: how much darker than its surroundings a pixel must be to count as dust, 1 % to 10 %. To the right = more sensitive. 3 % is the default.</li>
+    <li><b>Sensitivity</b>: how much darker than its surroundings a pixel must be to count as dust, 1 % to 10 %. To the right = more sensitive. 3 % is the default. A faint shadow several pixels wide counts from about a third of that.</li>
     <li><b>Margin</b>: how far around each dust pixel the correction reaches (9 px by default). Raise it for a map taken at another time than the stack, when specks may have shifted a little.</li>
     <li>How many spots the settings find, and how much of the image they cover.</li>
     <li><b>Use this dust map</b> keeps the map and the two settings.</li>
@@ -261,7 +261,7 @@ li.aside { list-style:none; color:var(--dim); }
     <li><b>Measure</b> (<kbd>M</kbd>, or View &gt; Measure): while it is on, dragging on the image draws a line instead of panning.</li>
     <li>Each line carries its length. The lines stay at their places in the image when you zoom, pan or change tabs.</li>
     <li>The <b>scale bar</b>: a round length near a fifth of the view's width. It follows the zoom, and is shown in the live view while rendering as well. View &gt; Scale bar hides it.</li>
-    <li>Both come from <b>Field of view</b>: the width of one whole frame. While it is "unknown" there is no scale bar and lengths are in pixels.</li>
+    <li>Both come from <b>Field of view</b>: the width of one whole frame. While it is "unknown" there is no scale bar and lengths are in pixels. The units can be changed: see <a href="#measuring">Units</a> below.</li>
   </ol>
   <figcaption>Two lines measured on output B.</figcaption>
 </figure>
@@ -272,7 +272,7 @@ li.aside { list-style:none; color:var(--dim); }
   <li>Lengths are in the plane of the reference frame. A stack whose scale changes with depth (see the geometry report's µm/px range) is off by that much at its ends.</li>
   <li>The lines and the bar are drawn on the screen only: they are not saved into the output files.</li>
 </ul>
-<figure class="shot" data-img="compare_measure" data-cursor="Measure" data-marks="Measure;Clear lines;@0.415,0.44;@0.80,0.44">
+<figure class="shot" data-img="compare_measure" data-cursor="Measure" data-marks="Measure;Clear lines;@0.415,0.478;@0.80,0.478">
   <ol class="legend">
     <li><b>Measure</b> (<kbd>M</kbd>) in the Compare window works the same way, on either pane.</li>
     <li><b>Clear lines</b> removes them; it is shown while Measure is on.</li>
@@ -283,8 +283,22 @@ li.aside { list-style:none; color:var(--dim); }
 </figure>
 <ul>
   <li>In the Compare window the scale applies to images of the size of this render's outputs: its B and C, the depth map, a sweep's variants. An image of another size (another program's stack, say) has no scale bar and its lengths are in pixels.</li>
-  <li>Measure and Retouch do not run together: turning one on leaves the other.</li>
+  <li>While retouching, turning Measure on rests the brush (and the region tools) until Measure is off again.</li>
 </ul>
+<h3>Units</h3>
+<p>The measured lines and the scale bar each have a unit of their own, the same in every viewer and kept between sessions.</p>
+<table>
+  <tr><th>To change</th><th>Do this</th></tr>
+  <tr><td>The measured lines' unit</td><td>The box beside <b>Measure</b> in the toolbar (main window and Compare), or View &gt; Measure in. Lines already drawn are rewritten.</td></tr>
+  <tr><td>The scale bar's unit</td><td>Click the scale bar: each click steps to the next unit. Or View &gt; Scale bar in.</td></tr>
+</table>
+<table>
+  <tr><th>Unit</th><th>Meaning</th></tr>
+  <tr><td>auto</td><td>µm or mm, whichever reads best for the length. The default.</td></tr>
+  <tr><td>px</td><td>Pixels of the image. Needs no Field of view. Use it for widths the program asks for in pixels: a radius, the brush size, a region's Edge.</td></tr>
+  <tr><td>µm, mm, cm</td><td>Always that unit. They need Field of view; until it is set, lengths are in pixels.</td></tr>
+</table>
+<p>With the scale bar's unit on px the bar is drawn without a Field of view as well.</p>
 </section>
 
 <section id="saving" data-k="save as export tiff jpeg png 16-bit file name output folder report.json list.txt stack.txt written files">
@@ -305,10 +319,10 @@ li.aside { list-style:none; color:var(--dim); }
 <p><b>File &gt; Open output folder</b> (<kbd>Ctrl+Shift+O</kbd>) opens it in Explorer.</p>
 </section>
 
-<section id="compare" data-k="compare two-up side by side flip space difference highlight orange comparison image other stacker stack vertically">
-<h2>Compare: two images side by side</h2>
-<p>Press <b>Compare</b> above the viewer (<kbd>Ctrl+2</kbd>). The two panes share one pan and zoom, so the same spot is always on show in both.</p>
-<figure class="shot" data-img="compare" data-cursor="Flip" data-marks="table@0.5,0.25;view;view 2;Flip;Difference;Add image;Open sweep;Stack vertically;Retouch">
+<section id="compare" data-k="compare window two-up panes three four 3 4 side by side flip space difference highlight orange comparison image other stacker stack vertically align offset recenter centre center shifted crop scale line up another program">
+<h2>Compare: images side by side</h2>
+<p>Press <b>Compare</b> above the viewer (<kbd>Ctrl+2</kbd>) for the compare window. Its panes share one pan and zoom, so the same spot is always on show in all of them.</p>
+<figure class="shot" data-img="compare" data-cursor="Flip" data-marks="table@0.5,0.25;view;view 2;Flip;Difference;Add image;Open sweep;Stack vertically;Retouch;Help">
   <ol class="legend">
     <li><b>The list</b> of images: this render's outputs, comparison images, sweep variants. Click = show in the right pane, double-click = show in the left pane.</li>
     <li><b>Left pane</b>, with its own picker above it.</li>
@@ -317,12 +331,35 @@ li.aside { list-style:none; color:var(--dim); }
     <li><b>Difference</b> (<kbd>D</kbd>): see below.</li>
     <li><b>Add image…</b>: any TIFF, JPEG or PNG, for example another stacker's output. Files can also be dropped onto the window.</li>
     <li><b>Open sweep…</b>: a folder written by a <a href="#sweep">sweep</a>.</li>
-    <li><b>Stack vertically</b>: the right pane goes under the left one, for wide crops.</li>
+    <li><b>Stack vertically</b>: the panes go under each other, for wide crops.</li>
     <li><b>Retouch</b>: see <a href="#retouch">Retouch</a>.</li>
+    <li><b>Help</b> (<kbd>F1</kbd>): this page.</li>
   </ol>
 </figure>
+<p>The first column of the list holds the tick boxes for <a href="#composite">Make composite</a>. The second toolbar row is <a href="#retouch">Retouch</a>, the third <a href="#refine">Refine</a>.</p>
+<h3>Three or four panes</h3>
+<p>The box beside Stack vertically sets the number of panes: 2, 3 or 4. Three stand side by side; four are two rows of two.</p>
+<ul>
+  <li>Every pane has its own picker above it.</li>
+  <li>A click in the list fills the right pane. With three or four panes it fills the pane you clicked last: its picker is outlined. A double-click always fills the left pane.</li>
+  <li><kbd>PgUp</kbd> / <kbd>PgDn</kbd> step that same pane through the list.</li>
+  <li>While retouching, the left pane is the result and the outlined pane is the one painted from: it has a faint frame, and <i>(source)</i> after its name. Click in another pane to paint from that one instead. The strokes made so far are kept; Undo no longer reaches them.</li>
+  <li>Flip, Align and Difference work on the first two panes.</li>
+</ul>
+<h3>Align: an image of another crop or scale</h3>
+<p>Another program's stack of the same frames is usually cropped and scaled a little differently, so in the two panes it sits beside the spot the other pane shows.</p>
+<table>
+  <tr><th>Button</th><th>What it does</th></tr>
+  <tr><td><b>Align</b> (<kbd>A</kbd>)</td><td>Checked = the right pane's image is moved and scaled onto the left one's, found from the two images themselves (about a second). Unchecked = each as it is. It is found again whenever either pane's image changes.</td></tr>
+  <tr><td><b>Align here</b> (<kbd>Shift+A</kbd>)</td><td>Lines the two up exactly for the part on screen. Two programs' stacks differ by more than a move and a scale, so the whole-image fit can be several pixels off towards a corner: zoom in, press this, compare.</td></tr>
+</table>
+<ul>
+  <li>The status bar says what was found: the scale, the move in pixels, and how well the two match.</li>
+  <li>Nothing is changed in either file: it is how the right pane is drawn.</li>
+  <li>Difference and Retouch compare pixel with pixel: Align is off for them.</li>
+</ul>
 <h3>Difference</h3>
-<figure class="shot" data-img="compare_difference" data-cursor="Difference" data-marks="Difference;@0.25,0.019;status bar">
+<figure class="shot" data-img="compare_difference" data-cursor="Difference" data-marks="Difference;@0.452,0.019;status bar">
   <ol class="legend">
     <li><b>Difference</b> tints the pixels where the two panes differ: orange, stronger where the difference is larger.</li>
     <li>The level from which a pixel is tinted: above 0.5, 1, 2, 5 or 10 % of full scale.</li>
@@ -336,8 +373,8 @@ li.aside { list-style:none; color:var(--dim); }
 
 <section id="retouch" data-k="retouch paint brush clone source mask undo hardness size save result fix artefact">
 <h2>Retouch: paint one image into another</h2>
-<p>Press <b>Retouch</b> above the viewer, or <kbd>R</kbd> in the two-up viewer. The left pane becomes the result; the brush paints the right pane's image into it. Typical use: B as the base, with C painted in where B lost detail (or the other way round).</p>
-<figure class="shot" data-img="compare_retouch" data-cursor="@0.42,0.5" data-marks="Retouch;@0.42,0.019;@0.49,0.019;Show mask;Undo;Reset;Save result;view;view 2">
+<p>Press <b>Retouch</b> above the viewer, or <kbd>R</kbd> in the compare window. The left pane becomes the result; the brush paints the right pane's image into it. Typical use: B as the base, with C painted in where B lost detail (or the other way round).</p>
+<figure class="shot" data-img="compare_retouch" data-cursor="@0.42,0.5" data-marks="Retouch;@0.077,0.055;@0.156,0.055;Show mask;Undo;Reset;Save result;view;view 2">
   <ol class="legend">
     <li><b>Retouch</b> on.</li>
     <li><b>Size</b>: the brush radius in image pixels. Also <kbd>[</kbd> and <kbd>]</kbd>, or <kbd>Ctrl</kbd> + wheel.</li>
@@ -351,6 +388,70 @@ li.aside { list-style:none; color:var(--dim); }
   </ol>
 </figure>
 <p>Hold <kbd>Space</kbd> to see the source in the result pane. The painting is done on the 16-bit data, not on the screen image.</p>
+<h3>Painting from a single frame</h3>
+<p>Sometimes one frame holds a detail in focus that no output kept. The compare window shows the stack's frames lined up with the outputs: each frame cropped and moved exactly as the render placed it, so it can be painted from.</p>
+<table>
+  <tr><th>To</th><th>Do this</th></tr>
+  <tr><td>Find the frame that is sharp at a spot</td><td>Press <b>Frame here</b> (<kbd>H</kbd>) and click the spot on an output. The frame that is sharpest there comes up in the right pane, and the status bar names it. <kbd>PgUp</kbd> / <kbd>PgDn</kbd> step to the frames before and after it.</td></tr>
+  <tr><td>Have every frame in the list</td><td>Press <b>Add frames</b>. The frames are listed in stack order; a frame is read when you first show it (about a second).</td></tr>
+  <tr><td>Show one frame you already know</td><td>In the main window, right-click it in the frame list: <b>Show in the compare window</b>.</td></tr>
+</table>
+<ul>
+  <li>Frame here measures the frames themselves, so it also finds the right frame where the output is soft because the render chose a wrong one. Where a second frame is nearly as sharp (the far side of a translucent crystal), the status bar names that one too.</li>
+  <li>On a spot without detail no frame stands out; the status bar says so and shows the frame the render chose there.</li>
+  <li>While retouching, Frame here takes one click and then hands the left button back to the brush.</li>
+  <li>This works for the frames of the render the window shows, while no render is running. A frame file added with Add image is shown the same way.</li>
+</ul>
+<p>The source must be the size of the result. With any other image on the right the brush paints nothing, and the status bar says so.</p>
+</section>
+
+<section id="refine" data-k="refine region regions rectangle lasso render again re-render local detail smoothed soft blob needle missing detail more detail edge feather patch strength low medium high">
+<h2>Refine: render regions of B again</h2>
+<p>For a part of B that came out smooth although the frames hold detail there. You mark the part, and only that part is rendered again with settings that keep more weak detail. The rest of the image is not touched.</p>
+<p>The tools are in the compare window's third row, <b>Refine regions of B</b>. They are shown after a render, with that render's B in the left pane.</p>
+<ol>
+  <li>Click <b>Rectangle</b> and drag over the part, or <b>Lasso</b> and draw around it. Either pane will do. Mark as many regions as you need; each gets a number.</li>
+  <li>Choose <b>More detail</b>: Low, Medium or High. It applies to the next region you mark, and to the region selected in the list.</li>
+  <li>Press <b>Refine</b>. The regions are rendered from the frames in memory: a few seconds each.</li>
+  <li>Look at the result at 1:1. Hold <kbd>Space</kbd> to see the image as it was.</li>
+  <li><b>Save result…</b> (<kbd>Ctrl+S</kbd>) writes the image with its regions as a 16-bit TIFF.</li>
+</ol>
+<p>The list under the image list has a row per region:</p>
+<ul>
+  <li><b>The tick</b>: ticked = the rendered region is in the image; unticked = the image as it was there.</li>
+  <li><b>Detail</b>: its strength. Select the row, change More detail, and press Refine to render it again.</li>
+  <li><b>Edge</b>: the width of the soft edge the region was laid in with.</li>
+  <li><b>Remove</b> (or <kbd>Delete</kbd> in the list) takes the selected region away; <b>Remove all</b> takes every one. The image goes back to what it was there.</li>
+</ul>
+<table>
+  <tr><th>Control</th><th>What it does</th></tr>
+  <tr><td>More detail</td><td>Low = a little more weak detail than the render kept; High = the most. Higher strengths can bring blobs or grain with the detail, so start at Medium and look.</td></tr>
+  <tr><td>Edge</td><td>The soft edge between a region and the image around it, in pixels. Auto = a tenth of the region's shorter side, between 8 and 64 px. To choose your own, measure in pixels: see <a href="#measuring">Scale bar and measuring</a>.</td></tr>
+</table>
+<ul>
+  <li>Mark a region a little larger than the fault, so its edge lies where the old and the new image agree.</li>
+  <li>Regions are laid into the retouch result: Retouch switches on with the first region, and the brush can paint over a region afterwards. While a region tool is on, the left button marks regions; switch the tool off to paint.</li>
+  <li>What the strengths change depends on the render's Depth resolution: at 1/2 or Full, how weak a detail may be and still set the depth; at 1/4, how much of the region is treated as featureless background, and how far the fine focus searches.</li>
+  <li>Refine works on the B of the last render. After another render, or another folder, press Compare again and mark the regions on the new B.</li>
+  <li>If a region shows no change at any strength, the fault has another cause: see <a href="#fixing">Fixing image problems</a>, or paint C into B there with <a href="#retouch">Retouch</a>.</li>
+</ul>
+</section>
+
+<section id="composite" data-k="composite re-stack restack stack outputs again combine merge B and C two outputs best of both 2B1C 1B1C make composite tick">
+<h2>Composite: stack outputs again</h2>
+<p>Two or more finished images can be stacked again as if they were frames: a B and a C of one render, two B's made with different settings, a sweep's best variants. The composite takes from each what is sharpest there. Nothing has to be saved and loaded again.</p>
+<ol>
+  <li>In the compare window, tick the images in the first column of the list.</li>
+  <li>Press <b>Make composite</b> under the list. The button names what is ticked: <b>2B1C</b> = two B and one C.</li>
+  <li>The result joins the list, shows in the right pane, and is written beside the render's outputs as a 16-bit TIFF: <i>2B1C composite (B).tif</i>.</li>
+</ol>
+<ul>
+  <li>The composite is made with the Render panel's settings, once for each output ticked there: with B and C ticked you get <i>2B1C composite (B)</i> and <i>2B1C composite (C)</i>, the same images stacked by each method. A few seconds each.</li>
+  <li>The images must be the same size. Outputs of one render are; another program's stack of the same frames usually is not.</li>
+  <li>The images are stacked as they lie, without the alignment a folder of frames gets, so the composite keeps the full size of its inputs.</li>
+  <li>In the name, B, C, Cn and A are outputs of those methods, F is a frame of the stack, and X is any other image.</li>
+  <li>A composite can be ticked for the next one, or retouched, like any other image in the list.</li>
+</ul>
 </section>
 
 <section id="batch" data-k="batch queue several folders multiple stacks overnight unattended subfolders">
@@ -509,7 +610,7 @@ li.aside { list-style:none; color:var(--dim); }
   <figcaption>Turbo with bands of 6 frames: each colour cycle is six frames of depth.</figcaption>
 </figure>
 <div class="tip">To check a feature: put the crosshair on it, read the frame name in the note, then click that frame in the list to see the source.</div>
-<h3>In the two-up viewer</h3>
+<h3>In the compare window</h3>
 <figure class="shot" data-img="compare_depth" data-cursor="slider 3" data-marks="depth bar;slider 3;view;view 2">
   <ol class="legend">
     <li>The same colour controls; a change here also changes the main window's depth tab.</li>
@@ -525,17 +626,17 @@ li.aside { list-style:none; color:var(--dim); }
     <li>The same layer on the depth map; its label names the frame.</li>
     <li>The status bar gives the layer's share of the image.</li>
   </ol>
-  <figcaption>A layer held in the two-up viewer.</figcaption>
+  <figcaption>A layer held in the compare window.</figcaption>
 </figure>
 <p>A layer is held and stepped here as in the main window: <b>click</b> on either pane to hold the layer under the cursor, the <b>arrow keys</b> or <kbd>PgUp</kbd> / <kbd>PgDn</kbd> for the next layer, <kbd>Esc</kbd> or a click on the held layer to let go. While a layer is held it takes the place of the Overlay and of the Difference highlight.</p>
 </section>
 
 <section id="sweep" data-k="sweep variants parameter search try settings soft labels refine background compare change">
 <h2>Sweeps: try several settings at once <span class="dev">tuning</span></h2>
-<p><b>Compare &gt; Run sweep…</b> (<kbd>Ctrl+Shift+R</kbd>) renders B several times, each with one setting changed from the Render panel's, over a single alignment. The two-up viewer then opens with the variants listed by how much they differ from the base, so the first rows are the ones worth looking at.</p>
-<figure class="shot mid" data-img="sweep" data-cursor="Run sweep" data-marks="group Set;@0.5,0.56;Run sweep">
+<p><b>Run sweep…</b> at the bottom of the Render panel, or <b>Compare &gt; Run sweep…</b> (<kbd>Ctrl+Shift+R</kbd>), renders B several times, each with one setting changed from the Render panel's, over a single alignment. The compare window then opens with the variants listed by how much they differ from the base, so the first rows are the ones worth looking at.</p>
+<figure class="shot mid" data-img="sweep" data-cursor="Run sweep" data-marks="group Set;@0.5,0.42;Run sweep">
   <ol class="legend">
-    <li><b>Quick</b>: 7 variants. <b>Thorough</b>: 14.</li>
+    <li><b>Quick</b>: 8 variants: the other depth resolution (1/4 or 1/2), the fine focus's range halved and doubled, its window doubled, Radius (C) halved and doubled, Radius (B) at two values. <b>Thorough</b> adds 6: depth resolution Full, fine focus off, three times the range, half the window, Radius (C) 0, a larger Radius (B).</li>
     <li>The output folder. Each variant writes its own subfolder there.</li>
     <li><b>Run sweep</b>.</li>
   </ol>
@@ -564,7 +665,7 @@ li.aside { list-style:none; color:var(--dim); }
   <tr><td><kbd>Ctrl+Shift+O</kbd></td><td>Open output folder</td></tr>
   <tr><td><kbd>PgDn</kbd> / <kbd>PgUp</kbd></td><td>Next / previous output tab</td></tr>
   <tr><td><kbd>Ctrl+0</kbd> / <kbd>Ctrl+1</kbd></td><td>Fit / 1:1</td></tr>
-  <tr><td><kbd>Ctrl+2</kbd></td><td>Two-up viewer (Compare)</td></tr>
+  <tr><td><kbd>Ctrl+2</kbd></td><td>Compare window (Compare)</td></tr>
   <tr><td><kbd>Ctrl+I</kbd></td><td>Add comparison image</td></tr>
   <tr><td><kbd>Ctrl+Shift+B</kbd></td><td>Batch render</td></tr>
   <tr><td><kbd>Ctrl+Shift+R</kbd> / <kbd>Ctrl+Shift+W</kbd></td><td>Run sweep / open sweep folder</td></tr>
@@ -574,9 +675,10 @@ li.aside { list-style:none; color:var(--dim); }
   <tr><td><kbd>Ctrl+Q</kbd></td><td>Quit</td></tr>
 </table>
 <table>
-  <tr><th>Two-up viewer</th><th></th></tr>
+  <tr><th>Compare window</th><th></th></tr>
   <tr><td><kbd>Space</kbd> or <kbd>F</kbd></td><td>Flip the panes (while retouching: hold Space to see the source)</td></tr>
   <tr><td><kbd>D</kbd></td><td>Difference</td></tr>
+  <tr><td><kbd>A</kbd> / <kbd>Shift+A</kbd></td><td>Align the right image with the left one / exactly for the part on screen</td></tr>
   <tr><td><kbd>PgDn</kbd> / <kbd>PgUp</kbd></td><td>Step the right pane through the list</td></tr>
   <tr><td><kbd>R</kbd></td><td>Retouch</td></tr>
   <tr><td><kbd>[</kbd> <kbd>]</kbd> or <kbd>Ctrl</kbd> + wheel</td><td>Brush size</td></tr>
@@ -598,6 +700,52 @@ li.aside { list-style:none; color:var(--dim); }
 <p><code>stackcli run &lt;folder&gt; [&lt;folder2&gt; ...] [--out DIR] [--outputs B,C,Cn] [--fov-mm X] [--scale 0.5] [--interp bicubic] [--smoothing 2]</code></p>
 <p><code>stackcli</code> with no arguments lists every command and option.</p>
 <p>All settings, the window layout, the theme and the recent folders are kept in <code>%APPDATA%\xLamina\xLamina.ini</code>.</p>
+</section>
+
+<section id="fixing" data-k="fixing image problems guide troubleshoot fault artefact artifact ghost outline rim halo doubled edge double soft smooth blob missing detail grain noise glow glare haze rings blotch background seam band banding dust radius smoothing depth resolution refine range soft labels flat smoothing halo prior dark prior which setting what does">
+<h2>Fixing image problems</h2>
+<p>A fault in a stack comes from one of four places: a few bad frames, the choice of output, a setting, or a spot that no setting gets right. Work down this list and stop when the fault is gone.</p>
+<ol>
+  <li><b>Look at 1:1, and compare.</b> Put B and C in the <a href="#compare">Compare</a> window and flip with <kbd>Space</kbd>. A feature only one of them shows is either detail the other lost or an artefact the other avoided. The frames decide which: click frames in the <a href="#frame-list">frame list</a> around the depth of that spot (the <a href="#depth">depth map</a> names the frame each pixel of B came from) and look for the feature in focus.</li>
+  <li><b>Fix the frames.</b> Drop the frames flagged red, amber or violet in the frame list and render again. Faults that follow a few frames (doubled edges, soft patches) go with them, and no setting removes them otherwise.</li>
+  <li><b>Choose the output.</b> B and C fail in different ways, and the other outputs are mixtures made for one fault each: see the table below and <a href="#outputs">Outputs</a>.</li>
+  <li><b>Change a setting.</b> One at a time, judged at 1:1. A <a href="#sweep">sweep</a> renders several values of the Advanced settings in one go.</li>
+  <li><b>Fix the spot.</b> <a href="#refine">Refine</a> renders a marked region of B again; <a href="#retouch">Retouch</a> paints another output of the same render into it.</li>
+</ol>
+
+<h3>By what you see</h3>
+<table>
+  <tr><th>What you see</th><th>Why</th><th>Try, in this order</th></tr>
+  <tr><td>A pale or dark outline running beside a strong edge, a few pixels away from it</td><td>A frame slightly out of focus draws a rim beside every bright edge. Taken from frames far from the edge's own depth, the rim looks like an outline.</td><td>Raise <b>Radius (C)</b> (32, then 48 or 64): it also cleans B. CBn or Cx in place of C. An outline inside a bright crystal face stays: Retouch it from the output that does not show it.</td></tr>
+  <tr><td>Edges drawn twice</td><td>Frames that moved or were shaken while being read out; or the depth solved too coarsely.</td><td>Keep Correct rolling-shutter warp checked (Preferences). Drop the red and violet frames. Set Depth resolution to 1/2 if it is at 1/4.</td></tr>
+  <tr><td>A soft patch, or the whole image a little soft</td><td>Frames blurred during the exposure; or the resampling.</td><td>Drop the amber frames. Output at Full resolution. Interpolation Lanczos 3 or Lanczos 8 (Preferences).</td></tr>
+  <tr><td>B is smooth where C, or the frames, show faint detail: fine needles, texture inside a crystal</td><td>B takes one depth per pixel. Where the focus signal is weak it takes the depth of the surroundings, and faint detail at another depth is blended away.</td><td><a href="#refine">Refine</a> the region. Retouch: paint C into B there. For the whole image: the other Depth resolution (1/2 and 1/4 lose faint detail in different places), Refine range 24, Soft labels 2.</td></tr>
+  <tr><td>C is grainy in flat areas</td><td>C takes the strongest detail at every point, and in a flat area the strongest thing is noise.</td><td>Raise <b>Smoothing (C)</b> (2, then 3). Cn or CBn. B.</td></tr>
+  <tr><td>A glow or haze around bright highlights in C</td><td>A highlight far out of focus is a large bright disc, and C takes it as coarse detail.</td><td>Cx. Cg, then Cg2. B.</td></tr>
+  <tr><td>Glints or specks in C that belong to another depth</td><td>C chose them from a frame far from the surface they lie on.</td><td>CBn. Cd.</td></tr>
+  <tr><td>Rings, steps or blotches in the out-of-focus background of B</td><td>The background has no sharp frame, so its depth wanders through the stack.</td><td>Flat smoothing at its default of 256 (0 switches the treatment off). Volume aggregation at its default of 32: lower values draw blotches.</td></tr>
+  <tr><td>A band of the wrong brightness or sharpness beside a bright crystal in B</td><td>The band takes the depth of the background behind it instead of the crystal's.</td><td>Raise Halo prior (2, then 4). Radius (B) 16 to 32. Neither cures every case: Retouch what is left.</td></tr>
+  <tr><td>Hard steps in B where two areas meet</td><td>Soft labels set too low.</td><td>Soft labels back to 3.</td></tr>
+  <tr><td>Horizontal bands of brightness</td><td>LED flicker during the sensor's readout.</td><td>Check Correct LED banding (Preferences).</td></tr>
+  <tr><td>Short dark trails or specks, the same in every stack</td><td>Dust on the sensor, drawn out by the alignment.</td><td><a href="#dust">Dust map</a>.</td></tr>
+  <tr><td>The output is smaller than the frames</td><td>Only the area every frame covers is kept.</td><td>Reference: Middle frame. Lock scale with telecentric optics. Drop frames that shifted far (red).</td></tr>
+</table>
+
+<h3>What each setting is for</h3>
+<p>Radius (C), Radius (B) and the Advanced group are shown with <a href="#developer">Developer controls</a> on. Sizes are in pixels of the sensor: to find one, <a href="#measuring">measure</a> the feature with the unit on px.</p>
+<table>
+  <tr><th>Setting</th><th>Raise it when</th><th>What it costs</th></tr>
+  <tr><td><b>Smoothing (C)</b><br>default 2</td><td>C is grainy in flat areas.</td><td>C's weakest real detail goes with the grain. At 3, C is Cn.</td></tr>
+  <tr><td><b>Radius (C)</b><br>default 32 px</td><td>Outlines run beside strong edges. Set it near the distance from the edge to the outline.</td><td>A small feature close to a stronger edge at another depth is lost. 0 = each point chooses alone.</td></tr>
+  <tr><td><b>Radius (B)</b><br>default 0 = off</td><td>B has a wrong band beside a strong edge that Radius (C) did not clean.</td><td>The same loss as Radius (C), in B's depth.</td></tr>
+  <tr><td><b>Depth resolution</b><br>default 1/2</td><td>From 1/4 to 1/2: bright edges are drawn twice. Full only for small stacks.</td><td>Time and graphics memory. 1/2 and 1/4 smooth faint detail in different places, so one may suit a specimen better than the other.</td></tr>
+  <tr><td><b>Refine range</b><br>default 12 frames</td><td>Fine detail in B sits a few frames from where the smooth depth put it (to 24).</td><td>A longer fine-focus pass; more chance of taking a rim from a frame far away.</td></tr>
+  <tr><td><b>Soft labels</b><br>default 3 px</td><td>Lower it (to 2) for more fine detail in B.</td><td>At 1 the seams between frames show.</td></tr>
+  <tr><td><b>Flat smoothing</b><br>default 256 px</td><td>Leave it. Lower it only if a region with faint detail is being treated as background.</td><td>Rings and blotches return in the real background.</td></tr>
+  <tr><td><b>Halo prior</b><br>default 2</td><td>The band beside a bright object takes the wrong depth.</td><td>Darker frames win more often beside bright objects.</td></tr>
+  <tr><td><b>Dark prior</b>, <b>Dark reach</b><br>defaults 1, 24 px</td><td>Leave them. They steer featureless background to the darker frames.</td><td>With Dark reach lowered, dark frames creep into the gaps between fine detail.</td></tr>
+</table>
+<p>After experiments, <b>Defaults</b> in the Advanced group and Render &gt; Reset settings to defaults put everything back.</p>
 </section>
 
 <section id="problems" data-k="error failed crash closed froze report a problem log file diagnostics send bug support help message did not finish">
@@ -631,7 +779,8 @@ li.aside { list-style:none; color:var(--dim); }
   <tr><td>Soft patches in the result</td><td>Look for amber frames (soft) and drop them, then render again.</td></tr>
   <tr><td>C is grainy in flat areas</td><td>Raise Smoothing (C), or use Cn or B.</td></tr>
   <tr><td>Glow around bright highlights in C</td><td>Try Cx, Cg or B.</td></tr>
-  <tr><td>B lost fine detail that C has</td><td>Retouch: paint C into B there.</td></tr>
+  <tr><td>B lost fine detail that C has</td><td><a href="#refine">Refine</a> the region, or <a href="#retouch">Retouch</a>: paint C into B there.</td></tr>
+  <tr><td>Any other fault in the image</td><td>See <a href="#fixing">Fixing image problems</a>: the faults by what they look like, and what each setting does.</td></tr>
 </table>
 </section>
 
@@ -824,6 +973,10 @@ li.aside { list-style:none; color:var(--dim); }
   // xLamina opens the manual at a topic: index.html?q=depth+map
   var m = /[?&]q=([^&#]*)/.exec(location.search);
   if (m) { q.value = decodeURIComponent(m[1].replace(/\+/g, ' ')); search(); }
+  // ... or at a section: index.html#compare. Gone to again once the pictures have their sizes, which move the page
+  function toSection() { var el = location.hash.length > 1 && document.getElementById(decodeURIComponent(location.hash.slice(1))); if (el) el.scrollIntoView(); }
+  toSection();
+  window.addEventListener('load', toSection);
 })();
 </script>
 </body>

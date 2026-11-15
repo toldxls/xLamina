@@ -53,6 +53,10 @@ public:
     void notifyUpdated(const QString& from);                      // the first start after an update: say so
     void selfUpdate();                                            // developer aid: update to the latest release without asking
     void probeHover(double fx, double fy);                        // developer aid: the last tab, and a mouse move at that fraction of the view
+    // developer aid: once the render is done, mark these regions of B in the two-up viewer, press Refine, and save
+    // grabs and the result into dir, then quit. spec: "x0,y0,x1,y1[,strength]" (a rectangle) or "x,y,x,y,x,y,..."
+    // with an odd number of fields over six (an outline, strength last), image px, separated by ';'
+    void testRegions(const QString& spec, const QString& dir);
 
 protected:
     void dragEnterEvent(QDragEnterEvent* e) override;
@@ -72,6 +76,8 @@ private slots:
     void retouch();        // the two-up viewer with retouching switched on (the centre buttons above the view)
     void openSweep();      // a sweep folder into the two-up viewer
     void runSweep();       // the sweep dialog, then the worker renders the variants and the viewer opens on them
+    void makeComposite(std::shared_ptr<CompositeJobData> job);   // the two-up viewer's Make composite: its ticked images stacked again
+    void refineRegions(std::shared_ptr<RegionJobData> job);   // the two-up viewer's Refine: regions of the render's B rendered again
     void openOutputFolder();
     void benchmark();
     void batch();          // File > Batch render: a queue of folders rendered one after the other
@@ -84,7 +90,7 @@ private slots:
     void reportProblem();                     // Help > Report a problem: the logs, the PC's details and the settings as one file
     void logRunStart(const QString& what, const stackcore::JobOptions& jo);   // the run's block in the session's log
     QString failureMessage(const JobResultData& d) const;                     // a failed job in words, with the next step
-    void openManual();                         // Help > Manual (F1): manual\index.html beside the program, in the browser
+    void openManual(const QString& section = {});                         // Help > Manual (F1): manual\index.html beside the program, in the browser
     void checkForUpdates();                    // Help > Check for updates: the result in a box
     void showUpdate();                         // the dialog: what changed, Update and restart / Skip / Later
     void onUpdateAvailable(const ReleaseInfo& r);
@@ -255,6 +261,11 @@ private:
     int jobFrameW_ = 0;                        // the running job's frames' width, in pixels
     double jobScale_ = 1.0;                    // ... and its output scale (1 or 0.5)
     QAction* measureAct_ = nullptr;
+    // the units of the measured lines and of the scale bar (ImageView::Unit), the same in every viewer: View > Measure
+    // in / Scale bar in, the box beside Measure, a click on the scale bar; kept in the settings
+    void setUnits(int measure, int bar);
+    QList<QAction*> measureUnitActs_, barUnitActs_;
+    QComboBox* measureUnitBox_ = nullptr;
     QDockWidget* hwDock_ = nullptr;
     QGroupBox* perfGroup_ = nullptr;   // the hardware settings, built with the Render column, shown in Preferences
     bool updateManual_ = false;        // the running check came from the menu: report its result either way
@@ -304,5 +315,6 @@ private:
     QDoubleSpinBox* darkPrior_ = nullptr;
     QDoubleSpinBox* darkReach_ = nullptr;
     QDoubleSpinBox* flatBlur_ = nullptr;
+    QCheckBox* endClaim_ = nullptr;     // out-of-focus surroundings take the end frame nearest to focus (StackOptions::end_claim)
     Worker worker_;
 };

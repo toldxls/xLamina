@@ -528,6 +528,16 @@ __global__ void k_flat_target_field(const float* __restrict__ fill, const float*
     }
     out[i] = b * fill[i] + (1.f - b) * far;
 }
+// the flat target where an end of the stack is claimed (DepthParams::claim, signed): that end frame, by the claim's
+// share; the claim's size goes to `mag` for the composition
+__global__ void k_end_apply(float* __restrict__ target, const float* __restrict__ claim, float* __restrict__ mag, int n, float kfar) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float c = fminf(fabsf(claim[i]), 1.f);
+    float end = claim[i] > 0.f ? kfar : 0.f;
+    target[i] += c * (end - target[i]);
+    mag[i] = c;
+}
 // running argmax over frames: where e beats best, best = e and arg = k
 __global__ void k_argmax_update(const float* __restrict__ e, int k, float* __restrict__ best, float* __restrict__ arg, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -706,6 +716,7 @@ DepthResult depth_from_volume(const float* d_V_in, const uint16_t* h_lum, const 
     // (FINDINGS 37c: a 2-8 px band-pass argmax with that smoothing was the closest of those tried; the
     // focus measure is that band at the depth grid). Built here, before k_cost overwrites V. Sensor px x fraction.
     float* kbg = nullptr;
+    float* claim = nullptr;   // the end claim (DepthParams::claim), spread like the field so that it ends in a slope, not a step
     if (flat_fill && (p.flat_end == 2 || p.flat_end == 3)) {
         const double frac = p.depth_full_fraction;
         float *pl = dmalloc(n), *t1 = dmalloc(n), *t2 = dmalloc(n), *best = dmalloc(n), *arg = dmalloc(n);
@@ -719,6 +730,11 @@ DepthResult depth_from_volume(const float* d_V_in, const uint16_t* h_lum, const 
             k_vplane<<<blocks1(n), 256, 0, s>>>(V, n, K, k, pl);
             gaussian_blur(pl, t1, t2, dw, dh, gw, s);
             k_argmax_update<<<blocks1(n), 256, 0, s>>>(t1, k, best, arg, n);
+        }
+        if (p.claim) {
+            claim = dmalloc(n);
+            gaussian_blur(p.claim, claim, t2, dw, dh, gs, s);
+            CK(cudaStreamSynchronize(s));
         }
         mul(arg, best, pl, n, s);                      // energy-weighted mean of the peak frame
         gaussian_blur(pl, t1, t2, dw, dh, gs, s);
@@ -857,12 +873,21 @@ DepthResult depth_from_volume(const float* d_V_in, const uint16_t* h_lum, const 
         if (kbg) k_flat_target_field<<<blocks1(n), 256, 0, s>>>(fill, band, kbg, f1, n, (float)(K - 1), 4.f, p.flat_end == 3 ? p.flat_end_soft : 0.f);
         else if (p.flat_end == 1) k_flat_target_loud<<<blocks1(n), 256, 0, s>>>(fill, band, e0, e1, f1, n, (float)(K - 1), 4.f, p.flat_end_soft);
         else k_flat_target<<<blocks1(n), 256, 0, s>>>(fill, band, e0, e1, f1, n, (float)(K - 1), 4.f);
+        if (kbg && claim) {   // an end that is nearest to focus takes its pixels whole, band or not
+            k_end_apply<<<blocks1(n), 256, 0, s>>>(f1, claim, f2, n, (float)(K - 1));
+            R.end_claim.resize(n);
+            CK(cudaMemcpyAsync(R.end_claim.data(), f2, n * sizeof(float), cudaMemcpyDeviceToHost, s));
+            CK(cudaStreamSynchronize(s));
+            size_t over = 0;
+            for (float v : R.end_claim) over += v > 0.5f;
+            R.end_claim_share = (double)over / (double)n;
+        }
         gt.build(std::max(1.0, 0.25 * bandw * p.depth_full_fraction));          // soft band-to-far transition
         gaussian_blur(f1, f2, fill, dw, dh, gt, s);
         lerp_mask(d, f2, ov, d, n, s);
         CK(cudaStreamSynchronize(s));
         gb.free(); gt.free();
-        for (float* q : {fill, band, f1, f2, ov, wd, e0, e1, wc, kbg}) cudaFree(q);
+        for (float* q : {fill, band, f1, f2, ov, wd, e0, e1, wc, kbg, claim}) cudaFree(q);
         if (cont) cudaFree(cont);
     }
 

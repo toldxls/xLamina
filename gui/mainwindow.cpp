@@ -95,6 +95,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(fov_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double) { applyViewScale(); });
     view_->setScaleBar(appSettings().value("ui/scaleBar", true).toBool());
     liveView_->setScaleBar(appSettings().value("ui/scaleBar", true).toBool());
+    setUnits(appSettings().value("ui/measureUnit", 0).toInt(), appSettings().value("ui/barUnit", 0).toInt());
+    for (ImageView* v : {view_, liveView_}) connect(v, &ImageView::barUnitChanged, this, [this](int u) { setUnits(view_->measureUnit(), u); });
     // the engine asks, from its threads, what part of the frame to render for each live view (0.6.33)
     worker_.setViewWindowProvider([this](int W, int H) {
         QRectF f;
@@ -285,6 +287,21 @@ void MainWindow::buildMenus() {
                                                               : "Measure: lengths are in pixels until Field of view is set in the Render panel.", 10000);
         });
         view->addAction("&Clear measurements", this, [this] { view_->clearMeasures(); });
+        // the units, one choice for the measured lines and one for the scale bar
+        static const char* names[ImageView::UnitCount] = {"&Automatic (µm or mm)", "&Pixels", "Micro&metres (µm)", "M&illimetres (mm)", "&Centimetres (cm)"};
+        for (int which = 0; which < 2; ++which) {
+            QMenu* m = view->addMenu(which == 0 ? "Measure &in" : "Scale &bar in");
+            m->setToolTipsVisible(true);
+            QActionGroup* grp = new QActionGroup(m);
+            for (int u = 0; u < ImageView::UnitCount; ++u) {
+                QAction* a = m->addAction(names[u]);
+                a->setCheckable(true);
+                a->setToolTip(u == ImageView::UnitPx ? "Pixels of the image; needs no Field of view" : "Needs Field of view in the Render panel; pixels are shown until it is set");
+                grp->addAction(a);
+                (which == 0 ? measureUnitActs_ : barUnitActs_) << a;
+                connect(a, &QAction::triggered, this, [this, which, u] { setUnits(which == 0 ? u : view_->measureUnit(), which == 1 ? u : view_->barUnit()); });
+            }
+        }
     }
     view->addSeparator();
     view->addAction("&Next image", QKeySequence("PgDown"), this, [this] { stepOutput(1); });
@@ -309,12 +326,12 @@ void MainWindow::buildMenus() {
     view->addSeparator()->setObjectName("panels");
 
     QMenu* cmpMenu = menuBar()->addMenu("&Compare");
-    QAction* two = cmpMenu->addAction("&Two-up viewer…", QKeySequence("Ctrl+2"), this, &MainWindow::twoUp);
+    QAction* two = cmpMenu->addAction("&Compare window…", QKeySequence("Ctrl+2"), this, &MainWindow::twoUp);
     two->setStatusTip("Two images side by side with one pan and zoom: this render's outputs, comparison images, sweep variants. Space flips them.");
     QAction* run = cmpMenu->addAction("&Run sweep…", QKeySequence("Ctrl+Shift+R"), this, &MainWindow::runSweep);
-    run->setStatusTip("Render B with several settings at once: one alignment, one pass 1 per group, a B per combination; then compare them two up.");
+    run->setStatusTip("Render B with several settings at once: one alignment, one pass 1 per group, a B per combination; then compare them side by side.");
     QAction* sweep = cmpMenu->addAction("Open &sweep folder…", QKeySequence("Ctrl+Shift+W"), this, &MainWindow::openSweep);
-    sweep->setStatusTip("A folder written by a sweep: its B variants, with their options, into the two-up viewer.");
+    sweep->setStatusTip("A folder written by a sweep: its B variants, with their options, into the compare window.");
 
     QMenu* tools = menuBar()->addMenu("&Tools");
     QAction* bench = tools->addAction("&Benchmark…", QKeySequence("Ctrl+B"), this, &MainWindow::benchmark);
@@ -364,6 +381,14 @@ void MainWindow::buildUi() {
     renderBtn_ = new QPushButton("Render");
     renderBtn_->setDefault(true);
     renderBtn_->setToolTip("Align and fuse the ticked frames (F5)");
+    // the one button everything leads to: larger than its neighbours, filled, and it answers the pointer
+    renderBtn_->setCursor(Qt::PointingHandCursor);
+    renderBtn_->setMinimumSize(132, 36);
+    renderBtn_->setStyleSheet("QPushButton { background: #2e7d32; color: white; border: 1px solid #1b5e20; border-radius: 6px; "
+                              "padding: 6px 22px; font-size: 11pt; font-weight: 600; }"
+                              "QPushButton:hover { background: #3c9a41; border-color: #2e7d32; }"
+                              "QPushButton:pressed { background: #1b5e20; }"
+                              "QPushButton:disabled { background: #4a4a4a; color: #9a9a9a; border-color: #3a3a3a; }");
     cancelBtn_ = new QPushButton("Cancel");
     cancelBtn_->setEnabled(false);
     saveBtn_ = new QPushButton("Save as…");
@@ -375,6 +400,13 @@ void MainWindow::buildUi() {
     tb->addAction("Fit", [this] { view_->fit(); })->setToolTip("Fit the image in the view (Ctrl+0, or double-click)");
     tb->addAction("1:1", [this] { view_->actualSize(); })->setToolTip("One image pixel per screen pixel (Ctrl+1)");
     tb->addAction(measureAct_);
+    measureUnitBox_ = new QComboBox;
+    measureUnitBox_->addItems({"auto", "px", "µm", "mm", "cm"});
+    measureUnitBox_->setToolTip("The unit of the measured lengths. auto = µm or mm, whichever reads best.\n"
+                                "µm, mm and cm need Field of view; without it lengths are in pixels.\n"
+                                "The scale bar has its own unit: click the bar, or View > Scale bar in.");
+    connect(measureUnitBox_, QOverload<int>::of(&QComboBox::activated), this, [this](int u) { setUnits(u, view_->barUnit()); });
+    tb->addWidget(measureUnitBox_);
     tb->addSeparator();
     tb->addAction(dropShifted_);
     tb->addAction(dropSoft_);
@@ -426,7 +458,7 @@ void MainWindow::buildUi() {
     tl->addStretch(1);
     for (auto [label, tip, slot] : {std::tuple<const char*, const char*, void (MainWindow::*)()>{
                                         "Compare", "Two images side by side with one pan and zoom (Ctrl+2)", &MainWindow::twoUp},
-                                    {"Retouch", "Paint one image into another in the two-up viewer (R there)", &MainWindow::retouch}}) {
+                                    {"Retouch", "Paint one image into another in the compare window (R there)", &MainWindow::retouch}}) {
         QToolButton* b = new QToolButton;
         b->setText(label);
         b->setToolTip(tip);
@@ -782,6 +814,11 @@ void MainWindow::buildUi() {
                                                   "are also smoothed over this width. Default 256 (128 before 0.6.22); 0 = off\n"
                                                   "(the depth stage's own choice, which breaks the background into patches with visible seams).");
     al->addRow("Flat smoothing", flatBlur_);
+    endClaim_ = new QCheckBox("Surroundings from the nearest end frame");
+    endClaim_->setToolTip("Checked = out-of-focus surroundings that get nearest to focus at the first or last frame are taken\n"
+                          "from that frame alone: less blurred, and with whatever that one frame shows.\n"
+                          "Unchecked (default) = they are a smooth blend of many frames.");
+    al->addRow("", endClaim_);
     QPushButton* resetAdv = new QPushButton("Defaults");
     resetAdv->setToolTip("Put every advanced parameter back to its validated default.");
     connect(resetAdv, &QPushButton::clicked, this, [this] {
@@ -789,9 +826,15 @@ void MainWindow::buildUi() {
         focusRadius_->setValue(6); focusPower_->setValue(4); depthFmPx_->setValue(6); volAggPx_->setValue(32);
         refineR_->setValue(12); refineFmPx_->setValue(9); softPx_->setValue(3); haloPrior_->setValue(2); darkPrior_->setValue(1);
         darkReach_->setValue(24); flatBlur_->setValue(256);
+        endClaim_->setChecked(false);
     });
     al->addRow("", resetAdv);
     pl->addWidget(advanced_);
+    // a sweep from the panel itself (it is also Compare > Run sweep)
+    QPushButton* sweepBtn = new QPushButton("Run sweep…");
+    sweepBtn->setToolTip("Render B several times, each with one setting changed from this panel's,\nand compare the results side by side (Ctrl+Shift+R).");
+    connect(sweepBtn, &QPushButton::clicked, this, &MainWindow::runSweep);
+    pl->addWidget(sweepBtn);
 
     // ---- performance: what the benchmark tunes. Machine settings, not render settings: the group lives in
     // File > Preferences, built here because perfToUi / perfFromUi read its widgets
@@ -948,6 +991,7 @@ void MainWindow::loadSettings() {
     // 0.6.4 .. 0.6.21 saved 128, their default; a stored 128 is that default, not a choice, and takes the new 256
     double fb = s.value("flatBlur", 256.0).toDouble();
     flatBlur_->setValue(fb == 128.0 ? 256.0 : fb);
+    endClaim_->setChecked(s.value("endClaim", false).toBool());
     s.endGroup();
     perfToUi(PerfSettings::load(s));
 }
@@ -992,6 +1036,7 @@ void MainWindow::saveSettings() {
     s.setValue("darkPrior", darkPrior_->value());
     s.setValue("darkReach", darkReach_->value());
     s.setValue("flatBlur", flatBlur_->value());
+    s.setValue("endClaim", endClaim_->isChecked());
     s.endGroup();
     perfFromUi().save(s);
 }
@@ -1015,6 +1060,7 @@ void MainWindow::resetSettings() {
     focusRadius_->setValue(6); focusPower_->setValue(4); depthFmPx_->setValue(6); volAggPx_->setValue(32);
     refineR_->setValue(12); refineFmPx_->setValue(9); softPx_->setValue(3); haloPrior_->setValue(2); darkPrior_->setValue(1);
     darkReach_->setValue(24); flatBlur_->setValue(256);
+    endClaim_->setChecked(false);
     perfToUi(PerfSettings());
     statusBar()->showMessage("Settings reset to the defaults.", 4000);
 }
@@ -1460,6 +1506,8 @@ void MainWindow::frameMenu(const QPoint& pos) {
     int copies = 0;
     for (int r = 0; r < frameList_->count(); ++r) if (frameList_->item(r)->data(Qt::UserRole).toInt() == idx) ++copies;
     QMenu menu(this);
+    QAction* show = menu.addAction("Show in the compare window");
+    menu.addSeparator();
     QAction* again = menu.addAction("Add this frame again (after this one)");
     QAction* remove = menu.addAction("Remove this copy");
     remove->setEnabled(copies > 1);
@@ -1476,6 +1524,7 @@ void MainWindow::frameMenu(const QPoint& pos) {
     QAction* byTime = menu.addAction("Sort by time taken");
     QAction* chosen = menu.exec(frameList_->viewport()->mapToGlobal(pos));
     if (!chosen) return;
+    if (chosen == show) { twoUp(); if (twoUp_) twoUp_->showFrame(frames_[idx]); return; }   // lined up with the render, when it is one of its frames
     int row = frameList_->row(it);
     if (chosen == byName || chosen == byTime) { sortFrames(chosen == byTime); return; }
     if (chosen == again) {
@@ -1654,7 +1703,16 @@ void MainWindow::twoUp() {
     if (!twoUp_) {
         twoUp_ = new CompareWindow(this);
         connect(twoUp_, &CompareWindow::depthStyleChanged, this, [this](DepthStyle st) { setDepthStyle(st, true); });
+        connect(twoUp_, &CompareWindow::refineRequested, this, &MainWindow::refineRegions);
+        connect(twoUp_, &CompareWindow::compositeRequested, this, &MainWindow::makeComposite);
+        connect(twoUp_, &CompareWindow::helpRequested, this, [this](const QString& section) { openManual(section); });
+        connect(twoUp_, &CompareWindow::refineCancelRequested, this, [this] { if (worker_.running()) worker_.cancel(); });
+        connect(&worker_, &Worker::progress, twoUp_, &CompareWindow::regionsProgress);
+        connect(twoUp_, &CompareWindow::unitsChanged, this, &MainWindow::setUnits);
+        twoUp_->setGpuIdle([this] { return !worker_.running() && !(bench_ && bench_->running()); });
+        twoUp_->setUnits(view_->measureUnit(), view_->barUnit());
     }
+    twoUp_->setRender(result_ && result_->rc == 0 ? result_ : nullptr, colorSpace_);   // Refine renders regions of its B again
     if (result_ && result_->rc == 0) {
         for (const auto& n : result_->result.names) {   // the written TIFF, when there is one, gives retouching its 16-bit data
             QString name = QString::fromStdString(n), tif = QDir(result_->outDir).filePath(name + ".tif");
@@ -1717,6 +1775,201 @@ void MainWindow::runSweep() {
     logRunStart(QString("sweep of %1 variants").arg(vars.size()), jo);
     prepareLiveView();
     worker_.startSweep(jo, vars, dlg.outDir(), live > 0 ? live : 12);
+}
+
+void MainWindow::setUnits(int measure, int bar) {
+    measure = std::clamp(measure, 0, (int)ImageView::UnitCount - 1);
+    bar = std::clamp(bar, 0, (int)ImageView::UnitCount - 1);
+    for (ImageView* v : {view_, liveView_}) { v->setMeasureUnit(measure); v->setBarUnit(bar); }
+    if (twoUp_) twoUp_->setUnits(measure, bar);
+    if (measure < measureUnitActs_.size()) measureUnitActs_[measure]->setChecked(true);
+    if (bar < barUnitActs_.size()) barUnitActs_[bar]->setChecked(true);
+    if (measureUnitBox_) { QSignalBlocker b(measureUnitBox_); measureUnitBox_->setCurrentIndex(measure); }
+    QSettings s = appSettings();
+    if (s.value("ui/measureUnit", 0).toInt() != measure) s.setValue("ui/measureUnit", measure);
+    if (s.value("ui/barUnit", 0).toInt() != bar) s.setValue("ui/barUnit", bar);
+}
+
+// The two-up viewer's Make composite: the images ticked there are stacked by the worker with this panel's settings and
+// outputs, as a render of them as frames would be, without the alignment; onFinished hands the outputs back.
+void MainWindow::makeComposite(std::shared_ptr<CompositeJobData> job) {
+    if (!twoUp_ || !job) return;
+    QString why;
+    if (worker_.running()) why = "A render is running; make the composite when it has finished.";
+    else if (bench_ && bench_->running()) why = "The benchmark is running; stop it first.";
+    if (!why.isEmpty()) { twoUp_->compositeFailedToStart(why); return; }
+    // the panel's settings; the render's own rows and file tag stay as they are (buildJob sets them for a render)
+    const auto keepItems = jobItems_;
+    const QString keepTag = jobTag_;
+    JobOptions jo;
+    buildJob(jo, false);
+    jobItems_ = keepItems;
+    jobTag_ = keepTag;
+    if (jo.stack.outputs.empty()) jo.stack.outputs = {"B"};
+    QStringList outs;
+    for (const auto& o : jo.stack.outputs) outs << QString::fromStdString(o);
+    thumbs_.stop();   // resumed in onFinished
+    liveView_->hide();
+    DiagLog::runStart("composite", {QString("%1: %2 image(s), outputs %3").arg(job->label).arg(job->paths.size()).arg(outs.join(","))});
+    setBusy(true);
+    stageText_ = "making a composite";
+    elapsed_.start();
+    tick_.start();
+    liveItem_ = markedItem_ = nullptr;
+    worker_.startComposite(jo, job);
+}
+
+// The two-up viewer's Refine: the regions marked on the render's B are rendered again by the worker (run_region), from
+// the frames the render left in memory; onFinished hands the tiles back to the viewer.
+void MainWindow::refineRegions(std::shared_ptr<RegionJobData> job) {
+    if (!twoUp_ || !job) return;
+    QString why;
+    if (worker_.running()) why = "A render is running; press Refine when it has finished.";
+    else if (bench_ && bench_->running()) why = "The benchmark is running; stop it first.";
+    else if (!result_ || job->render != result_ || !result_->stack)
+        why = "This B is not the last render's any more (another render, or another folder, came after it): leave Retouch, press Compare in the main window, and mark the regions again.";
+    if (!why.isEmpty()) { twoUp_->refineFailedToStart(why); return; }
+    if (!result_->stack->cache_frames) worker_.releaseCache();
+    thumbs_.stop();   // resumed in onFinished
+    liveView_->hide();
+    size_t variants = 0;
+    for (const auto& t : job->tiles) variants += t.variants.size();
+    DiagLog::runStart("refine", {QString("%1 tile(s), %2 variant(s) of the render in \"%3\"").arg(job->tiles.size()).arg(variants).arg(QFileInfo(result_->outDir).fileName())});
+    setBusy(true);
+    stageText_ = "refining regions";
+    elapsed_.start();
+    tick_.start();
+    liveItem_ = markedItem_ = nullptr;
+    worker_.startRegions(job);
+}
+
+void MainWindow::testRegions(const QString& spec, const QString& dir) {
+    QDir().mkpath(dir);
+    auto log = [dir](const QString& line) {
+        QFile f(QDir(dir).filePath("regions.log"));
+        if (f.open(QIODevice::Append | QIODevice::Text)) f.write((line + "\n").toUtf8());
+        DiagLog::write("regions test: " + line);
+    };
+    QTimer* t = new QTimer(this);
+    connect(t, &QTimer::timeout, this, [this, t, spec, dir, log] {
+        if (worker_.running() || !result_) return;   // the render first
+        t->stop();
+        if (result_->rc != 0) { log("the render failed"); close(); return; }
+        twoUp();
+        twoUp_->select(0, "B");
+        // each step waits for the window to have drawn the one before
+        auto grab = [this, dir](const QString& name) { twoUp_->grab().save(QDir(dir).filePath(name + ".png")); };
+        QTimer::singleShot(1500, this, [this, spec, dir, log, grab] {
+            int n = 0;
+            for (const QString& one : spec.split(';', Qt::SkipEmptyParts)) {
+                const QStringList f = one.split(',');
+                if (f.size() == 2 && f[0] == "n") {   // "n,3": that many panes
+                    twoUp_->testPanes(f[1].toInt());
+                    continue;
+                }
+                if (f.size() == 1 && f[0] == "frames") {   // every frame of the stack into the list
+                    log(QString("add frames: %1 rows").arg(twoUp_->testAddFrames()));
+                    continue;
+                }
+                if (f.size() == 3 && f[0] == "h") {   // "h,x,y": Frame here at that image position
+                    log("frame here: " + twoUp_->testFrameHere(f[1].toInt(), f[2].toInt()));
+                    continue;
+                }
+                if (f.size() == 2 && f[0] == "pane") {   // "pane,3": a click in that pane (1 = the left one)
+                    log("pane: " + twoUp_->testActive(f[1].toInt() - 1));
+                    continue;
+                }
+                if (f.size() == 2 && f[0] == "r") {   // "r,NAME": NAME on the right, Retouch on (B stays on the left)
+                    twoUp_->select(1, f[1]);
+                    twoUp_->setRetouch(true);
+                    continue;
+                }
+                if (f.size() == 5 && f[0] == "s") {   // "s,x0,y0,x1,y1": a brush stroke, then the result saved
+                    log("stroke: " + twoUp_->testStroke(QPointF(f[1].toDouble(), f[2].toDouble()), QPointF(f[3].toDouble(), f[4].toDouble())));
+                    log(QString("saved: %1").arg(twoUp_->saveResultTo(QDir(dir).filePath("B_painted.tif"))));
+                    continue;
+                }
+                if (f.size() == 2 && f[0] == "step") {   // "step,-1": PgUp (or 1: PgDn) in the pane the list fills
+                    log("step: " + twoUp_->testStep(f[1].toInt()));
+                    continue;
+                }
+                if (f.size() == 2 && f[0] == "show") {   // "show,FILE": the main window's "Show in the compare window" for that frame
+                    twoUp_->showFrame(f[1]);
+                    log("show frame: " + twoUp_->statusBar()->currentMessage());
+                    continue;
+                }
+                if (f.size() == 1 && f[0] == "grab") {   // a picture of the window as it is, then the end
+                    QTimer::singleShot(1500, this, [this, grab] { grab("g1_window"); QTimer::singleShot(300, this, &QWidget::close); });
+                    return;
+                }
+                if (f.size() == 2 && f[0] == "a") {   // "a,FILE": FILE added and shown on the right (a frame of the stack comes up lined up)
+                    log("added: " + twoUp_->testSource(f[1]));
+                    twoUp_->setRetouch(false);
+                    continue;
+                }
+                if (f.size() >= 3 && f[0] == "c") {   // "c,NAME,NAME[,NAME...]": those entries ticked, Make composite pressed
+                    connect(twoUp_, &CompareWindow::compositeFinished, this, [this, log, grab](bool ok) {
+                        log(QString("composite finished: %1 | %2").arg(ok ? "ok" : "NOT ok", twoUp_->statusBar()->currentMessage()));
+                        QTimer::singleShot(800, this, [this, grab] { grab("c1_composite"); QTimer::singleShot(300, this, &QWidget::close); });
+                    }, Qt::SingleShotConnection);
+                    twoUp_->testComposite(f.mid(1));
+                    return;
+                }
+                if (f.size() == 6 && f[0] == "p") {   // "p,FILE,x0,y0,x1,y1": FILE shown on the right, Retouch, a stroke from it
+                    const QPointF a(f[2].toDouble(), f[3].toDouble()), b(f[4].toDouble(), f[5].toDouble());
+                    log("source: " + twoUp_->testSource(f[1], QDir(dir).filePath("aligned.png")));
+                    log("stroke: " + twoUp_->testStroke(a, b));
+                    grab("p1_painted");
+                    log(QString("saved painted: %1").arg(twoUp_->saveResultTo(QDir(dir).filePath("B_painted.tif"))));
+                    // then an image of another size on the right: the brush must paint nothing
+                    twoUp_->addFile("other size", QDir(dir).filePath("p1_painted.png"));
+                    twoUp_->select(1, "other size");
+                    QTimer::singleShot(2500, this, [this, dir, log, grab, a, b] {
+                        log("stroke 2: " + twoUp_->testStroke(a + QPointF(0, 400), b + QPointF(0, 400)));
+                        grab("p2_other_size");
+                        log(QString("saved after: %1").arg(twoUp_->saveResultTo(QDir(dir).filePath("B_painted2.tif"))));
+                        twoUp_->setRetouch(false);
+                        QTimer::singleShot(300, this, &QWidget::close);
+                    });
+                    return;
+                }
+                if (f.size() == 6 && f[0] == "d") {   // "d,mode,fx0,fy0,fx1,fy1": drawn as the mouse would, on the left pane
+                    const int before = twoUp_->regionCount();
+                    twoUp_->testDraw(f[1].toInt(), QPointF(f[2].toDouble(), f[3].toDouble()), QPointF(f[4].toDouble(), f[5].toDouble()));
+                    n += twoUp_->regionCount() - before;
+                    continue;
+                }
+                QPolygonF p;
+                int strength = 1;
+                if (f.size() == 4 || f.size() == 5) {
+                    const double x0 = f[0].toDouble(), y0 = f[1].toDouble(), x1 = f[2].toDouble(), y1 = f[3].toDouble();
+                    p << QPointF(x0, y0) << QPointF(x1, y0) << QPointF(x1, y1) << QPointF(x0, y1);
+                    if (f.size() == 5) strength = f[4].toInt();
+                } else if (f.size() >= 6) {
+                    for (int i = 0; i + 1 < f.size(); i += 2) p << QPointF(f[i].toDouble(), f[i + 1].toDouble());
+                    if (f.size() % 2) strength = f.last().toInt();
+                }
+                if (twoUp_->addRegionPx(p, strength) >= 0) ++n;
+            }
+            log(QString("%1 regions marked").arg(n));
+            grab("1_marked");
+            connect(twoUp_, &CompareWindow::refineFinished, this, [this, dir, log, grab](bool ok) {
+                log(QString("refine finished: %1").arg(ok ? "ok" : "NOT ok"));
+                QTimer::singleShot(800, this, [this, dir, log, grab] {
+                    grab("2_refined");
+                    log(QString("saved all on: %1").arg(twoUp_->saveResultTo(QDir(dir).filePath("B_refined.tif"))));
+                    if (twoUp_->regionCount() > 0) {
+                        twoUp_->setRegionOn(0, false);
+                        log(QString("saved region 1 off: %1").arg(twoUp_->saveResultTo(QDir(dir).filePath("B_refined_1off.tif"))));
+                        QTimer::singleShot(600, this, [this, grab] { grab("3_first_off"); twoUp_->setRetouch(false); QTimer::singleShot(300, this, &QWidget::close); });
+                    } else QTimer::singleShot(300, this, &QWidget::close);
+                });
+            }, Qt::SingleShotConnection);
+            twoUp_->refine();
+            if (!twoUp_->refining()) { log("refine did not start"); close(); }
+        });
+    });
+    t->start(500);
 }
 
 void MainWindow::onComparison(int index, QImage image) {
@@ -1807,6 +2060,7 @@ bool MainWindow::buildJob(JobOptions& jo, bool interactive) {
         jo.stack.dark_prior = darkPrior_->value();
         jo.stack.dark_reach_px = darkReach_->value();
         jo.stack.po.flat_blur_px = flatBlur_->value();
+        jo.stack.end_claim = endClaim_->isChecked();
     }
     // the dust map: one named in the settings is read at the first render that wants it
     if (!dust_ && !dustPath_.isEmpty() && QFileInfo::exists(dustPath_)) setDustMap(dustPath_, true);
@@ -2338,6 +2592,26 @@ void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
     listTick_.stop();
     if (markedItem_) markedItem_->setBackground(QBrush());
     liveItem_ = markedItem_ = nullptr;
+    if (data->regions) {   // regions of the last render, rendered again: the render stays, the tiles go to the two-up viewer
+        setBusy(false);
+        resumeThumbnails();
+        DiagLog::runEnd(data->rc == 3 ? "refine cancelled" : data->rc ? QString("refine failed, code %1, stage \"%2\": %3").arg(data->rc).arg(data->stage, data->error)
+                                                                      : QString("refine done in %1 s").arg(data->seconds, 0, 'f', 1));
+        setStage(data->rc == 3 ? "Refine cancelled." : data->rc ? "Refine finished with failures." : QString("Regions refined in %1 s.").arg(data->seconds, 0, 'f', 1));
+        progress_->setValue(0);
+        if (twoUp_) twoUp_->regionsDone(data);
+        return;
+    }
+    if (data->composite) {   // images of the two-up viewer stacked again: the render stays, the outputs go back to the viewer
+        setBusy(false);
+        resumeThumbnails();
+        DiagLog::runEnd(data->rc == 3 ? "composite cancelled" : data->rc ? QString("composite failed, code %1, stage \"%2\": %3").arg(data->rc).arg(data->stage, data->error)
+                                                                         : QString("composite done in %1 s").arg(data->seconds, 0, 'f', 1));
+        setStage(data->rc == 3 ? "Composite cancelled." : data->rc ? "The composite could not be made." : QString("Composite %1 made in %2 s.").arg(data->composite->label).arg(data->seconds, 0, 'f', 1));
+        progress_->setValue(0);
+        if (twoUp_) twoUp_->compositeDone(data);
+        return;
+    }
     if (data->sweep) {   // the last render's outputs stay; the variants go to the two-up viewer
         setBusy(false);
         liveView_->hide();
@@ -2943,11 +3217,25 @@ void MainWindow::preferences() {
 
 // Help > Manual: manual\index.html beside the program (the release zip holds it), in the default browser; a build
 // run from the source tree finds docs\manual instead
-void MainWindow::openManual() {
+void MainWindow::openManual(const QString& section) {
     const QString app = QCoreApplication::applicationDirPath();
     for (const QString& p : {app + "/manual/index.html", app + "/../../docs/manual/index.html"}) {
         if (!QFileInfo::exists(p)) continue;
-        QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(p).canonicalFilePath()));
+        QUrl url = QUrl::fromLocalFile(QFileInfo(p).canonicalFilePath());
+        if (!section.isEmpty()) {
+            // at a section: Windows drops the "#section" of a file it is asked to open, so the browser is given a
+            // small page that leads on to it
+            QUrl to = url;
+            to.setFragment(section);
+            QFile f(QDir(QDir::tempPath()).filePath("xlamina_manual.html"));
+            if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                f.write(QString("<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"0; url=%1\"><a href=\"%1\">The xLamina manual</a>")
+                            .arg(QString::fromLatin1(to.toEncoded())).toUtf8());
+                f.close();
+                url = QUrl::fromLocalFile(f.fileName());
+            }
+        }
+        QDesktopServices::openUrl(url);
         statusBar()->showMessage("The manual opens in the browser.", 4000);
         return;
     }

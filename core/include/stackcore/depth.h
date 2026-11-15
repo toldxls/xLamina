@@ -71,6 +71,14 @@ struct DepthParams {
     // (the composition's flat blend, 0.6.18, is separate: --flat-blend 0 for the 0.6.15 B)
     int flat_end = 2;
     float flat_end_soft = 0.3f;
+    // Surroundings that never come into focus but get nearest to it at an end of the stack (the rest of a specimen
+    // beyond the stack's range): `claim` (dh*dw on the device, or null = none) says how far each pixel is given that
+    // end frame itself, +1 = the last frame, -1 = the first, 0 = no claim. A claimed pixel takes its end instead of
+    // the band's fill or the smoothed field (which average it with frames further from focus), and the composition's
+    // wide flat blend is narrowed there (DepthResult::end_claim). The map is made from each pixel's own focus peak,
+    // measured in pass 1 BEFORE the flat regions' wide blur (Pass1::peak_*; StackOptions::end_claim): after that blur
+    // a pixel of the surroundings peaks at the neighbouring subject's frame. flat_end 2 / 3 only
+    const float* claim = nullptr;
     // progress for a front end (name, fraction of the depth stage), called after a sync at each step: the focus curves,
     // the cost volume, each SGM band, the upsampling. Four seconds of silence at full resolution read as a hang
     std::function<void(const char*, double)> progress;
@@ -84,6 +92,8 @@ struct DepthResult {
     std::vector<float> spill;     // dh*dw, the h map (kept for the refinement pass)
     std::vector<float> depth_d;   // dh*dw, the sub-frame argmin before upsampling (diagnostic)
     double end_fraction = 0;      // share of pixels peaking at an end frame
+    std::vector<float> end_claim; // dh*dw: 0 .. 1, how far a flat pixel was given its end frame (DepthParams::end_claim); empty = none
+    double end_claim_share = 0;   // share of the depth grid with a claim over 0.5
     double ms_cost = 0, ms_sgm = 0, ms_post = 0;
 };
 

@@ -305,6 +305,16 @@ __global__ void k_lerp_mask(const float* a, const float* b, const float* m, floa
     size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) out[i] = a[i] + m[i] * (b[i] - a[i]);
 }
+__global__ void k_sq_diff(const float* a, const float* b, float* out, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) { float d = a[i] - b[i]; out[i] = d * d; }
+}
+__global__ void k_peak_update(const float* e, float k, float* best, float* arg, float* sum, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    sum[i] += e[i];
+    if (e[i] > best[i]) { best[i] = e[i]; arg[i] = k; }
+}
 __global__ void k_flatness(const float* t, float lo, float inv_tau, float* out, size_t n) {
     size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) out[i] = fminf(fmaxf(1.f - (t[i] - lo) * inv_tau, 0.f), 1.f);
@@ -503,6 +513,10 @@ void f16_to_f32(const void* a, float* out, size_t n, cudaStream_t s) { k_h2f<<<b
 void f32_to_f16(const float* a, void* out, size_t n, cudaStream_t s) { k_f2h<<<blocks1(n), 256, 0, s>>>(a, (__half*)out, n); }
 void relu_sqrt(float* a, size_t n, cudaStream_t s) { k_relu_sqrt<<<blocks1(n), 256, 0, s>>>(a, n); }
 void clip01(float* a, size_t n, cudaStream_t s) { k_clip01<<<blocks1(n), 256, 0, s>>>(a, n); }
+void sq_diff(const float* a, const float* b, float* out, size_t n, cudaStream_t s) { k_sq_diff<<<blocks1(n), 256, 0, s>>>(a, b, out, n); }
+void peak_update(const float* e, int k, float* best, float* arg, float* sum, size_t n, cudaStream_t s) {
+    k_peak_update<<<blocks1(n), 256, 0, s>>>(e, (float)k, best, arg, sum, n);
+}
 void lerp_mask(const float* a, const float* b, const float* m, float* out, size_t n, cudaStream_t s) {
     k_lerp_mask<<<blocks1(n), 256, 0, s>>>(a, b, m, out, n);
 }

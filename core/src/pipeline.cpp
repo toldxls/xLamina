@@ -972,11 +972,17 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
             // flat regions (no texture in the guide within flat_reach_px): every slice box-blurred over flat_blur_px
             // there, so defocused background gets one consistent focus curve instead of a noisy one per pixel
             DevGaussian gr1, gr2;   // the flat mask's two kernels (freed after the stage's sync)
+            float* d_pk[4] = {nullptr, nullptr, nullptr, nullptr};   // best, arg, sum, and a plane to work in
+            struct PkFree { float** p; ~PkFree() { for (int i = 0; i < 4; ++i) cudaFree(p[i]); cudaGetLastError(); } } pk_free{d_pk};
+            DevGaussian g_pk;
             int rbox = 0;
             if (po.flat_blur_px > 0) {
                 CK(cudaMalloc(&d_flat, nd * sizeof(float)));
                 CK(cudaMalloc(&d_Vb, nd * sizeof(float)));
                 CK(cudaMalloc(&d_T2, nd * sizeof(float)));
+                // each pixel's own focus peak over this card's frames, before the wide blur below (Pass1::peak_*)
+                for (float*& q : d_pk) { CK(cudaMalloc(&q, nd * sizeof(float))); CK(cudaMemsetAsync(q, 0, nd * sizeof(float), s)); }
+                g_pk.build(std::max(1.0, 24.0 * po.depth_fraction));
                 // texture of the guide at the scale of the reach: the guide blurred first (so its noise does not
                 // count as texture), |Laplacian|, spread over the reach; ranked over the image, the flattest fifth
                 // is fully flat and anything above the midpoint to the 90th percentile is textured
@@ -1004,6 +1010,7 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
                 snap(d_flat);
                 float lo = percentile(d_flat, d_T2, nd, 20.0, s), hi = percentile(d_flat, d_T2, nd, 90.0, s);
                 if (po.flat_lo >= 0 && po.flat_hi > po.flat_lo) { lo = po.flat_lo; hi = po.flat_hi; }   // the whole frame's, for a strip
+                if (d == devs[0]) { P.flat_lo = lo; P.flat_hi = hi; }   // as used: a region rendered again takes them (run_region)
                 flatness(d_flat, lo, std::max(0.5f * (hi - lo), 1e-6f), d_flat, nd, s);
                 snap(d_flat);
                 if (dbg_buf) {
@@ -1029,6 +1036,15 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
                 else { f16_to_f32(D.fm16[k], d_V, nd, s); relu_sqrt(d_V, nd, s); }
                 if (b_blur) gaussian_blur(d_V, d_V, d_T, vp.dw, vp.dh, gb, s);
                 if (d_flat) {
+                    // the frame's coarse structure here: its luma plane (already smooth below about 12 sensor px) less
+                    // its own blur over 24 px, squared and pooled over 24 px. Out-of-focus surroundings have nothing
+                    // finer to go by: across the frames the focus measure itself is flat noise there, while this band
+                    // rises several times over as they near focus (FINDINGS 57)
+                    f16_to_f32(D.lum16[k], d_Vb, nd, s);
+                    gaussian_blur(d_Vb, d_pk[3], d_T2, vp.dw, vp.dh, g_pk, s);
+                    sq_diff(d_Vb, d_pk[3], d_Vb, nd, s);
+                    gaussian_blur(d_Vb, d_pk[3], d_T2, vp.dw, vp.dh, g_pk, s);
+                    peak_update(d_pk[3], k, d_pk[0], d_pk[1], d_pk[2], nd, s);
                     box_filter(d_V, d_Vb, d_T2, vp.dw, vp.dh, rbox, s);
                     lerp_mask(d_V, d_Vb, d_flat, d_V, nd, s);
                 }
@@ -1043,6 +1059,18 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
                 ++done;
             }
             CK(cudaStreamSynchronize(s));
+            if (d_flat) {   // this card's peaks into the stack's (each frame was on one card)
+                std::vector<float> hb(nd), ha(nd), hs(nd);
+                CK(cudaMemcpy(hb.data(), d_pk[0], nd * sizeof(float), cudaMemcpyDeviceToHost));
+                CK(cudaMemcpy(ha.data(), d_pk[1], nd * sizeof(float), cudaMemcpyDeviceToHost));
+                CK(cudaMemcpy(hs.data(), d_pk[2], nd * sizeof(float), cudaMemcpyDeviceToHost));
+                if (P.peak_best.size() != nd) { P.peak_best.assign(nd, 0.f); P.peak_arg.assign(nd, 0.f); P.peak_sum.assign(nd, 0.f); }
+                for (size_t i = 0; i < nd; ++i) {
+                    P.peak_sum[i] += hs[i];
+                    if (hb[i] > P.peak_best[i] || (hb[i] == P.peak_best[i] && ha[i] < P.peak_arg[i])) { P.peak_best[i] = hb[i]; P.peak_arg[i] = ha[i]; }
+                }
+                g_pk.free();
+            }
             if (vp.agg_r > 0) gs.free();
             if (b_blur) gb.free();
             if (d_flat) { gr1.free(); gr2.free(); }
@@ -1306,6 +1334,9 @@ static bool parse_stack_option_raw(const std::string& a, const std::string& v, S
     else if (a == "--fix-banding") so.fix_banding = atoi(v.c_str()) != 0;
     else if (a == "--fix-rs") so.fix_rs = atoi(v.c_str()) != 0;
     else if (a == "--refine-r") so.refine_r = atoi(v.c_str());
+    else if (a == "--refine-scale") so.refine_scale = atoi(v.c_str()) != 0;
+    else if (a == "--refine-twin") so.refine_twin = atoi(v.c_str()) != 0;
+    else if (a == "--refine-island") so.refine_island = atoi(v.c_str()) != 0;
     else if (a == "--refine-fm-px") so.refine_fm_px = atof(v.c_str());
     else if (a == "--soft-px") so.soft_px = atof(v.c_str());
     else if (a == "--smoothing") so.c_smoothing = atof(v.c_str());
@@ -1330,6 +1361,9 @@ static bool parse_stack_option_raw(const std::string& a, const std::string& v, S
     }
     else if (a == "--flat-end-soft") so.flat_end_soft = atof(v.c_str());
     else if (a == "--flat-blend") so.flat_blend = atof(v.c_str());   // frames (FINDINGS 41)
+    else if (a == "--end-claim") so.end_claim = atoi(v.c_str()) != 0;
+    else if (a == "--end-claim-lo") so.end_claim_lo = atof(v.c_str());
+    else if (a == "--end-claim-hi") so.end_claim_hi = atof(v.c_str());
     else if (a == "--strips") so.strips = atoi(v.c_str());
     else if (a == "--strip-overlap") so.strip_overlap_px = atof(v.c_str());
     else if (a == "--b-reference") {   // the 0.5.x B, bit-identical: the 1/4 volume with the priors and no 0.6.x additions
@@ -1817,6 +1851,7 @@ static int run_stack_strips(StackOptions& so, int n) {
         R.images = std::move(acc);
         R.depth = std::move(depth); R.conf = std::move(conf);
         R.noise_mad = noise_mad; R.icc = icc;
+        R.depth_floor = ne.depth_floor; R.flat_lo = flat_lo; R.flat_hi = flat_hi; R.levels = levels;
         R.frame_energy = energy;
         R.write_seconds = since(t5);
         R.seconds = since(t_all);
@@ -1920,11 +1955,24 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
     Pass1Options& po = so.po;
     const Hooks& hooks = so.hooks;
     const std::string& out = so.out;
-    const int refine_r = so.refine_r, streams = so.streams;
-    const double refine_fm_px = so.refine_fm_px, soft_px = so.soft_px;
+    const int streams = so.streams;
+    const double soft_px = so.soft_px;
     auto since = [](std::chrono::steady_clock::time_point t) { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count(); };
     auto stage = [&](const char* name, double f) { if (hooks.progress) hooks.progress(name, f); };
     const int K = (int)P.paths.size();
+    // The fine focus looks so.refine_r frames either way of the smooth depth, through a window of refine_fm_px: set on
+    // stacks of 200 to 260 frames, where 12 frames are a twentieth of the depth. On a stack of 64 (a large step between
+    // frames) the same 12 frames are a fifth of it: that far out of focus a dark speck on a bright face is a wide rim,
+    // a 9 px window sits wholly inside the rim, and the fine focus takes the rim's frame: smooth holes around the
+    // specks (FINDINGS 57). A shorter range cures that but leaves depth edges soft, where the smooth depth is off by
+    // more than the range; a window twice as wide sees the speck itself, whose own frame then wins, and keeps the
+    // range. So the window widens as the stack gets shorter than 192 frames, up to twice (--refine-scale 0: as given)
+    const int refine_r = so.refine_r;
+    double refine_fm_px = so.refine_fm_px;
+    if (so.refine_scale && K < 192 && K >= 2) {
+        refine_fm_px = so.refine_fm_px * std::min(2.0, 192.0 / K);
+        logf("refine: the window is %.1f px instead of %.1f: the stack has %d frames", refine_fm_px, so.refine_fm_px, K);
+    }
     const int ow = P.g.out_w(), oh = P.g.out_h();
     const size_t no = (size_t)ow * oh, nd = (size_t)P.vp.dw * P.vp.dh;
     const int prim = P.devs[0];
@@ -2041,11 +2089,33 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
             dp.flat_keep = (float)so.flat_keep;
             dp.flat_end = so.flat_end;
             dp.flat_end_soft = (float)so.flat_end_soft;
+            // surroundings nearest to focus at an end of the stack (StackOptions::end_claim): the signed claim per
+            // depth pixel from its own focus peak (Pass1::peak_*)
+            if (so.end_claim && P.peak_best.size() == nd && K >= 8) {
+                std::vector<float> claim(nd);
+                const float lo = (float)so.end_claim_lo, hi = (float)std::max(so.end_claim_hi, so.end_claim_lo + 1e-3);
+                const float m = (float)std::max(1, K / 16), last = (float)(K - 1);
+                for (size_t i = 0; i < nd; ++i) {
+                    const float mean = P.peak_sum[i] / (float)K;
+                    const float r = mean > 0 ? P.peak_best[i] / mean : 0.f;
+                    float a = std::min(std::max((r - lo) / (hi - lo), 0.f), 1.f);
+                    a = a * a * (3.f - 2.f * a);
+                    const float dist = std::min(P.peak_arg[i], last - P.peak_arg[i]);
+                    const float e = std::min(std::max(2.f - dist / m, 0.f), 1.f);
+                    claim[i] = (P.peak_arg[i] > 0.5f * last ? 1.f : -1.f) * a * e;
+                }
+                float* d_claim = nullptr;
+                CK(cudaMalloc(&d_claim, nd * sizeof(float)));
+                dfree.p.push_back(d_claim);
+                CK(cudaMemcpy(d_claim, claim.data(), nd * sizeof(float), cudaMemcpyHostToDevice));
+                dp.claim = d_claim;
+            }
         }
         R = depth_from_volume(d_V, P.lum_all.data(), d_guide, d_ga, P.vp.dw, P.vp.dh, K, ow, oh, dp, s);
         if (release_volume) P.lum_all.release_async();
         // d_V and d_ga are freed here by dfree going out of scope
     }
+    if (!R.end_claim.empty()) logf("depth: %.1f %% of the grid takes its end frame (surroundings nearest to focus at an end of the stack)\n", 100 * R.end_claim_share);
     logf("depth: %.2f s (cost %.0f ms, SGM %.0f ms%s, post %.0f ms); end-peaked %.1f%%\n", since(t1), R.ms_cost, R.ms_sgm,
          R.sgm_bands > 1 ? (" in " + std::to_string(R.sgm_bands) + " bands").c_str() : "", R.ms_post, 100 * R.end_fraction);
     if (so.result) so.result->depth_seconds = since(t1);
@@ -2096,6 +2166,20 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
             CK(cudaMalloc(&d_depth[d], no * sizeof(float)));
             CK(cudaMemcpy(d_depth[d], R.depth_s.data(), no * sizeof(float), cudaMemcpyHostToDevice));
         }
+        // the rim check (RefineState, FINDINGS 57): on every card or on none, as their states are merged
+        // Only on a stack under 192 frames, like the wider window: there a step between frames is large, and what the
+        // fine focus finds 12 frames away is a rim or the inside of a crystal. On 241 frames the same rules took real
+        // detail from thin plates and crystal edges (10 % of B changed, softer; FINDINGS 57)
+        const bool short_stack = K < 192;
+        if (so.refine_twin && short_stack && refine_r >= 3) {
+            bool all = true;
+            for (int d : P.devs) all = all && rst[d].alloc_twin();
+            if (!all) {
+                for (int d : P.devs) rst[d].free_twin();
+                logf("refine: no room on the cards for the rim check; the fine focus runs without it\n");
+            }
+            CK(cudaSetDevice(P.devs.back()));
+        }
         // last frame first: the live view runs back through the stack (the argmax is order-free)
         std::vector<int> back_k(all_k.rbegin(), all_k.rend());
         std::vector<fs::path> back_paths(P.paths.rbegin(), P.paths.rend());
@@ -2124,7 +2208,8 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
             d_depth[d] = nullptr;   // (the guard above frees what is not null on a way out after this)
         }
         CK(cudaSetDevice(prim));
-        refine_depth(R.depth_s, R.conf, R.spill, P.vp.dw, P.vp.dh, rst[prim], ow, oh, P.g.scale, s);
+        refine_depth(R.depth_s, R.conf, R.spill, P.vp.dw, P.vp.dh, rst[prim], ow, oh, P.g.scale, s,
+                     so.refine_island && K < 192 ? (float)std::max(2, refine_r / 4) : 0.f);
         for (int d : P.devs) rst[d].free();   // leaves the last device selected
         tidy.done = true;
         CK(cudaSetDevice(prim));
@@ -2180,7 +2265,19 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
             if (wide) {
                 CK(cudaMalloc(&d_fs, P.flat.size() * sizeof(float)));
                 CK(cudaMalloc(&d_W[d], no * sizeof(float)));
-                CK(cudaMemcpy(d_fs, P.flat.data(), P.flat.size() * sizeof(float), cudaMemcpyHostToDevice));
+                // where an end frame was claimed the background is that one frame: no wide blend there
+                if (R.end_claim.size() == P.flat.size()) {
+                    std::vector<float> fw(P.flat.size());
+                    // (only once the claim is past half way: across its outer slope the depth still ramps from the
+                    // field to the end frame, and a narrow blend over a ramp draws rings, FINDINGS 41)
+                    for (size_t i = 0; i < fw.size(); ++i) {
+                        float c = std::min(1.f, std::max(0.f, (R.end_claim[i] - 0.5f) * 2.f));
+                        c = c * c * (3.f - 2.f * c);
+                        fw[i] = P.flat[i] * (1.f - c);
+                    }
+                    CK(cudaMemcpy(d_fs, fw.data(), fw.size() * sizeof(float), cudaMemcpyHostToDevice));
+                } else
+                    CK(cudaMemcpy(d_fs, P.flat.data(), P.flat.size() * sizeof(float), cudaMemcpyHostToDevice));
                 flat_width_map(d_fs, P.vp.dw, P.vp.dh, d_W[d], ow, oh, (float)so.flat_blend, 0);
                 CK(cudaDeviceSynchronize());
                 cudaFree(d_fs);
@@ -2250,6 +2347,7 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
         for (size_t i = 0; i < F.names.size(); ++i)
             if (wanted(F.names[i])) { Rr.names.push_back(F.names[i]); Rr.images.push_back(std::move(F.images[i])); }
         Rr.depth = R.depth_s; Rr.conf = R.conf; Rr.noise_mad = noise_mad; Rr.icc = icc;
+        Rr.depth_floor = ne.depth_floor; Rr.flat_lo = P.flat_lo; Rr.flat_hi = P.flat_hi; Rr.levels = P.fp.levels;
         Rr.frame_energy = P.frame_energy;
     }
     // the soft-frame flag (FINDINGS 49): the frames whose focus energy fell under their neighbours'
@@ -2484,6 +2582,262 @@ int run_sweep(const StackOptions& base, const std::vector<SweepVariant>& variant
     return failed ? 1 : 0;
 }
 
+// ----------------------------------------------------------------------------- regions of a render, rendered again
+
+bool region_rect(const Grid& g, int levels, double margin_px, int& x0, int& y0, int& x1, int& y1) {
+    const int m = (int)std::ceil(std::max(0.0, margin_px));
+    int a0 = std::max(g.x0, x0 - m), b0 = std::max(g.y0, y0 - m);
+    int a1 = std::min(g.x1, x1 + m), b1 = std::min(g.y1, y1 + m);
+    if (a1 < a0 || b1 < b0) return false;
+    // the start on the grid of the render's coarsest pyramid level, counted from the render's own start: the tile's
+    // pyramid and depth grid then hold the render's samples (as a strip's do)
+    const int step = std::max(4, (int)std::lround((1 << (std::max(levels, 1) - 1)) / g.scale));
+    a0 = g.x0 + (a0 - g.x0) / step * step;
+    b0 = g.y0 + (b0 - g.y0) / step * step;
+    // sides that are multiples of 4: grown where the render has the room, cut where it ends
+    auto side = [](int lo, int& hi, int limit) {
+        const int n = hi - lo + 1, up = (n + 3) & ~3;
+        hi = lo + up - 1 <= limit ? lo + up - 1 : lo + (n & ~3) - 1;
+    };
+    side(a0, a1, g.x1);
+    side(b0, b1, g.y1);
+    if (a1 - a0 + 1 < 64 || b1 - b0 + 1 < 64) return false;
+    x0 = a0; y0 = b0; x1 = a1; y1 = b1;
+    return true;
+}
+
+int run_region(const StackOptions& base, const StackOptions::Result& whole, std::vector<RegionTile>& tiles, double margin_px) {
+    auto t_all = std::chrono::steady_clock::now();
+    auto since = [](std::chrono::steady_clock::time_point t) { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count(); };
+    const Grid g = base.po.g;   // the render's rectangle
+    if (base.po.paths.size() < 2 || base.po.T.size() != base.po.paths.size()) { logf("region: the render's frames and their alignment are not known"); return 1; }
+    size_t nv = 0;
+    for (auto& t : tiles) nv += t.variants.size();
+    if (nv == 0) { logf("region: nothing to render"); return 2; }
+    const int levels = whole.levels > 0 ? whole.levels : n_levels(g.out_w(), g.out_h());
+
+    // the frames stay resident across the tiles (the caller's cache: the stack the render left pinned)
+    std::unique_ptr<FrameCache> own_cache;
+    if (base.cache_frames && !base.po.opt.cache) own_cache = std::make_unique<FrameCache>();
+    FrameCache* cache = base.cache_frames ? (base.po.opt.cache ? base.po.opt.cache : own_cache.get()) : nullptr;
+    if (cache) ready_cache(cache, base.po.paths, base.po.opt.devices);
+
+    Hooks quiet = base.hooks;   // a tile's previews and frame views are on its own grid: only the stages go out
+    quiet.preview = nullptr;
+    quiet.frame = nullptr;
+    quiet.view_window = nullptr;
+    size_t vi = 0;   // variants finished so far, over all tiles
+    auto progress = [&](size_t idx, const std::string& label) -> ProgressFn {
+        if (!base.hooks.progress) return {};
+        ProgressFn out = base.hooks.progress;
+        return [out, idx, nv, label](const std::string& name, double f) {
+            out(label + ": " + name, ((double)idx + std::min(1.0, std::max(0.0, f))) / (double)nv);
+        };
+    };
+    // a pass or a fusion that ran out of memory, however it surfaced, is this tile's failure and not the job's
+    auto guarded = [](const std::function<int()>& fn) -> int {
+        try { return fn(); }
+        catch (const std::bad_alloc&) { logf("region: the PC's memory (RAM) ran out"); return 4; }
+        catch (const std::exception& e) {
+            if (!strstr(e.what(), "memory")) throw;
+            logf("%s", e.what());
+            return 4;
+        }
+    };
+
+    int failed = 0, short_of_memory = 0;
+    for (size_t ti = 0; ti < tiles.size(); ++ti) {
+        RegionTile& t = tiles[ti];
+        t.out.clear();
+        t.w = t.h = 0;
+        for (auto& v : t.variants) { RegionTile::Out o; o.name = v.name; o.rc = 1; t.out.push_back(std::move(o)); }
+        if (t.variants.empty()) continue;
+        const std::string tile_label = "tile " + std::to_string(ti + 1) + " of " + std::to_string(tiles.size());
+        if (!region_rect(g, levels, margin_px, t.x0, t.y0, t.x1, t.y1)) {
+            logf("%s: its rectangle lies outside the render", tile_label.c_str());
+            for (auto& o : t.out) o.rc = 2;
+            failed += (int)t.variants.size();
+            vi += t.variants.size();
+            continue;
+        }
+        t.ox = (int)std::lround((t.x0 - g.x0) * g.scale);
+        t.oy = (int)std::lround((t.y0 - g.y0) * g.scale);
+        logf("%s: sensor px %d,%d .. %d,%d (%d x %d), %zu variant(s)", tile_label.c_str(), t.x0, t.y0, t.x1, t.y1, t.x1 - t.x0 + 1, t.y1 - t.y0 + 1, t.variants.size());
+
+        // each variant's options on top of the render's; grouped by what pass 1 sees, as a sweep's
+        struct Prepared { StackOptions so; std::string key; };
+        std::vector<Prepared> prep;
+        for (auto& v : t.variants) {
+            Prepared p{base, ""};
+            for (auto& [a, val] : v.options)
+                if (!parse_stack_option(a, val, p.so)) { logf("region: variant %s: unknown option %s", v.name.c_str(), a.c_str()); return 2; }
+            Pass1Options& po = p.so.po;
+            po.g = g;   // the render's grid whatever the options said: only the rectangle is the tile's
+            po.g.x0 = t.x0; po.g.y0 = t.y0; po.g.x1 = t.x1; po.g.y1 = t.y1;
+            po.levels = levels;
+            po.flat_lo = whole.flat_lo; po.flat_hi = whole.flat_hi;
+            po.volume = true; po.with_a = false; po.host_state = false;
+            po.stop_if_short = true;   // a tile whose volume does not fit ends at once, and says so
+            po.opt.cache = cache;
+            po.hooks = quiet;
+            p.so.hooks = quiet;
+            p.so.out.clear();
+            p.so.note.clear();
+            p.so.outputs = {"B"};
+            p.so.diagnostics = false;
+            p.so.result = nullptr;
+            p.key = pass1_key(po);
+            prep.push_back(std::move(p));
+        }
+        std::vector<std::string> groups;
+        for (auto& p : prep) if (std::find(groups.begin(), groups.end(), p.key) == groups.end()) groups.push_back(p.key);
+
+        for (size_t gi = 0; gi < groups.size(); ++gi) {
+            if (base.hooks.cancelled()) return 3;
+            size_t first = 0;
+            while (prep[first].key != groups[gi]) ++first;
+            Pass1Options po = prep[first].so.po;
+            po.hooks.progress = progress(vi, tile_label);
+            auto t_g = std::chrono::steady_clock::now();
+            Pass1 P;
+            struct FreeState { FoldState& s; ~FreeState() { s.free(); } } free_state{P.dst};
+            int r = guarded([&] { return run_pass1(po, P); });
+            if (base.hooks.cancelled()) return 3;
+            if (r) {
+                if (r == 4) logf("%s: not enough GPU memory for a region of %d x %d px: mark a smaller one", tile_label.c_str(), t.x1 - t.x0 + 1, t.y1 - t.y0 + 1);
+                else logf("%s: pass 1 failed (code %d)", tile_label.c_str(), r);
+                for (size_t i = 0; i < prep.size(); ++i)
+                    if (prep[i].key == groups[gi]) { t.out[i].rc = r; ++failed; ++vi; if (r == 4) ++short_of_memory; }
+                cudaGetLastError();
+                trim_pools(base.po.opt.devices);
+                continue;
+            }
+            logf("%s: pass 1 + volume %.2f s", tile_label.c_str(), since(t_g));
+            // the whole frame's noise, not the tile's own: the confidence ramp and the finalize follow it
+            NoiseEstimate noise;
+            noise.mad = whole.noise_mad;
+            noise.depth_floor = whole.depth_floor;
+            for (size_t i = 0; i < prep.size(); ++i) {
+                if (prep[i].key != groups[gi]) continue;
+                if (base.hooks.cancelled()) return 3;
+                auto t_v = std::chrono::steady_clock::now();
+                StackOptions so = prep[i].so;
+                so.hooks.progress = progress(vi, tile_label + (t.variants[i].name.empty() ? "" : ", " + t.variants[i].name));
+                so.po.hooks.progress = so.hooks.progress;
+                StackOptions::Result res;
+                so.result = &res;
+                int rc = guarded([&] { return fuse_from_pass1(so, P, false, t_v, &noise); });
+                if (base.hooks.cancelled()) return 3;
+                auto it = std::find(res.names.begin(), res.names.end(), "B");
+                if (rc == 0 && it == res.names.end()) rc = 1;
+                t.out[i].rc = rc;
+                if (rc == 0) {
+                    t.out[i].b = std::move(res.images[it - res.names.begin()]);
+                    t.out[i].depth = std::move(res.depth);
+                    t.w = res.w; t.h = res.h;
+                } else {
+                    ++failed;
+                    if (rc == 4) ++short_of_memory;
+                    cudaGetLastError();
+                }
+                logf("%s, %s: %s in %.2f s", tile_label.c_str(), t.variants[i].name.empty() ? "the render's settings" : t.variants[i].name.c_str(),
+                     rc == 0 ? "done" : "failed", since(t_v));
+                ++vi;
+            }
+        }
+        trim_pools(base.po.opt.devices);
+    }
+    logf("region: %zu tile(s), %zu variant(s), %d failed, %.1f s", tiles.size(), nv, failed, since(t_all));
+    if (base.hooks.progress) base.hooks.progress("done", 1.0);
+    return failed == 0 ? 0 : (short_of_memory == failed ? 4 : 1);
+}
+
+
+int warp_frame(const StackOptions& base, int k, std::vector<float>& rgb, int& w, int& h) {
+    const Pass1Options& po = base.po;
+    if (k < 0 || k >= (int)po.paths.size() || po.T.size() != po.paths.size()) { logf("warp_frame: no frame %d in the render", k); return 2; }
+    const TiffInfo t0 = tiff_probe(po.paths[k]);
+    if (!t0.ok()) { logf("%s: %s", po.paths[k].string().c_str(), t0.error.c_str()); note_fail(Fail::FileRead, po.paths[k].filename().string()); return 1; }
+    Grid g = po.g;
+    g.W = (int)t0.width; g.H = (int)t0.height;
+    w = g.out_w(); h = g.out_h();
+    const size_t no = (size_t)w * h;
+    CK(cudaSetDevice(po.opt.devices.empty() ? 0 : po.opt.devices[0]));
+    cudaStream_t s = nullptr;
+    float *d_rgb = nullptr, *d_scr = nullptr, *d_out = nullptr;
+    DevRowCorr rc;
+    struct Tidy { cudaStream_t& s; float*& a; float*& b; float*& c; DevRowCorr& rc;
+                  ~Tidy() { if (s) { cudaStreamSynchronize(s); cudaStreamDestroy(s); } cudaFree(a); cudaFree(b); cudaFree(c); rc.free(); cudaGetLastError(); } } tidy{s, d_rgb, d_scr, d_out, rc};
+    CK(cudaStreamCreate(&s));
+    TiffInfo info;
+    if (int r = load_frame_to_device(po.paths[k], info, d_rgb, po.opt.cache, po.dust.get())) return r;
+    if (g.scale != 1.0) CK_MEM(cudaMalloc(&d_scr, (size_t)g.work_w() * g.work_h() * 3 * sizeof(float)));
+    CK_MEM(cudaMalloc(&d_out, no * 3 * sizeof(float)));
+    try { rc.upload(po, g); }
+    catch (const std::exception& e) { logf("%s", e.what()); return 4; }
+    load_aligned(d_rgb, g, po.T[k], d_scr, d_out, false, s, rc.at(k));
+    CK(cudaStreamSynchronize(s));
+    rgb.resize(no * 3);
+    CK(cudaMemcpy(rgb.data(), d_out, no * 3 * sizeof(float), cudaMemcpyDeviceToHost));
+    return 0;
+}
+
+bool focus_at(const StackOptions& base, int x, int y, int radius, std::vector<double>& energy) {
+    const Pass1Options& po = base.po;
+    const int K = (int)po.paths.size();
+    FrameCache* cache = po.opt.cache;
+    energy.clear();
+    if (!cache || K == 0 || po.T.size() != po.paths.size()) return false;
+    const TiffInfo info = tiff_probe(po.paths[0]);   // (the stack's frames are of one kind)
+    if (!info.ok() || info.bits % 8 != 0 || info.samples < 1) return false;
+    Grid g = po.g;
+    g.W = (int)info.width; g.H = (int)info.height;
+    const double u = x / g.scale, v = y / g.scale;   // the output pixel on the full-resolution grid
+    g.scale = 1.0;
+    const int W = g.W, H = g.H, bps = info.bits / 8, bpp = info.samples * bps, ch = info.samples >= 3 ? 1 : 0;
+    const bool be = info.big_endian;
+    // The window as blocks of 4 x 4 px, and the second differences of the block means: at single pixels the sensor's
+    // noise is all there is to measure (the same in every frame, and rising with the brightness), while detail a few
+    // pixels across comes and goes with the focus. Divided by the window's brightness, as the noise's variance goes
+    const int B = 4, nb = std::max(6, (2 * std::max(4, radius) + 1) / B), side = nb * B;
+    energy.assign(K, 0.0);
+    std::vector<double> blk((size_t)nb * nb);
+    for (int k = 0; k < K; ++k) {
+        double M[6];
+        affine_for(po.T[k], g, M);
+        const int cx = (int)std::lround(M[0] * u + M[1] * v + M[2]), cy = (int)std::lround(M[3] * u + M[4] * v + M[5]);
+        // (a window that would reach past the frame is moved in, so every frame is measured over the same area)
+        const int xa = std::clamp(cx - side / 2, 0, std::max(0, W - side)), ya = std::clamp(cy - side / 2, 0, std::max(0, H - side));
+        double e = 0;
+        const bool got = cache->with(po.paths[k], [&](const FrameCache::Entry& fe) {
+            if (W < side || H < side || fe.bytes < (size_t)W * H * bpp) return;
+            const uint8_t* px = fe.buf + fe.offset;
+            double mean = 0;
+            for (int by = 0; by < nb; ++by)
+                for (int bx = 0; bx < nb; ++bx) {
+                    double s = 0;
+                    for (int yy = 0; yy < B; ++yy) {
+                        const uint8_t* p = px + ((size_t)(ya + by * B + yy) * W + xa + bx * B) * bpp + (size_t)ch * bps;
+                        for (int xx = 0; xx < B; ++xx, p += bpp) s += bps == 2 ? (be ? (p[0] << 8) | p[1] : (p[1] << 8) | p[0]) / 257.0 : (double)p[0];
+                    }
+                    blk[(size_t)by * nb + bx] = s / (B * B);
+                    mean += s / (B * B);
+                }
+            mean /= (double)nb * nb;
+            double s2 = 0;
+            for (int by = 1; by + 1 < nb; ++by)
+                for (int bx = 1; bx + 1 < nb; ++bx) {
+                    const double* c = &blk[(size_t)by * nb + bx];
+                    const double l = 4 * c[0] - c[-1] - c[1] - c[-nb] - c[nb];
+                    s2 += l * l;
+                }
+            e = s2 / ((double)(nb - 2) * (nb - 2)) / std::max(mean, 4.0);
+        });
+        if (!got) { energy.clear(); return false; }
+        energy[k] = e;
+    }
+    return true;
+}
 
 // ----------------------------------------------------------------------------- align
 
