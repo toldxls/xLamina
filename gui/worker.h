@@ -20,9 +20,10 @@
 // (stackcore::decode_rgb8). A null image, with the reason in err, when Windows cannot read it.
 QImage readImageViaWindows(const QString& path, QString* err = nullptr);
 
-// A live-view image as the engine hands it over: float RGB, interleaved, [0, 1] (FloatImage, liveplayer.h). The
-// 8-bit conversion happens off the engine's threads, and the buffers come from a small pool handed back after
-// converting (a fresh 10 MB vector per frame cost ~3 ms of page faults on the GPU's worker thread, FINDINGS 30).
+// A building map or an output's preview as the engine hands it over: float RGB, interleaved, [0, 1] (FloatImage,
+// liveplayer.h). The 8-bit conversion happens off the engine's threads, and the buffers come from a small pool handed
+// back after converting (a fresh 10 MB vector per image cost ~3 ms of page faults on the GPU's worker thread,
+// FINDINGS 30). The frame views arrive as 8-bit pixels and are copied into pooled images (ViewPool).
 
 struct JobResultData;
 
@@ -64,6 +65,19 @@ struct JobResultData {
     int variants = 0;
     QString settingsTag;  // the render's finish time, settings and output FOV for the Save dialog's file names
                           // ("2026-11-08_14-15-27_bicubic_s2_c32_b0_1.49mm"), set by the main window
+};
+
+// The frame views' pixel buffers, used again and again (a fresh buffer of several MB per view costs its page faults
+// every time, FINDINGS 30). An image made here hands its buffer back when its last copy goes, on whichever thread
+// that is and however late (the viewer holds the last one), so the images keep the pool alive.
+class ViewPool : public std::enable_shared_from_this<ViewPool> {
+public:
+    QImage image(const uint32_t* px, int w, int h);   // a copy of w x h pixels (0xffRRGGBB) as an RGB32 image
+private:
+    struct Buf { std::unique_ptr<uint32_t[]> p; size_t cap = 0; };
+    struct Back { std::shared_ptr<ViewPool> pool; Buf buf; };
+    std::mutex m_;
+    std::vector<Buf> free_;
 };
 
 class Worker : public QObject {
@@ -112,6 +126,7 @@ private:
     size_t viewMaxPx_ = 4000000;
     std::mutex poolMutex_;
     std::vector<FloatImage> pool_;
+    std::shared_ptr<ViewPool> viewPool_ = std::make_shared<ViewPool>();
     bool running_ = false;
     stackcore::FrameCache cache_;   // the stack stays pinned in host memory between runs (FINDINGS 26)
 };

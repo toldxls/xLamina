@@ -88,8 +88,8 @@ output grid), on the right what is being built from them — the detail map thro
 stack forwards, the depth map back through it, then the composition forwards. Zoom and
 pan stay put as the frames change. Afterwards the tabs under the viewer switch between
 the outputs at full resolution; clicking a frame in the list shows it at full
-resolution. Live view sets the resolution of the live panes (each frame shown is copied
-off the GPU, so Full slows the render). Save as… writes the current image as a 16-bit
+resolution. Live view sets the resolution of the live panes (every frame is shown, each
+copied off the GPU, which costs the render a few percent). Save as… writes the current image as a 16-bit
 TIFF, JPEG or PNG; the full set plus `report.json` is also written to
 `<folder>_stacker`. The frames' ICC profile is kept in the outputs and used for display.
 
@@ -175,8 +175,8 @@ keeps each run in the table, to compare the machine against itself (an overclock
 A built-in synthetic stack stands in when no folder is open, or to compare machines. The
 report can be saved or copied.
 
-Live view costs a little speed (each image copied off a GPU costs its uploads about 3 ms,
-so views are rate-limited); Off is the fastest setting.
+Live view costs a little speed (each image copied off a GPU takes time from its uploads);
+Off is the fastest setting.
 
 All settings, the window layout, the theme (View > Theme: dark, light or the system style)
 and the recent folders are kept in `%APPDATA%\xLamina\xLamina.ini`.

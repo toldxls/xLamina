@@ -111,6 +111,9 @@ void fold_focus_preview_kernel(const FoldState& st, int down, float* d_out, int&
 // A float RGB device image at 1/down (point samples), to the host (syncs the stream).
 // every down-th pixel of the crop (x0, y0, cw, ch) of the w x h image -> pw x ph float RGB
 void image_preview_kernel(const float* d_rgb, int w, int h, int x0, int y0, int cw, int ch, int down, float* d_out, int& pw, int& ph, cudaStream_t s);
+// A frame view: the crop (x0, y0, cw, ch) of the w x h image as pw x ph pixels of 8 bits a channel (0xffRRGGBB), each
+// the mean of the image pixels it covers. pw x ph may be any size up to the crop's.
+void image_view_kernel(const float* d_rgb, int w, int h, int x0, int y0, int cw, int ch, int pw, int ph, uint32_t* d_out, cudaStream_t s);
 
 // Host copy of a state, for merging and for writing out.
 struct HostFoldState {

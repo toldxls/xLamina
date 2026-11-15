@@ -280,23 +280,27 @@ struct AsyncPreview {
     bool pending = false, guarded = false;
     std::chrono::steady_clock::time_point last{};   // when the last preview was enqueued
     // Every preview copy, of any size, costs the uploads about 3 ms of link time (measured: Low and Medium
-    // live views cost the same), so views are rate-limited per owner; the eye needs no more than this anyway.
-    // Large views (Full: 365 MB each) are limited further, to about 1 GB/s per owner, or the GUI thread drowns.
+    // live views cost the same), so the building previews are rate-limited per owner; the eye needs no more than
+    // this anyway. Large copies are limited further, to about 1 GB/s per owner, by the bytes of the one before
+    // (by the buffer's size before: a frame view of 13 MB in a 60 MB buffer waited 60 ms, and the live view got a
+    // view from each slot's every second frame).
     bool due(int min_ms) const {
-        int ms = std::max(min_ms, (int)(bytes_ / 1000000));
+        int ms = std::max(min_ms, (int)(sent_ / 1000000));
         return std::chrono::steady_clock::now() - last >= std::chrono::milliseconds(ms);
     }
-    size_t bytes_ = 0;
+    size_t bytes_ = 0, sent_ = 0;                 // the buffer's size; the bytes of the image last enqueued
+    size_t px_bytes_ = 3 * sizeof(float);         // a pixel: float RGB (the building previews) or 4 bytes (a frame view)
     int k = -1, pw = 0, ph = 0;
     const char* name = nullptr;   // a "building" preview's name; null = a frame view (hooks.frame)
     ViewWindow win;               // a frame view's window
 
-    size_t capacity_px() const { return bytes_ / (3 * sizeof(float)); }
-    // a frame view's buffer: the whole frame at frame_down, or view_max_px when the GUI asks for windows
+    size_t capacity_px() const { return bytes_ / px_bytes_; }
+    // a frame view's buffer (8 bits a channel, 4 bytes a pixel): the whole frame at frame_down, or view_max_px when
+    // the GUI asks for windows
     static size_t view_bytes(const Hooks& hooks, int w, int hgt) {
-        return hooks.view_window ? hooks.view_max_px * 3 * sizeof(float) : bytes(w, hgt, hooks.frame_down);
+        return hooks.view_window ? hooks.view_max_px * 4 : bytes(w, hgt, hooks.frame_down) / 3;
     }
-    void alloc_view(const Hooks& hooks, int w, int hgt) { alloc_bytes(view_bytes(hooks, w, hgt)); }
+    void alloc_view(const Hooks& hooks, int w, int hgt) { px_bytes_ = 4; alloc_bytes(view_bytes(hooks, w, hgt)); }
     void alloc(int w, int hgt, int down) {
         int pw_, ph_;
         preview_size(w, hgt, down, pw_, ph_);
@@ -335,11 +339,29 @@ struct AsyncPreview {
         cudaStreamWaitEvent(ps, ready, 0);
         launch(d, ps, pw, ph);
         cudaEventRecord(kdone, ps);
-        cudaMemcpyAsync(h, d, (size_t)pw * ph * 3 * sizeof(float), cudaMemcpyDeviceToHost, ps);
+        sent_ = (size_t)pw * ph * px_bytes_;
+        cudaMemcpyAsync(h, d, sent_, cudaMemcpyDeviceToHost, ps);
         cudaEventRecord(ev, ps);
         last = std::chrono::steady_clock::now();
         pending = guarded = true;
         k = k_; name = name_; win = win_;
+    }
+    // A frame view: `launch(d_out, src, pw, ph)` runs its kernel on the source stream itself, in its place among the
+    // frame's own kernels, and only the copy goes to the view's stream. The source's next frame then waits for
+    // nothing of the view's (guard has nothing to do). With the kernel on the view's stream, each slot's next frame
+    // waited for it to get its turn on a busy card: a view of every frame cost the fine-focus pass 0.6 s in 5.3.
+    template <class Launch>
+    void enqueue_inline(cudaStream_t src, int k_, Launch launch, const ViewWindow& win_) {
+        launch(d, src, pw, ph);
+        cudaEventRecord(ready, src);
+        cudaStreamWaitEvent(ps, ready, 0);
+        sent_ = (size_t)pw * ph * px_bytes_;
+        cudaMemcpyAsync(h, d, sent_, cudaMemcpyDeviceToHost, ps);
+        cudaEventRecord(ev, ps);
+        last = std::chrono::steady_clock::now();
+        pending = true;
+        guarded = false;
+        k = k_; name = nullptr; win = win_;
     }
     // before `src` overwrites what the kernel reads: wait for the kernel (not the copy)
     void guard(cudaStream_t src) {
@@ -365,24 +387,78 @@ struct AsyncPreview {
 private:
     void deliver(const Hooks& hooks) {   // straight from the pinned buffer; the hook copies
         if (name) { if (hooks.preview) hooks.preview(name, h, pw, ph); }
-        else if (hooks.frame) hooks.frame(k, h, pw, ph, win);
+        else if (hooks.frame) hooks.frame(k, reinterpret_cast<const uint32_t*>(h), pw, ph, win);
         pending = false;
     }
 };
 
-// Frame views (the live view's sweep, FINDINGS 47). One view per frame_min_ms across every slot and card, not per
-// slot: the player shows 30 a second, and every copy off a GPU costs the uploads link time (FINDINGS 30), so views
-// nobody will see are not taken. The window is the GUI's, or the whole frame at frame_down.
-static std::atomic<long long> g_last_view_ms{0};
-static bool view_due(const Hooks& hooks, AsyncPreview& fp) {
-    if (!hooks.frame || !fp.tryFlush(hooks) || !fp.due(hooks.frame_min_ms)) return false;
-    long long now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    long long last = g_last_view_ms.load();
-    if (now - last < hooks.frame_min_ms) return false;
-    g_last_view_ms.store(now);   // a race between two slots costs one extra view, nothing else
-    return true;
+// Frame views (the live view's sweep, FINDINGS 47): a view of every n-th frame of the stack, n = 1 while the pass
+// runs no faster than one frame per frame_min_ms and more when it does, so the views step through the stack evenly.
+// (Before: one view per frame_min_ms across the slots, whichever frame came round then, and each slot held back by
+// its buffer's size. The stack was shown 12 to 18 frames a second in steps of 1 to 6 frames.) Every copy off a GPU
+// costs the uploads link time (FINDINGS 30), which is why a fast pass is not shown frame by frame. The window is the
+// GUI's, or the whole frame at frame_down.
+namespace {
+struct ViewPace {
+    std::mutex m;
+    std::chrono::steady_clock::time_point t0{}, last{};
+    long long n = 0;
+    int step = 1;
+};
+ViewPace g_pace;
 }
-static void enqueue_view(const Hooks& hooks, AsyncPreview& fp, cudaStream_t src, int k, const float* d_img, int W, int H) {
+// A slot's frame views: three buffers. A slot is handed its next frame as soon as the one before is uploaded, which
+// is before that one's kernels have run and its view has been made: with one buffer, every second frame of a slot
+// found it taken and got no view.
+struct ViewRing {
+    static constexpr int kN = 3;
+    AsyncPreview b[kN];
+    unsigned long long seq[kN] = {}, next = 1;
+    static size_t view_bytes(const Hooks& hooks, int w, int hgt) { return kN * AsyncPreview::view_bytes(hooks, w, hgt); }
+    void alloc_view(const Hooks& hooks, int w, int hgt) { for (auto& a : b) a.alloc_view(hooks, w, hgt); }
+    void free() { for (auto& a : b) a.free(); }
+    void guard(cudaStream_t src) { for (auto& a : b) a.guard(src); }
+    size_t capacity_px() const { return b[0].capacity_px(); }
+    int oldest() const {
+        int o = -1;
+        for (int i = 0; i < kN; ++i) if (b[i].pending && (o < 0 || seq[i] < seq[o])) o = i;
+        return o;
+    }
+    // the views that have landed go to the hook, oldest first (a slot's stream finishes them in that order)
+    void tryFlush(const Hooks& hooks) {
+        for (int o = oldest(); o >= 0 && b[o].tryFlush(hooks); o = oldest()) {}
+    }
+    void flush(const Hooks& hooks) {
+        for (int o = oldest(); o >= 0; o = oldest()) b[o].flush(hooks);
+    }
+    AsyncPreview* take() {   // a buffer for the next view, or none while all three are in flight
+        for (int i = 0; i < kN; ++i) if (!b[i].pending) { seq[i] = next++; return &b[i]; }
+        return nullptr;
+    }
+    bool room() const { for (auto& a : b) if (!a.pending) return true; return false; }
+};
+
+static bool view_due(const Hooks& hooks, ViewRing& fp, int k) {
+    if (!hooks.frame) return false;
+    fp.tryFlush(hooks);   // the views before this one go out as soon as they have landed, wanted or not
+    int step;
+    {
+        std::lock_guard<std::mutex> lk(g_pace.m);
+        const auto now = std::chrono::steady_clock::now();
+        if (g_pace.n == 0 || now - g_pace.last > std::chrono::milliseconds(300)) { g_pace.t0 = now; g_pace.n = 0; g_pace.step = 1; }   // a pass begins
+        g_pace.last = now;
+        ++g_pace.n;
+        if (hooks.frame_min_ms > 0 && g_pace.n >= 12 && g_pace.n % 4 == 0) {   // (the first frames arrive together: no rate yet)
+            const double fps = (double)(g_pace.n - 1) / std::max(1e-3, std::chrono::duration<double>(now - g_pace.t0).count());
+            g_pace.step = std::max(1, (int)std::ceil(fps * hooks.frame_min_ms / 1000.0 - 0.1));
+        }
+        step = g_pace.step;
+    }
+    return k % step == 0 && fp.room();
+}
+static void enqueue_view(const Hooks& hooks, ViewRing& fp, cudaStream_t src, int k, const float* d_img, int W, int H) {
+    AsyncPreview* buf = fp.take();
+    if (!buf) return;
     ViewWindow vw = hooks.view_window ? hooks.view_window(W, H) : ViewWindow{};
     if (vw.w <= 0 || vw.h <= 0) vw = ViewWindow{0, 0, W, H, std::max(1, hooks.frame_down)};
     vw.x0 = std::clamp(vw.x0, 0, W - 1);
@@ -391,9 +467,19 @@ static void enqueue_view(const Hooks& hooks, AsyncPreview& fp, cudaStream_t src,
     vw.h = std::clamp(vw.h, 1, H - vw.y0);
     vw.down = std::max(1, vw.down);
     vw.fw = W; vw.fh = H;
-    while ((size_t)std::max(1, vw.w / vw.down) * std::max(1, vw.h / vw.down) > fp.capacity_px()) ++vw.down;   // the buffer's capacity
-    fp.enqueue(src, k, nullptr, [&](float* d, cudaStream_t ps, int& pw, int& ph) {
-        image_preview_kernel(d_img, W, H, vw.x0, vw.y0, vw.w, vw.h, vw.down, d, pw, ph, ps);
+    // the view's size: the one asked for, or the window at 1/down; never more pixels than the window has, nor than
+    // the buffer holds (both sides shrink together then)
+    if (vw.pw <= 0 || vw.ph <= 0) { vw.pw = std::max(1, vw.w / vw.down); vw.ph = std::max(1, vw.h / vw.down); }
+    vw.pw = std::clamp(vw.pw, 1, vw.w);
+    vw.ph = std::clamp(vw.ph, 1, vw.h);
+    if ((size_t)vw.pw * vw.ph > fp.capacity_px()) {
+        const double f = std::sqrt((double)fp.capacity_px() / ((double)vw.pw * vw.ph));
+        vw.pw = std::max(1, (int)std::floor(vw.pw * f));
+        vw.ph = std::max(1, (int)std::floor(vw.ph * f));
+    }
+    buf->enqueue_inline(src, k, [&](float* d, cudaStream_t s, int& pw, int& ph) {
+        pw = vw.pw; ph = vw.ph;
+        image_view_kernel(d_img, W, H, vw.x0, vw.y0, vw.w, vw.h, pw, ph, reinterpret_cast<uint32_t*>(d), s);
     }, vw);
 }
 
@@ -457,7 +543,7 @@ struct FoldSlot {
     VolumeScratch vsc;
     cudaEvent_t ready = nullptr, done = nullptr;
     bool used = false;
-    AsyncPreview fp;   // the frame view
+    ViewRing fp;       // the frame views
 };
 
 struct FoldDev {
@@ -677,7 +763,7 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         // what a slot holds whatever the output rectangle (the frame as read and as float RGB), and what follows it
         const size_t slot_fixed = npx_full * 12 + (g.scale != 1.0 ? (size_t)g.work_w() * g.work_h() * 12 : 0) + t0.pixel_bytes() + 2 * kReadAlign;
         size_t slot_bytes = npx_full * 12 + (g.scale != 1.0 ? (size_t)g.work_w() * g.work_h() * 12 : 0) + npx_out * 12 + probe.bytes();
-        if (hooks.frame) slot_bytes += AsyncPreview::view_bytes(hooks, ow, oh);
+        if (hooks.frame) slot_bytes += ViewRing::view_bytes(hooks, ow, oh);
         size_t per_slot = slot_bytes + t0.pixel_bytes() + 2 * kReadAlign;
         const size_t slice = volume ? (size_t)vp.dw * vp.dh * 4 : 0;
         size_t fr, tot;
@@ -799,7 +885,9 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
     auto on_frame = [&](const DeviceFrame& f) {
         auto& D = ctx[f.dev];
         auto& S = D.slots[f.slot];
-        const bool view = view_due(hooks, S.fp);   // the previous view has landed and it is time
+        const int k = ks[f.k];
+        for (auto& o : D.slots) o.fp.tryFlush(hooks);   // the views that have landed go out now, not at their own slot's next turn
+        const bool view = view_due(hooks, S.fp, k);   // the previous view has landed and this frame is one to show
         if (S.used) cudaStreamWaitEvent(f.stream, S.done, 0);   // the fold stream must be done with this slot
         S.fp.guard(f.stream);                                    // and the previous view's kernel with d_warp
         convert_to_rgb_f32(f.d_pixels(), *f.info, S.d_rgb, nullptr, f.stream);
@@ -807,7 +895,6 @@ int run_pass1(const Pass1Options& po, Pass1& P) {
         // that they hold none. Brightened, they carried the gain's own noise, the same in every frame, and the pyramid
         // drew it as a pale grainy trail where the dark one had been. The composition (pass 3) takes the brightened pixels.
         D.dust.apply_fill(S.d_rgb, f.stream);
-        int k = ks[f.k];
         load_aligned(S.d_rgb, g, T[k], S.d_scratch, S.d_warp, false, f.stream, D.rc.at(k));
         fold_measure(S.d_warp, fp, S.sc, f.stream);
         fold_energy_add(S.sc.fm, npx_out, D.d_energy + k, f.stream);   // the frame's focus energy (soft-frame flag, FINDINGS 49)
@@ -1151,7 +1238,7 @@ struct PassSlot {
     cudaEvent_t ready = nullptr, done = nullptr;
     bool used = false;
     int index = 0;   // slot index within its device
-    AsyncPreview fp;   // the frame view
+    ViewRing fp;       // the frame views
 };
 struct PassDev {
     int dev = -1;
@@ -1246,12 +1333,13 @@ static StreamerStats run_pass(const std::vector<fs::path>& run_paths, const std:
     auto on_frame = [&](const DeviceFrame& f) {
         auto& D = ctx[f.dev];
         auto& S = D.slots[f.slot];
-        const bool view = view_due(hooks, S.fp);
+        const int k = ks[f.k];
+        for (auto& o : D.slots) o.fp.tryFlush(hooks);
+        const bool view = view_due(hooks, S.fp, k);
         if (S.used) cudaStreamWaitEvent(f.stream, S.done, 0);
         S.fp.guard(f.stream);
         convert_to_rgb_f32(f.d_pixels(), *f.info, S.d_rgb, nullptr, f.stream);
         D.dust.apply(S.d_rgb, f.stream);   // the frame without its dust, before anything else sees it
-        int k = ks[f.k];
         load_aligned(S.d_rgb, g, T[k], S.d_scratch, S.d_warp, false, f.stream, D.rc.at(k));
         slot_stage(f.dev, S, k, f.stream);
         if (view) enqueue_view(hooks, S.fp, f.stream, k, S.d_warp, g.out_w(), g.out_h());
@@ -3177,7 +3265,7 @@ int run_align(AlignOptions& ao, AlignOut& A) {
     std::vector<float> luma_stack((size_t)N * w * h);
     std::vector<float> rows_all((size_t)N * H);   // each frame's row-mean luma at full resolution (banding, FINDINGS 51)
     {
-        struct Slot { float *d_rgb = nullptr, *d_y = nullptr, *d_small = nullptr, *d_rows = nullptr, *d_dust = nullptr; AreaResizer rz; AsyncPreview fp; };
+        struct Slot { float *d_rgb = nullptr, *d_y = nullptr, *d_small = nullptr, *d_rows = nullptr, *d_dust = nullptr; AreaResizer rz; ViewRing fp; };
         std::vector<std::vector<Slot>> slots(ndev);
         // the dust map (dust.h): this pass measures how deep each speck's shadow is in every frame; the correction made
         // from that goes into the passes that follow. The alignment itself reads the frames as they are.
@@ -3247,7 +3335,8 @@ int run_align(AlignOptions& ao, AlignOut& A) {
         }
         auto on_frame = [&](const DeviceFrame& f) {
             auto& S = slots[f.dev][f.slot];
-            const bool view = view_due(hooks, S.fp);
+            for (auto& o : slots[f.dev]) o.fp.tryFlush(hooks);
+            const bool view = view_due(hooks, S.fp, f.k);
             S.fp.guard(f.stream);
             convert_to_rgb_f32(f.d_pixels(), *f.info, S.d_rgb, nullptr, f.stream);
             if (dn) {   // each speck's shadow in this frame, against its surroundings

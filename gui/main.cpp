@@ -30,6 +30,9 @@
 //                       a FILE ending in .png gets a picture of the window instead, made off screen
 //   --regions SPEC --regions-out DIR   developer aid: after the render, mark these regions of B in the two-up viewer,
 //                       press Refine, save grabs and the result into DIR, then quit (MainWindow::testRegions)
+//   --sweep-test        developer aid: a sweep of two variants without the dialog (after the render, when one is asked
+//                       for), off screen; what the main pane holds afterwards goes to the log, then quit
+//   --zoom-test Z       developer aid: the main view at zoom Z (1 = 100 %) twelve seconds into a job
 //   --hover FX,FY       developer aid: after the render, show the last tab and move a synthetic cursor to that
 //                       fraction of the view (the depth map's note and highlight, for an unattended grab)
 // An exception that reaches the event loop (a slot that ran out of memory converting a whole image, say) ended the
@@ -69,7 +72,7 @@ int main(int argc, char** argv) {
     app.setWindowIcon(icon);
     applyTheme(appSettings().value("ui/theme", "dark").toString());
     for (int i = 1; i < argc; ++i)   // the unattended runs keep every window off the screen
-        if (const QString a = QString::fromLocal8Bit(argv[i]); a == "--manual" || a == "--regions") { ManualShots::keepOffScreen(); break; }
+        if (const QString a = QString::fromLocal8Bit(argv[i]); a == "--manual" || a == "--regions" || a == "--sweep-test") { ManualShots::keepOffScreen(); break; }
     for (int i = 1; i + 1 < argc; ++i)
         if (QString::fromLocal8Bit(argv[i]) == "--report") {   // the report Help > Report a problem saves, into DIR, with no window
             QString why;
@@ -109,16 +112,18 @@ int main(int argc, char** argv) {
         }
     MainWindow w;
     w.show();
-    bool autoRender = false, sample = false, selfUpdate = false;
+    bool autoRender = false, sample = false, selfUpdate = false, sweepTest = false;
     QStringList batchDirs, positional;
     QString folder, shots, bench, updatedFrom, hover, manual, report, regions, regionsOut;
-    double every = 3, renderIn = -1;
+    double every = 3, renderIn = -1, zoomTest = 0;
     for (int i = 1; i < argc; ++i) {
         QString a = QString::fromLocal8Bit(argv[i]);
         if (a == "--batch") { for (++i; i < argc; ++i) batchDirs << QString::fromLocal8Bit(argv[i]); break; }
         else if (a == "--render") autoRender = true;
         else if (a == "--render-in" && i + 1 < argc) renderIn = atof(argv[++i]);
         else if (a == "--sample") sample = true;
+        else if (a == "--sweep-test") sweepTest = true;
+        else if (a == "--zoom-test" && i + 1 < argc) zoomTest = atof(argv[++i]);
         else if (a == "--self-update") selfUpdate = true;
         else if (a == "--shots" && i + 1 < argc) shots = QString::fromLocal8Bit(argv[++i]);
         else if (a == "--bench" && i + 1 < argc) bench = QString::fromLocal8Bit(argv[++i]);
@@ -147,6 +152,8 @@ int main(int argc, char** argv) {
     if (!bench.isEmpty()) QMetaObject::invokeMethod(&w, [&w, sample, bench] { w.autoBenchmark(sample, bench); }, Qt::QueuedConnection);
     if (!manual.isEmpty()) new ManualShots(w, manual);   // grabs for docs/manual, then quits (manualshots.h)
     if (!regions.isEmpty() && !regionsOut.isEmpty()) w.testRegions(regions, regionsOut);
+    if (sweepTest) w.testSweep(autoRender || renderIn >= 0);
+    if (zoomTest > 0) w.testZoom(zoomTest);
     if (hover.contains(',')) {   // once the render is done, and again every 2 s (the window may still be laying out)
         const double fx = hover.section(',', 0, 0).toDouble(), fy = hover.section(',', 1, 1).toDouble();
         QTimer* ht = new QTimer(&w);

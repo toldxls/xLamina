@@ -1095,6 +1095,20 @@ void CompareWindow::refresh(int pane) {
     // the image to paint from; one that does not fit the result stops the brush (it used to go on painting from the
     // image before it, whatever the pane showed)
     if (rt_.on && pane == active_) rt_.blocked = i != rt_.source && !retouchSetSource(i);
+    showBrushBlocked();
+}
+
+// The brush circle is red while the brush would paint nothing: the pane painted from shows an image that is not the
+// result's size. (Clone copies within the result itself and needs no other image.)
+void CompareWindow::testCursor(double fx, double fy) {
+    QWidget* vp = view_[0]->viewport();
+    const QPointF p(vp->width() * fx, vp->height() * fy);
+    QMouseEvent e(QEvent::MouseMove, p, vp->mapToGlobal(p), Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(vp, &e);
+}
+
+void CompareWindow::showBrushBlocked() {
+    if (view_[0]) view_[0]->setBrushBlocked(rt_.on && rt_.blocked && !(cloneAct_ && cloneAct_->isChecked()));
 }
 
 // |luma(left) - luma(right)| as an orange tint: transparent up to the chosen level, opaque at four times it.
@@ -2085,6 +2099,7 @@ void CompareWindow::markActive() {
         if (p >= 1 && p < nPanes_ && heldFrame_ < 0 && sel_[p] >= 0 && sel_[p] < entries_.size() && !entries_[sel_[p]].image.isNull())
             view_[p]->setLabel(rt_.on && p == active_ ? entries_[sel_[p]].name + "  (source)" : entries_[sel_[p]].name);
     }
+    showBrushBlocked();
 }
 
 bool CompareWindow::eventFilter(QObject* o, QEvent* e) {
@@ -3182,6 +3197,7 @@ void fillSmooth(std::vector<float>& v, const std::vector<uint8_t>& k, int w, int
 void CompareWindow::showCloneMark() {
     const bool on = rt_.on && cloneAct_->isChecked() && clone_.have;
     view_[0]->setCloneMark(!on ? 0 : clone_.pending ? 1 : 2, clone_.pending ? clone_.src : QPointF(clone_.off));
+    showBrushBlocked();
 }
 
 void CompareWindow::setCloneSource(QPointF p) {

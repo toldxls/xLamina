@@ -61,11 +61,14 @@ using ProgressFn = std::function<void(const std::string& stage, double fraction)
 // rgb points at w x h x 3 floats that are valid only during the call: copy what is needed. (The hooks
 // run on the GPU worker threads; a fresh 10 MB vector per call cost ~3 ms of page faults each, FINDINGS 30.)
 using PreviewFn = std::function<void(const std::string& name, const float* rgb, int w, int h)>;
-// The window of the frame a view shows (0.6.33, FINDINGS 47): a crop x0, y0, w, h in the frame's pixels, sampled every
-// `down`-th pixel; fw, fh = the frame's size. A frame view carries the window it was taken with, so the front end can
-// place it. w = 0 asks for the whole frame at frame_down.
-struct ViewWindow { int x0 = 0, y0 = 0, w = 0, h = 0, down = 1, fw = 0, fh = 0; };
-using FrameViewFn = std::function<void(int k, const float* rgb, int w, int h, const ViewWindow& win)>;
+// The window of the frame a view shows (0.6.33, FINDINGS 47): a crop x0, y0, w, h in the frame's pixels, shown as
+// pw x ph pixels (each the mean of the frame's pixels it covers), or at 1/down when pw is 0; fw, fh = the frame's
+// size. A frame view carries the window it was taken with, so the front end can place it. w = 0 asks for the whole
+// frame at frame_down.
+struct ViewWindow { int x0 = 0, y0 = 0, w = 0, h = 0, down = 1, fw = 0, fh = 0, pw = 0, ph = 0; };
+// A frame view: w x h pixels of 8 bits a channel, 0xffRRGGBB, in the frames' own colour space; valid only during the
+// call. (Float RGB before: three times the bytes off the card and through the hook, and a conversion on the host.)
+using FrameViewFn = std::function<void(int k, const uint32_t* px, int w, int h, const ViewWindow& win)>;
 
 struct Hooks {
     ProgressFn progress;
@@ -79,8 +82,10 @@ struct Hooks {
     int preview_down = 8;        // preview images are 1/preview_down of the output grid
     int preview_every = 8;       // frames between pass-1 previews
     int frame_down = 16;         // per-frame views are 1/frame_down of the output grid
-    // at most one frame view per slot and one building preview per device within this many ms: every copy
-    // off a GPU costs its uploads ~3 ms of link time whatever its size (FINDINGS 30)
+    // preview_min_ms: at most one building preview per device within this many ms (every copy off a GPU costs its
+    // uploads link time, FINDINGS 30). frame_min_ms: the frame views come no closer together than this on average,
+    // by showing every n-th frame of the stack, n from the pass's frame rate (even steps through the stack; a view
+    // per so many ms took frames at uneven steps); 0 = a view of every frame
     int frame_min_ms = 60, preview_min_ms = 150;
     bool cancelled() const { return cancel && cancel->load(); }
 };

@@ -223,7 +223,7 @@ li.aside { list-style:none; color:var(--dim); }
 <h2>While it renders</h2>
 <figure class="shot" data-img="live_depth" data-cursor="Cancel" data-marks="left pane;right pane;progress;Cancel;row Live view;status bar">
   <ol class="legend">
-    <li><b>Left pane</b>: each frame as it is processed. Raw while reading, so the stack's wobble is visible, then warped onto the output grid.</li>
+    <li><b>Left pane</b>: each frame as it is processed, in stack order. Raw while reading, so the stack's wobble is visible, then warped onto the output grid.</li>
     <li><b>Right pane</b>: what is being built. First the detail map (forwards through the stack), then the depth map (backwards), then the composition (forwards).</li>
     <li><b>Progress</b>: the stage and the time so far.</li>
     <li><b>Cancel</b> (<kbd>Esc</kbd>) stops the render.</li>
@@ -432,7 +432,7 @@ li.aside { list-style:none; color:var(--dim); }
   <li>While retouching, Frame here takes one click and then hands the left button back to the brush.</li>
   <li>This works for the frames of the render the window shows, while no render is running. A frame file added with Add image is shown the same way.</li>
 </ul>
-<p>The source must be the size of the result. With any other image on the right the brush paints nothing, and the status bar says so.</p>
+<p>The source must be the size of the result. With any other image on the right the brush paints nothing: its circle turns red, and the status bar says so.</p>
 </section>
 
 <section id="refine" data-k="refine region regions rectangle lasso render again re-render local detail smoothed soft blob needle missing detail more detail edge feather patch strength low medium high">

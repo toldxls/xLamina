@@ -88,6 +88,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(&worker_, &Worker::progress, this, &MainWindow::onProgress);
     connect(worker_.player(), &LivePlayer::previewReady, this, &MainWindow::onPreview);   // converted off the GUI thread
     connect(worker_.player(), &LivePlayer::view, this, &MainWindow::onLiveView);   // paced, in stack order (0.6.32)
+    if (qEnvironmentVariableIsSet("XLAMINA_LOG_VIEWS")) connect(worker_.player(), &LivePlayer::passStats, this, &MainWindow::onLog);   // developer aid
     connect(view_, &ImageView::viewChanged, this, &MainWindow::updateViewWindow);
     connect(view_, &ImageView::measured, this, [this](QString len) {
         statusBar()->showMessage(QString("Measured: %1 (%2 line%3 on the image; View > Clear measurements removes them)").arg(len).arg(view_->measureCount()).arg(view_->measureCount() == 1 ? "" : "s"), 10000);
@@ -100,20 +101,24 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // the engine asks, from its threads, what part of the frame to render for each live view (0.6.33)
     worker_.setViewWindowProvider([this](int W, int H) {
         QRectF f;
-        int vw;
+        double span;
         size_t maxPx;
         {
             std::lock_guard<std::mutex> lk(viewWinM_);
             f = viewFrac_;
-            vw = viewportW_;
+            span = viewSpan_;
             maxPx = viewMaxPx_;
         }
         stackcore::ViewWindow w;
-        // the screen shows the visible part over the viewport's width: sample every down-th pixel to match it
-        w.down = std::max(1, (int)std::floor(f.width() * W / std::max(1, vw)));
+        if (f.width() <= 0 || f.height() <= 0 || span <= 0) return w;   // nothing on show yet: the whole frame, as large as the buffer holds
+        // The frame's pixels per pixel of the screen, as the view draws it now: the engine makes the view on the
+        // screen's own grid (each of its pixels the mean of the frame's it covers), so it is drawn one to one. Above
+        // 100 % the frame's own pixels are all there is. (Before: every n-th pixel, n a whole number taken from the
+        // viewport's width: finer than the screen when the height set the fit, half as fine as it between 50 and 67 %.)
+        const double s = std::max(1.0, W / span);
+        w.down = std::max(1, (int)std::floor(s));
         // a margin of a fifth around the visible part, so a small pan does not show the edge of the crop; without it
-        // when the two together are more than the buffer holds (the engine then samples coarser: on a large or a
-        // scaled display that showed a view at 100 % with every second pixel)
+        // when the two together are more than the buffer holds
         for (double m : {0.2, 0.0}) {
             double mx = f.width() * m, my = f.height() * m;
             double x0 = std::max(0.0, f.x() - mx), y0 = std::max(0.0, f.y() - my);
@@ -122,7 +127,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             w.y0 = (int)std::floor(y0 * H);
             w.w = std::max(1, (int)std::ceil((x1 - x0) * W));
             w.h = std::max(1, (int)std::ceil((y1 - y0) * H));
-            if ((size_t)std::max(1, w.w / w.down) * std::max(1, w.h / w.down) <= maxPx) break;
+            w.pw = std::max(1, (int)std::lround(w.w / s));
+            w.ph = std::max(1, (int)std::lround(w.h / s));
+            if ((size_t)w.pw * w.ph <= maxPx) break;
         }
         return w;
     });
@@ -1582,7 +1589,27 @@ void MainWindow::updateViewWindow() {
     QRectF vis = view_->fitted() ? scene : view_->visibleSceneRect();
     std::lock_guard<std::mutex> lk(viewWinM_);
     viewFrac_ = QRectF(vis.x() / scene.width(), vis.y() / scene.height(), vis.width() / scene.width(), vis.height() / scene.height());
-    viewportW_ = std::max(1, (int)std::lround(view_->viewport()->width() * view_->devicePixelRatioF()));
+    viewSpan_ = scene.width() * view_->zoom() * view_->devicePixelRatioF();
+}
+
+// A job that ends with no output to show (a sweep, a render cancelled or failed) left in the pane what it had put
+// there for the moment: the small preview of the last variant's B (a quarter of the output's size, which a render
+// replaces with the output itself when it ends), or the last live view (made for the half-width pane of the run).
+// Either looked like the image at a much lower resolution, and stayed until a frame or an output was clicked. What
+// the pane showed before comes back: the output on its tab, or else the frame selected in the list (or the one last
+// seen), read at full resolution.
+void MainWindow::restoreViewAfterJob() {
+    if (!paneLive_ || batchRunning_) return;   // (a batch opens its next folder at once)
+    if (result_ && result_->rc == 0 && tabs_->count() > 0 && tabs_->currentIndex() >= 0 && !outputImage(tabs_->tabText(tabs_->currentIndex())).isNull()) {
+        showOutput(tabs_->currentIndex());
+        return;
+    }
+    int row = frameList_->currentItem() ? frameList_->currentItem()->data(Qt::UserRole).toInt() : -1;
+    if (row < 0 || row >= frames_.size()) row = lastLiveFrame_;
+    if (row < 0 || row >= frames_.size()) return;
+    pendingFrame_ = row;
+    statusBar()->showMessage(QString("%1 — loading at full resolution…").arg(QFileInfo(frames_[row]).fileName()));
+    frameLoader_.start({frames_[row]}, 1 << 20);
 }
 
 void MainWindow::setViewScale(double frac) {
@@ -1623,10 +1650,13 @@ void MainWindow::prepareLiveView() {
 // win / full say which part of the frame the image shows
 void MainWindow::onLiveView(int k, QImage image, QRect win, QSize full) {
     if (image.isNull() || (bench_ && bench_->running()) || k < 0 || k >= jobItems_.size()) return;
+    if (!worker_.running()) return;   // a view that was under way when the job ended: what the job left on show stays
     liveItem_ = jobItems_[k];   // the job's frame -> its row (rows may be reordered or duplicated)
     static const bool logViews = qEnvironmentVariableIsSet("XLAMINA_LOG_VIEWS");   // developer aid: the sweep's order and pace in the log
     if (logViews) onLog(QString("view: frame %1 at %2 ms, %3x%4 of %5x%6 at (%7,%8)").arg(k).arg(elapsed_.elapsed()).arg(image.width()).arg(image.height()).arg(full.width()).arg(full.height()).arg(win.x()).arg(win.y()));
     k = liveItem_->data(Qt::UserRole).toInt();   // the folder's frame
+    lastLiveFrame_ = k;
+    paneLive_ = true;
     current_ = "frame";
     depthBar_->hide();
     if (full.isValid() && win.isValid() && (win.size() != full || image.size() != full)) view_->setLiveWindow(image, win, full);
@@ -1640,6 +1670,7 @@ void MainWindow::onLiveView(int k, QImage image, QRect win, QSize full) {
     } else setViewScale(0);
     // the count is the progress signal's (progressStatus_); the view only says which frame is on screen
     QString name = k >= 0 && k < frames_.size() ? QFileInfo(frames_[k]).fileName() : QString();
+    view_->setLabel(name);   // (the pane kept the name of the frame it showed before the render, whatever frame went by)
     statusBar()->showMessage(name.isEmpty() ? progressStatus_ : QString("%1 — on screen: %2").arg(progressStatus_, name));
 }
 
@@ -1664,6 +1695,7 @@ void MainWindow::onFullFrame(int index, QImage image) {
         return;
     }
     current_ = "frame";
+    paneLive_ = false;
     depthBar_->hide();
     view_->setPrecise(false);
     view_->setCursorNote({});
@@ -1763,6 +1795,55 @@ void MainWindow::runSweep() {
     if (dlg.exec() != QDialog::Accepted) return;
     std::vector<SweepVariant> vars = dlg.variants();
     if (vars.empty()) return;
+    startSweep(jo, vars, dlg.outDir());
+}
+
+// Developer aid (xLamina FOLDER --sweep-test, after the render when --render or --render-in is given too): a sweep of
+// two variants without the dialog. What the main pane holds is written to the session's log when the sweep ends and
+// again a few seconds later, then the window closes.
+void MainWindow::testSweep(bool afterRender) {
+    QTimer* t = new QTimer(this);
+    connect(t, &QTimer::timeout, this, [this, t, afterRender] {
+        if (worker_.running() || folder_.isEmpty() || (afterRender && !result_)) return;
+        t->stop();
+        JobOptions jo;
+        if (!buildJob(jo, false) || jobItems_.size() < 2) { DiagLog::write("sweep test: no stack to sweep"); close(); return; }
+        jo.stack.outputs = {"B"};
+        jo.stack.diagnostics = false;
+        std::vector<SweepVariant> vars(2);
+        vars[0].name = "base";
+        vars[1].name = "c-radius-2";
+        vars[1].options = {{"--c-radius", "2"}};
+        startSweep(jo, vars, (outDir_->text().isEmpty() ? folder_ + "_stacker" : outDir_->text()) + "_sweep");
+        auto say = [this](const QString& when) {
+            DiagLog::write(QString("sweep test, %1: the pane holds %2, %3 x %4; status \"%5\"").arg(when, view_->liveWindowShown() ? "a live view" : "an image")
+                               .arg(view_->image().width()).arg(view_->image().height()).arg(statusBar()->currentMessage()));
+        };
+        QTimer* done = new QTimer(this);
+        connect(done, &QTimer::timeout, this, [this, done, say] {
+            if (worker_.running()) return;
+            done->stop();
+            QTimer::singleShot(200, this, [say] { say("as the sweep ended"); });   // (once the window has heard of it)
+            QTimer::singleShot(4000, this, [this, say] { say("4 s later"); close(); });
+        });
+        done->start(100);
+    });
+    t->start(500);
+}
+
+// Developer aid (--zoom-test Z): the main view at zoom Z a few seconds into each job, for a look at the live view
+// of a part of the frame.
+void MainWindow::testZoom(double z) {
+    QTimer* t = new QTimer(this);
+    connect(t, &QTimer::timeout, this, [this, z, was = std::make_shared<bool>(false)] {
+        const bool now = worker_.running();
+        if (now && !*was) QTimer::singleShot(12000, this, [this, z] { if (worker_.running()) view_->zoomTo(z); });
+        *was = now;
+    });
+    t->start(200);
+}
+
+void MainWindow::startSweep(const JobOptions& jo, const std::vector<SweepVariant>& vars, const QString& outDir) {
     if (!jo.stack.cache_frames) worker_.releaseCache();
     thumbs_.stop();   // resumed in onFinished
     log_->clear();
@@ -1774,12 +1855,13 @@ void MainWindow::runSweep() {
     tick_.start();
     if (hwDock_) hwDock_->raise();   // the hardware panel to the front for the run
     liveItem_ = markedItem_ = nullptr;
+    lastLiveFrame_ = -1;
     lastView_.invalidate();
     listTick_.start();
     int live = liveRes_->currentData().toInt();
     logRunStart(QString("sweep of %1 variants").arg(vars.size()), jo);
     prepareLiveView();
-    worker_.startSweep(jo, vars, dlg.outDir(), live > 0 ? live : 12);
+    worker_.startSweep(jo, vars, outDir, live > 0 ? live : 12);
 }
 
 void MainWindow::setUnits(int measure, int bar) {
@@ -1895,6 +1977,8 @@ void MainWindow::testRegions(const QString& spec, const QString& dir) {
                     continue;
                 }
                 if (f.size() == 1 && f[0] == "undo") { twoUp_->testUndo(); log("undo"); continue; }
+                if (f.size() == 2 && f[0] == "sel") { twoUp_->select(1, f[1]); log("select right: " + twoUp_->testActive(1)); continue; }   // "sel,NAME": NAME in the right pane, whatever the mode
+                if (f.size() == 3 && f[0] == "cur") { twoUp_->testCursor(f[1].toDouble(), f[2].toDouble()); continue; }   // "cur,fx,fy": the cursor over the left pane
                 if (f.size() == 2 && f[0] == "pick") { log("pick left: " + twoUp_->testPickLeft(f[1])); continue; }   // "pick,NAME": NAME picked for the left pane
                 if (f.size() == 1 && f[0] == "broken") { log("stroke cut short: " + twoUp_->testBrokenStroke()); continue; }
                 if (f.size() == 1 && f[0] == "savename") { log("save name: " + twoUp_->testSaveName()); continue; }   // what Save result would offer
@@ -2160,6 +2244,7 @@ void MainWindow::render() {
     tick_.start();
     if (hwDock_) hwDock_->raise();   // the hardware panel to the front for the run
     liveItem_ = markedItem_ = nullptr;
+    lastLiveFrame_ = -1;
     lastView_.invalidate();
     listTick_.start();
     int live = liveRes_->currentData().toInt();
@@ -2389,6 +2474,7 @@ void MainWindow::onPreview(QString name, QImage image) {
         return;
     }
     current_ = name;
+    paneLive_ = true;
     depthBar_->hide();
     view_->setImage(image, true);
     setViewScale(outFovFrac_);
@@ -2652,6 +2738,7 @@ void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
     if (data->sweep) {   // the last render's outputs stay; the variants go to the two-up viewer
         setBusy(false);
         liveView_->hide();
+        restoreViewAfterJob();
         resumeThumbnails();
         DiagLog::runEnd(data->rc == 3 ? "sweep cancelled" : data->rc ? QString("sweep failed, code %1, stage \"%2\": %3").arg(data->rc).arg(data->stage, data->error)
                                                                       : QString("sweep done in %1 s").arg(data->seconds, 0, 'f', 1));
@@ -2685,6 +2772,7 @@ void MainWindow::onFinished(std::shared_ptr<JobResultData> data) {
     liveView_->hide();
     resumeThumbnails();
     labelWobble(data->align, &data->result);
+    if (data->rc != 0) restoreViewAfterJob();   // cancelled or failed: no output takes the last live view's place
     if (data->rc == 3) { setStage("Cancelled."); if (batchRunning_) batchFinish(true); return; }
     if (data->rc != 0) {
         const QString msg = failureMessage(*data);
@@ -2913,6 +3001,7 @@ void MainWindow::showOutput(int tab) {
     QImage img = outputImage(name);
     if (img.isNull()) return;
     current_ = name;
+    paneLive_ = false;
     const bool onDepth = name == "depth" && !compare_.contains(name);
     depthBar_->setVisible(onDepth);
     view_->setPrecise(onDepth);   // a crosshair on the depth map: the pixel under the cursor is plain

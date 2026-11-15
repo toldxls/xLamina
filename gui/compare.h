@@ -103,10 +103,11 @@ public:
     void testCloneOff() { cloneAct_->setChecked(false); }
     // ... the number of panes, every frame added to the list, and Frame here at an image position
     void testPanes(int n) { setPaneCount(n); }
-    QString testActive(int pane) { setActive(pane); return QString("active pane %1 | source %2 | blocked %3 | %4").arg(active_ + 1).arg(rt_.on && rt_.source >= 0 ? entries_[rt_.source].name : QString("-")).arg(rt_.blocked ? 1 : 0).arg(statusBar()->currentMessage()); }
+    QString testActive(int pane) { setActive(pane); return QString("active pane %1 | source %2 | blocked %3 | red circle %4 | %5").arg(active_ + 1).arg(rt_.on && rt_.source >= 0 ? entries_[rt_.source].name : QString("-")).arg(rt_.blocked ? 1 : 0).arg(view_[0]->brushBlocked() ? 1 : 0).arg(statusBar()->currentMessage()); }
     int testAddFrames() { addFrames(); return (int)entries_.size(); }
     QString testHideFrames(bool hidden);   // ... the frames hidden or shown: what the list and the button then say
     QString testTool(int mode);            // ... a region tool pressed (1 rectangle, 2 lasso): whether it came on, and what the window says
+    void testCursor(double fx, double fy); // ... a mouse move at that fraction of the left pane, as Qt would deliver one (nothing is injected)
     QString testFrameHere(int x, int y);
     QString testStep(int delta) { step(active_, delta); return QString("pane %1: %2 | %3").arg(active_ + 1).arg(sel_[active_] >= 0 ? entries_[sel_[active_]].name : QString("-"), statusBar()->currentMessage()); }
     // one of the stack's frames (by its file) shown in the pane the list fills, lined up with the render when it is
@@ -316,6 +317,7 @@ private:
     bool load16(const Entry& e, std::vector<uint16_t>& out, int& w, int& h, std::vector<uint8_t>* icc);
     void retouchToggle(bool on);
     bool retouchSetSource(int index);   // false when the source does not fit the target
+    void showBrushBlocked();            // the brush circle red while the brush would paint nothing (rt_.blocked)
     void retouchBake();                 // commit the strokes: the result becomes the new target
     void dab(QPointF p);
     void composite(const QRect& r);

@@ -33,6 +33,7 @@ public:
     bool placed() const { return placed_; }
     void fit();
     void actualSize();
+    void zoomTo(double z);                // z screen units per image pixel, about the view's centre
     double zoom() const { return transform().m11(); }
     QImage image() const { return image_; }
     // a faint frame round the view (the compare window's pane that is painted from); an invalid colour = none
@@ -62,6 +63,10 @@ public:
     // brush mode: the left button paints (signals below, image coordinates), the middle button pans
     void setBrush(bool on, double radius, double hardness);
     double brushRadius() const { return brushRadius_; }
+    // the brush circle drawn red, with a glow: the brush would paint nothing (the image to paint from does not fit)
+    void setBrushBlocked(bool on) { if (brushBlocked_ != on) { brushBlocked_ = on; viewport()->update(); } }
+    bool brushBlocked() const { return brushBlocked_; }
+    bool liveWindowShown() const { return winActive_; }   // the pane holds a live view's crop (setLiveWindow), not an image
     // the clone brush (the two-up viewer): with setAltPick, Alt + the left button reports a place (altClicked) instead
     // of painting. setCloneMark shows where the brush copies from: mode 1 = a fixed place `v` of the image (picked,
     // not painted from yet), 2 = the brush moved by `v` image pixels (it follows the cursor), 0 = nothing
@@ -142,6 +147,7 @@ private:
     bool winActive_ = false;              // the pixmap item shows a live-view crop, placed and scaled (setLiveWindow)
     bool brush_ = false, painting_ = false, panning_ = false;
     bool altPick_ = false;
+    bool brushBlocked_ = false;
     int cloneMode_ = 0;
     QPointF cloneV_;
     double brushRadius_ = 60, brushHardness_ = 0.5;

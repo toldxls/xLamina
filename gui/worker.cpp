@@ -57,6 +57,28 @@ FloatImage Worker::take(const float* rgb, size_t n) {
     return img;
 }
 
+QImage ViewPool::image(const uint32_t* px, int w, int h) {
+    const size_t n = (size_t)w * h;
+    if (!px || w <= 0 || h <= 0) return {};
+    Buf b;
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        if (!free_.empty()) { b = std::move(free_.back()); free_.pop_back(); }
+    }
+    if (b.cap < n) { b.p.reset(new uint32_t[n]); b.cap = n; }
+    memcpy(b.p.get(), px, n * sizeof(uint32_t));
+    uchar* data = reinterpret_cast<uchar*>(b.p.get());
+    Back* back = new Back{shared_from_this(), std::move(b)};
+    return QImage(data, w, h, (qsizetype)w * 4, QImage::Format_RGB32, [](void* info) {
+        Back* k = static_cast<Back*>(info);
+        {
+            std::lock_guard<std::mutex> lk(k->pool->m_);
+            if (k->pool->free_.size() < 32) k->pool->free_.push_back(std::move(k->buf));
+        }
+        delete k;
+    }, back);
+}
+
 void Worker::recycle(FloatImage img) {
     if (!img) return;
     std::lock_guard<std::mutex> lk(poolMutex_);
@@ -197,7 +219,7 @@ void Worker::launch(std::shared_ptr<JobOptions> jo, std::shared_ptr<JobResultDat
         // the building maps grow on a time basis (every 50 ms at most), not every n-th frame: no steps (0.6.32)
         hooks.preview_every = 1;
         hooks.preview_min_ms = 50;
-        hooks.frame_min_ms = 33;
+        hooks.frame_min_ms = 16;   // a view of every frame up to about 60 frames a second, of every second one above that, ...
         hooks.progress = [this, lastStage, guard](const std::string& stage, double f) {
             {
                 const QString st = QString::fromStdString(stage);
@@ -219,15 +241,15 @@ void Worker::launch(std::shared_ptr<JobOptions> jo, std::shared_ptr<JobResultDat
             hooks.preview = [this](const std::string& name, const float* rgb, int w, int h) {
                 player_->pushPreview(QString::fromStdString(name), take(rgb, (size_t)w * h * 3), w, h);   // converted off the GUI thread
             };
-            hooks.frame = [this](int k, const float* rgb, int w, int h, const stackcore::ViewWindow& win) {
-                player_->push(k, take(rgb, (size_t)w * h * 3), w, h, QRect(win.x0, win.y0, win.w, win.h), QSize(win.fw, win.fh));
+            hooks.frame = [this](int k, const uint32_t* px, int w, int h, const stackcore::ViewWindow& win) {
+                player_->push(k, viewPool_->image(px, w, h), QRect(win.x0, win.y0, win.w, win.h), QSize(win.fw, win.fh));
             };
             // "Full" renders what the view shows (the visible window at the screen's resolution) rather than 31 Mpx
             if (liveDown == 1 && viewWindow_) { hooks.view_window = viewWindow_; hooks.view_max_px = viewMaxPx_; }
             if (noView) hooks.frame = nullptr;
             if (noPreview) hooks.preview = nullptr;
             if (getenv("XLAMINA_NOOPHOOKS")) {   // the GPU-side preview work without the host side
-                hooks.frame = [](int, const float*, int, int, const stackcore::ViewWindow&) {};
+                hooks.frame = [](int, const uint32_t*, int, int, const stackcore::ViewWindow&) {};
                 hooks.preview = [](const std::string&, const float*, int, int) {};
             }
         }

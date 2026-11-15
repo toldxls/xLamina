@@ -100,6 +100,31 @@ __global__ void k_preview_img(const float* __restrict__ img, int w, int h, int x
     for (int c = 0; c < 3; ++c) out[((size_t)y * pw + x) * 3 + c] = img[i * 3 + c];
 }
 
+// A frame view: each output pixel is the mean of the image pixels under it (sx by sy of them from x0, y0), as 8 bits a
+// channel in 0xffRRGGBB. Up to 3 x 3 samples spread evenly over them: every pixel while the view is no smaller than a
+// third of the image, a ninth of them at a sixth. (A view of every n-th pixel alone kept each pixel's full noise and
+// broke fine lines up: it looked grainier than the frame it showed. Every pixel at any size cost the pass 3 ms a view.)
+__global__ void k_view_img(const float* __restrict__ img, int w, int h, int x0, int y0, float sx, float sy, unsigned int* __restrict__ out, int pw, int ph) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= pw || y >= ph) return;
+    const int nx = min(max((int)ceilf(sx - 0.01f), 1), 3), ny = min(max((int)ceilf(sy - 0.01f), 1), 3);
+    const float fx0 = x0 + x * sx, fy0 = y0 + y * sy;
+    float r = 0.f, g = 0.f, b = 0.f;
+    for (int j = 0; j < ny; ++j) {
+        const int yy = max(0, min((int)(fy0 + (j + 0.5f) * sy / ny), h - 1));
+        const float* row = img + (size_t)yy * w * 3;
+        for (int i = 0; i < nx; ++i) {
+            const int xx = max(0, min((int)(fx0 + (i + 0.5f) * sx / nx), w - 1));
+            r += row[xx * 3]; g += row[xx * 3 + 1]; b += row[xx * 3 + 2];
+        }
+    }
+    const float n = 1.f / (nx * ny);
+    const unsigned int R = (unsigned int)(fminf(fmaxf(r * n, 0.f), 1.f) * 255.f + 0.5f);
+    const unsigned int G = (unsigned int)(fminf(fmaxf(g * n, 0.f), 1.f) * 255.f + 0.5f);
+    const unsigned int B = (unsigned int)(fminf(fmaxf(b * n, 0.f), 1.f) * 255.f + 0.5f);
+    out[(size_t)y * pw + x] = 0xff000000u | (R << 16) | (G << 8) | B;
+}
+
 __global__ void k_fill_f32(float* p, size_t n, float v) {
     size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) p[i] = v;
@@ -332,6 +357,12 @@ void image_preview_kernel(const float* d_rgb, int w, int h, int x0, int y0, int 
     down = std::max(1, down);
     preview_size(cw, ch, down, pw, ph);
     k_preview_img<<<dim3((pw + 31) / 32, (ph + 7) / 8), dim3(32, 8), 0, s>>>(d_rgb, w, h, x0, y0, down, d_out, pw, ph);
+}
+
+void image_view_kernel(const float* d_rgb, int w, int h, int x0, int y0, int cw, int ch, int pw, int ph, uint32_t* d_out, cudaStream_t s) {
+    pw = std::max(1, pw);
+    ph = std::max(1, ph);
+    k_view_img<<<dim3((pw + 31) / 32, (ph + 7) / 8), dim3(32, 8), 0, s>>>(d_rgb, w, h, x0, y0, (float)cw / pw, (float)ch / ph, d_out, pw, ph);
 }
 
 // ----------------------------------------------------------------------------- host side

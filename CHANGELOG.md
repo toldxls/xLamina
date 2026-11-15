@@ -2,6 +2,14 @@
 
 The newest version first. In the program: Help > What's new.
 
+## 1.1.1 (15 November 2026)
+
+- **Live view:** every frame of the stack is shown, in order and at an even pace, in each pass. Before, it showed a third to a half of them at uneven steps.
+- At **Full**, each view is made on the screen's own pixels at any zoom, from averaged pixels. It no longer looks grainy, or half as fine between 50 and 67 %.
+- Fixed: after a sweep, or a render that was cancelled or failed, the main pane kept a small preview that looked like a low-resolution image. It now goes back to the output or the frame it showed before.
+- **Retouch:** the brush circle is red while the image painted from is not the result's size (the brush paints nothing then).
+- The live view's label names the frame on screen.
+
 ## 1.1.0 (15 November 2026)
 
 - **Refine** works on any output of the last render (B, C, CBn …), not only B. Its row is always shown and says what it needs.

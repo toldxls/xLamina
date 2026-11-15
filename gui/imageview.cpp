@@ -74,7 +74,8 @@ void ImageView::setLiveWindow(const QImage& img, const QRect& win, const QSize& 
     image_ = img;
     item_->setPixmap(QPixmap::fromImage(img));
     item_->setPos(win.topLeft());
-    item_->setScale((double)win.width() / img.width());
+    // (the view's pixels are not a whole number of the frame's, nor quite the same number across and down)
+    item_->setTransform(QTransform::fromScale((double)win.width() / img.width(), (double)win.height() / img.height()));
     item_->setVisible(true);
     live_->setVisible(false);
     if (newScene) {
@@ -119,7 +120,7 @@ void ImageView::setImage(const QImage& img, bool keepView) {
     if (winActive_) {   // a live-view crop was on show: the item goes back to covering the whole scene
         winActive_ = false;
         item_->setPos(0, 0);
-        item_->setScale(1.0);
+        item_->setTransform(QTransform());
         image_ = QImage();   // (a crop is not comparable with a whole image for the keep logic)
         if (!img.isNull() && !fitted_) {   // keep the user's zoom and place: both referred to the full frame already
             image_ = img;
@@ -515,13 +516,22 @@ void ImageView::drawForeground(QPainter* p, const QRectF&) {
         double rr = brushRadius_ * zoom();
         p->setRenderHint(QPainter::Antialiasing);
         p->setBrush(Qt::NoBrush);
-        p->setPen(QPen(QColor(0, 0, 0, 160), 3));
-        p->drawEllipse(cursor_, rr, rr);
-        p->setPen(QPen(QColor(255, 255, 255, 220), 1));
-        p->drawEllipse(cursor_, rr, rr);
+        if (brushBlocked_) {   // nothing would be painted: a red ring with a glow round it
+            for (const auto& [width, alpha] : {std::pair{11.0, 45}, std::pair{7.0, 80}, std::pair{4.0, 130}}) {
+                p->setPen(QPen(QColor(255, 40, 30, alpha), width));
+                p->drawEllipse(cursor_, rr, rr);
+            }
+            p->setPen(QPen(QColor(255, 70, 55, 245), 1.6));
+            p->drawEllipse(cursor_, rr, rr);
+        } else {
+            p->setPen(QPen(QColor(0, 0, 0, 160), 3));
+            p->drawEllipse(cursor_, rr, rr);
+            p->setPen(QPen(QColor(255, 255, 255, 220), 1));
+            p->drawEllipse(cursor_, rr, rr);
+        }
         if (brushHardness_ < 1.0) {   // the hard core
             double rc = rr * brushHardness_;
-            p->setPen(QPen(QColor(255, 255, 255, 110), 1, Qt::DashLine));
+            p->setPen(QPen(brushBlocked_ ? QColor(255, 90, 75, 150) : QColor(255, 255, 255, 110), 1, Qt::DashLine));
             p->drawEllipse(cursor_, rc, rc);
         }
     }
@@ -552,6 +562,14 @@ void ImageView::actualSize() {
     resetTransform();
     fitted_ = false;
     emit zoomChanged(1.0);
+}
+
+void ImageView::zoomTo(double z) {
+    if (z <= 0) return;
+    resetTransform();
+    scale(z, z);
+    fitted_ = false;
+    emit zoomChanged(z);
 }
 
 void ImageView::wheelEvent(QWheelEvent* e) {

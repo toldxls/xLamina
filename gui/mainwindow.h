@@ -57,6 +57,8 @@ public:
     // grabs and the result into dir, then quit. spec: "x0,y0,x1,y1[,strength]" (a rectangle) or "x,y,x,y,x,y,..."
     // with an odd number of fields over six (an outline, strength last), image px, separated by ';'
     void testRegions(const QString& spec, const QString& dir);
+    void testSweep(bool afterRender);   // developer aid (--sweep-test): a sweep of two variants without the dialog, then quit
+    void testZoom(double z);            // developer aid (--zoom-test Z): the main view at zoom Z some seconds into a job
     static QString changelogText();           // CHANGELOG.md as built in (Help > What's new); empty when it is missing
     static QDialog* whatsNewDialog(QWidget* parent);   // the window Help > What's new shows (the caller runs and deletes it)
 
@@ -106,6 +108,8 @@ private slots:
     void onLiveView(int k, QImage image, QRect win, QSize full);
     void updateViewWindow();                   // the viewer's visible part, as fractions, for the engine's frame views
     void prepareLiveView();                    // before a run: the live view's buffer sized for this screen
+    void restoreViewAfterJob();                // after a job that leaves no output to show: not the last live view
+    void startSweep(const stackcore::JobOptions& jo, const std::vector<stackcore::SweepVariant>& vars, const QString& outDir);
     // the scale of what the viewers show, from the Field of view setting: `frac` is the share of a frame's width the
     // image on show stands for (1 = a whole frame, the crop's share for an output, 0 = not known)
     void setViewScale(double frac);
@@ -253,11 +257,13 @@ private:
     QPointer<QDialog> updateDlg_;
     QPointer<QDialog> prefsDlg_;       // File > Preferences, built once
     HwMonitor* hw_ = nullptr;          // the live hardware panel (bottom dock), raised when a render starts
-    // the live view's window: what the viewer shows as fractions of the image, and the viewport's width in pixels,
-    // read by the engine's threads (under the mutex) to render each frame view at the screen's resolution
+    // the live view's window: what the viewer shows as fractions of the image, and the width the whole image is
+    // drawn over, read by the engine's threads (under the mutex) to render each frame view on the screen's pixels
     std::mutex viewWinM_;
     QRectF viewFrac_{0, 0, 1, 1};
-    int viewportW_ = 1600;                     // in the screen's own pixels (a display scaled 150 % has 1.5 per unit)
+    double viewSpan_ = 1600;                   // in the screen's own pixels (a display scaled 150 % has 1.5 per unit)
+    int lastLiveFrame_ = -1;                   // the folder's frame the live view showed last (restoreViewAfterJob)
+    bool paneLive_ = false;                    // the main pane holds something a job put there for the moment: a live view or an output's small preview
     size_t viewMaxPx_ = 4000000;               // the largest live view the engine's buffers hold (set for each run)
     double viewFovFrac_ = 0;                   // the share of a frame's width the main view's image stands for
     double outFovFrac_ = 0;                    // ... and the outputs' (the crop), known once a pass or a render says
