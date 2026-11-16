@@ -56,7 +56,7 @@ static const double kDeg = 180.0 / 3.14159265358979323846;
 static const char* kOutputs[] = {"B", "C", "Cn", "A", "B0", "CB", "CBn", "Cx", "Cd", "Cg", "Cg2", "H"};
 static const int kNumOutputs = 12;
 static const char* kOutputHelp[] = {
-    "B: depth map. Each pixel from the frame where it is sharpest (regularised, refined, soft edges). Cleanest tones.",
+    "B: depth map. Each pixel from the frame where it is sharpest, with a short fade between neighbouring frames. Cleanest tones.",
     "C: Laplacian pyramid. Per-detail selection across all frames. Most detail; see Smoothing for its noise.",
     "Cn: noise-aware pyramid. C where the detail is above the noise, B elsewhere.",
     "A: focus-weighted average of all frames. Smooth, soft.",
@@ -664,10 +664,9 @@ void MainWindow::buildUi() {
     softCutoff_->setSingleStep(0.01);
     softCutoff_->setDecimals(2);
     softCutoff_->setValue(0.90);
-    softCutoff_->setToolTip("A frame is soft (amber, Render > Drop soft frames) when its focus energy is under this share of its neighbours'\n"
-                            "(the median of the five frames around it; the list shows the share as \"sharp 0.97\"). 0.90 by default: a frame\n"
-                            "blurred by movement during its exposure loses a tenth or more; the frame-to-frame scatter of a steady stack is\n"
-                            "under 0.05. Changing it re-flags the last render's frames at once, no render needed.");
+    softCutoff_->setToolTip("A frame is flagged soft (amber) when its sharpness is under this share of its neighbours'.\n"
+                            "Larger: more frames are flagged. Smaller: fewer. Default 0.90.\n"
+                            "It applies to the last render at once; the list shows each frame's share as \"sharp 0.97\".");
     connect(softCutoff_, &QDoubleSpinBox::valueChanged, this, [this](double) {
         if (result_ && (int)result_->align.T.size() == jobItems_.size()) labelWobble(result_->align, &result_->result);
     });
@@ -677,8 +676,9 @@ void MainWindow::buildUi() {
     smoothing_->setSingleStep(0.5);
     smoothing_->setDecimals(1);
     smoothing_->setValue(2);
-    smoothing_->setToolTip("Smoothing of C: detail weaker than this many times the noise is taken from B instead of the sharpest frame.\n"
-                           "0 = raw selection (noisiest), 2 is the default, 3 equals Cn.");
+    smoothing_->setToolTip("How much of C's weak detail is taken from B instead of the sharpest frame.\n"
+                           "Larger: cleaner, less fine detail. Smaller: more fine detail, more grain.\n"
+                           "0 = none. Default 2; 3 equals Cn.");
     fl->addRow("Smoothing (C)", smoothing_);
     cradius_ = new QDoubleSpinBox;
     cradius_->setRange(0, 200);
@@ -686,11 +686,9 @@ void MainWindow::buildUi() {
     cradius_->setDecimals(0);
     cradius_->setSuffix(" px");
     cradius_->setValue(32);
-    cradius_->setToolTip("Radius of C: each frame's pyramid energy is aggregated over this many sensor pixels before the\n"
-                         "sharpest frame is chosen, so the frame of a strong edge also wins the band beside it. Stops the\n"
-                         "defocus rims of plate edges being taken from frames far away as ghost outlines.\n"
-                         "0 = raw selection. Larger values lose small features that sit near a stronger edge at another depth.\n"
-                         "Also changes B, whose guide image is C.");
+    cradius_->setToolTip("How far the frame of a strong edge reaches in C, in sensor pixels.\n"
+                         "Larger: fewer ghost outlines beside edges; a small feature near a stronger edge is lost.\n"
+                         "Smaller: such features are kept; more ghost outlines. 0 = off. Default 32. It also changes B.");
     fl->addRow("Radius (C)", cradius_);
     bradius_ = new QDoubleSpinBox;
     bradius_->setRange(0, 200);
@@ -698,10 +696,9 @@ void MainWindow::buildUi() {
     bradius_->setDecimals(0);
     bradius_->setSuffix(" px");
     bradius_->setValue(0);
-    bradius_->setToolTip("Radius of B: each frame's focus slice is blurred over this many sensor pixels before the depth map\n"
-                         "is solved, so the frame of a strong edge also claims the band beside it instead of the defocus rims\n"
-                         "of that edge from frames far away. 0 = off (the validated depth pipeline). Larger values lose the\n"
-                         "depth of small features that sit near a stronger edge at another depth.");
+    bradius_->setToolTip("Blurs each frame's focus before B's depth map is made, in sensor pixels.\n"
+                         "Larger: a strong edge takes more of what is beside it; small features near it lose their depth.\n"
+                         "Smaller: the reverse. 0 = off (default).");
     fl->addRow("Radius (B)", bradius_);
     fov_ = new QDoubleSpinBox;
     fov_->setRange(0, 1000);
@@ -767,8 +764,8 @@ void MainWindow::buildUi() {
     advanced_ = new QGroupBox("Advanced (depth and composition)");
     advanced_->setCheckable(true);
     advanced_->setChecked(false);
-    advanced_->setToolTip("The parameters of B's depth pipeline and the composition. Unticked, the validated defaults are used.\n"
-                          "They were tuned region by region on real stacks; change one at a time and compare at 1:1.");
+    advanced_->setToolTip("The settings of B's depth map and composition that are worth changing. Unticked, the defaults are used.\n"
+                          "Change one at a time and compare at 1:1.");
     QFormLayout* al = new QFormLayout(advanced_);
     auto dspin = [](double lo, double hi, double step, double val, int dec, const QString& suffix, const QString& tip) {
         QDoubleSpinBox* s = new QDoubleSpinBox;
@@ -780,62 +777,54 @@ void MainWindow::buildUi() {
         s->setToolTip(tip);
         return s;
     };
-    focusRadius_ = dspin(1, 30, 1, 6, 0, " px", "Focus measure window (pass 1), in sensor pixels. Default 6.");
-    al->addRow("Focus window", focusRadius_);
-    focusPower_ = dspin(1, 8, 0.5, 4, 1, "", "Exponent on the focus measure when the frames compete. Default 4.");
-    al->addRow("Focus power", focusPower_);
+    // Seven parameters are made but not shown, and stay at their defaults (loadSettings does not read them): with
+    // thirteen in the panel no one of them could be tuned by eye, and sweeps over them did not help. The command
+    // line still takes each of them.
+    auto fixed = [this](QDoubleSpinBox* s) { s->setParent(advanced_); s->hide(); return s; };
+    focusRadius_ = fixed(dspin(1, 30, 1, 6, 0, " px", "Focus measure window (pass 1), in sensor pixels. Default 6."));
+    focusPower_ = fixed(dspin(1, 8, 0.5, 4, 1, "", "Exponent on the focus measure when the frames compete. Default 4."));
     depthRes_ = new QComboBox;
-    depthRes_->addItem("1/4 of the sensor (fast)", 0.25);
-    depthRes_->addItem("1/2 of the sensor (default)", 0.5);
+    depthRes_->addItem("1/4 of the sensor (default)", 0.25);
+    depthRes_->addItem("1/2 of the sensor", 0.5);
     depthRes_->addItem("Full (small stacks only)", 1.0);
-    depthRes_->setCurrentIndex(1);
-    depthRes_->setToolTip("Resolution of the depth volume. 1/2 (the default since 0.6.1) removes the doubled edges of bright plates that 1/4\n"
-                          "left; it needs about 6 GB of GPU memory for 200 full frames and costs about 3 s. Full needs about 25 GB for such a stack.");
+    depthRes_->setCurrentIndex(0);
+    depthRes_->setToolTip("Resolution of B's depth map.\n"
+                          "1/4 (default): broad faint detail beside crystals is kept. Fastest.\n"
+                          "1/2: fine detail behind crystals is kept, the broad is lost. About 6 GB of GPU memory for 200 full frames.\n"
+                          "Full: small stacks only (about 25 GB for 200 frames).");
     al->addRow("Depth resolution", depthRes_);
-    depthFmPx_ = dspin(1, 30, 1, 6, 0, " px", "Window of the normalised Laplacian in the depth volume, in depth-volume pixels. Default 6;\n"
-                                               "3 at 1/2 resolution gave the tightest edges on the synthetic stack.");
-    al->addRow("Depth window", depthFmPx_);
-    volAggPx_ = dspin(0, 128, 4, 32, 0, " px", "Edge-aware aggregation of the depth volume, in sensor pixels; against ghost lines beside edges. Default 32.");
-    al->addRow("Volume aggregation", volAggPx_);
+    depthFmPx_ = fixed(dspin(1, 30, 1, 6, 0, " px", "Window of the normalised Laplacian in the depth volume, in depth-volume pixels. Default 6;\n"
+                                                     "3 at 1/2 resolution gave the tightest edges on the synthetic stack."));
+    volAggPx_ = fixed(dspin(0, 128, 4, 0, 0, " px", "Edge-aware aggregation of the depth volume, in sensor pixels. Off: it widened the halo beside crystals."));
     refineR_ = new QSpinBox;
-    refineR_->setRange(0, 80);
+    refineR_->setRange(-1, 200);
+    refineR_->setSpecialValueText("auto");
     refineR_->setValue(12);
     refineR_->setSuffix(" frames");
-    refineR_->setToolTip("Fine focus search around the coarse depth, in frames either way. Default 12; 0 skips the refinement.");
+    refineR_->setToolTip("How many frames from the coarse depth the fine focus may look, either way.\n"
+                         "Larger: a narrower blurred band beside crystals; may draw arcs around them or look through clear crystals.\n"
+                         "Smaller: fewer arcs, a wider band. Default 12. 0 = no fine focus. auto = a fifth of the stack (12 to 60).");
     al->addRow("Refine range", refineR_);
-    refineFmPx_ = dspin(1, 40, 1, 9, 0, " px", "Window of the fine focus measure in the refinement pass. Default 9.");
+    refineFmPx_ = dspin(1, 40, 0.5, 9, 1, " px", "The area the fine focus judges sharpness over, in sensor pixels.\n"
+                                                  "Larger: smoother, less noise; fine detail follows its surroundings.\n"
+                                                  "Smaller: fine detail is followed closer; more noise. Default 9.");
     al->addRow("Refine window", refineFmPx_);
-    softPx_ = dspin(0, 30, 0.5, 3, 1, " px", "Softness of the frame labels when B is composed; the blur of the seams. Default 3.");
-    al->addRow("Soft labels", softPx_);
-    haloPrior_ = dspin(0, 10, 0.5, 2, 1, "", "B's preference for darker frames beside bright objects (the spill zone). Default 2; raise it to push the band\n"
-                                              "beside a bright plate to its own frame.");
-    al->addRow("Halo prior", haloPrior_);
-    darkPrior_ = dspin(0, 10, 0.5, 1, 1, "", "B's preference for darker frames in featureless pixels (defocused background). Default 1. It is switched\n"
-                                              "off within the dark reach of sharp content, where a featureless pixel is a gap between needles or the inside\n"
-                                              "of a rim and must follow its neighbours instead.");
-    al->addRow("Dark prior", darkPrior_);
-    darkReach_ = dspin(0, 200, 4, 24, 0, " px", "How far from sharp content the dark prior stays off, in sensor pixels. Default 24; 0 applies the prior to\n"
-                                                 "every featureless pixel (the 0.5.x behaviour, which put far frames into the gaps of needle fans at 1/2 resolution).");
-    al->addRow("Dark reach", darkReach_);
-    flatBlur_ = dspin(0, 512, 16, 256, 0, " px", "Defocused background (no sharp detail within the dark reach): a band of about this width beside sharp detail\n"
-                                                  "takes that detail's frame, beyond it each pixel takes the frame where its own focus measure peaks, smoothed\n"
-                                                  "blob by blob, and the composition blends up to 32 frames there; its focus curves\n"
-                                                  "are also smoothed over this width. Default 256 (128 before 0.6.22); 0 = off\n"
-                                                  "(the depth stage's own choice, which breaks the background into patches with visible seams).");
-    al->addRow("Flat smoothing", flatBlur_);
-    endClaim_ = new QCheckBox("Surroundings from the nearest end frame");
-    endClaim_->setToolTip("Checked = out-of-focus surroundings that get nearest to focus at the first or last frame are taken\n"
-                          "from that frame alone: less blurred, and with whatever that one frame shows.\n"
-                          "Unchecked (default) = they are a smooth blend of many frames.");
-    al->addRow("", endClaim_);
+    softPx_ = dspin(0.5, 30, 0.5, 5, 1, " px", "Width of the blend where neighbouring pixels of B come from different frames, in sensor pixels.\n"
+                                                "Larger: softer transitions. Smaller: crisper; the edge of a halo shows as a line. Default 5.");
+    al->addRow("Edge fade", softPx_);
+    haloPrior_ = fixed(dspin(0, 10, 0.5, 2, 1, "", "B's preference for darker frames beside bright objects (the spill zone). Default 2."));
+    darkPrior_ = fixed(dspin(0, 10, 0.5, 1, 1, "", "B's preference for darker frames in featureless pixels (defocused background). Default 1."));
+    darkReach_ = fixed(dspin(0, 200, 4, 24, 0, " px", "How far from sharp content the dark prior stays off, in sensor pixels. Default 24."));
+    // (no longer in the panel: off. The band of background they gave to the nearest sharp detail took real detail
+    // with it, and B's wide fade now deals with the seams they were for)
+    flatBlur_ = fixed(dspin(0, 512, 16, 0, 0, " px", "Flat smoothing. Off."));
+    endClaim_ = new QCheckBox("Surroundings from the nearest end frame", advanced_);
+    endClaim_->hide();
     QPushButton* resetAdv = new QPushButton("Defaults");
-    resetAdv->setToolTip("Put every advanced parameter back to its validated default.");
+    resetAdv->setToolTip("Put every advanced setting back to its default.");
     connect(resetAdv, &QPushButton::clicked, this, [this] {
-        depthRes_->setCurrentIndex(1);
-        focusRadius_->setValue(6); focusPower_->setValue(4); depthFmPx_->setValue(6); volAggPx_->setValue(32);
-        refineR_->setValue(12); refineFmPx_->setValue(9); softPx_->setValue(3); haloPrior_->setValue(2); darkPrior_->setValue(1);
-        darkReach_->setValue(24); flatBlur_->setValue(256);
-        endClaim_->setChecked(false);
+        depthRes_->setCurrentIndex(0);
+        refineR_->setValue(12); refineFmPx_->setValue(9); softPx_->setValue(5);
     });
     al->addRow("", resetAdv);
     pl->addWidget(advanced_);
@@ -983,24 +972,15 @@ void MainWindow::loadSettings() {
     dustAdjust_->setEnabled(!dustPath_.isEmpty());
     s.endGroup();
     s.beginGroup("advanced");
-    advanced_->setChecked(s.value("enabled", false).toBool());
-    combo(depthRes_, s.value("depthRes", 1).toInt(), 1);
-    focusRadius_->setValue(s.value("focusRadius", 6.0).toDouble());
-    focusPower_->setValue(s.value("focusPower", 4.0).toDouble());
-    depthFmPx_->setValue(s.value("depthFmPx", 6.0).toDouble());
-    volAggPx_->setValue(s.value("volAggPx", 32.0).toDouble());
-    refineR_->setValue(s.value("refineR", 12).toInt());
-    refineFmPx_->setValue(s.value("refineFmPx", 9.0).toDouble());
-    softPx_->setValue(s.value("softPx", 3.0).toDouble());
-    haloPrior_->setValue(s.value("haloPrior", 2.0).toDouble());
-    // 0.6.2 saved dark prior 0 (its default then); from 0.6.3 the prior is back on with a reach, so a file from
-    // before the reach existed takes the new default rather than the old one
-    darkPrior_->setValue(s.contains("darkReach") ? s.value("darkPrior", 1.0).toDouble() : 1.0);
-    darkReach_->setValue(s.value("darkReach", 24.0).toDouble());
-    // 0.6.4 .. 0.6.21 saved 128, their default; a stored 128 is that default, not a choice, and takes the new 256
-    double fb = s.value("flatBlur", 256.0).toDouble();
-    flatBlur_->setValue(fb == 128.0 ? 256.0 : fb);
-    endClaim_->setChecked(s.value("endClaim", false).toBool());
+    // 1.2.0: B is composed another way and the panel has four settings. What an older version stored was set for
+    // the B of its time (and for nine settings that are gone from the panel) and is not read: the first start
+    // after the update is at the defaults, with the group unticked
+    const bool panel2 = s.value("panel", 0).toInt() >= 6;   // (2 to 5: test builds with other defaults)
+    advanced_->setChecked(panel2 && s.value("enabled", false).toBool());
+    combo(depthRes_, panel2 ? s.value("depthRes", 0).toInt() : 0, 0);
+    refineR_->setValue(panel2 ? s.value("refineR", 12).toInt() : 12);
+    refineFmPx_->setValue(panel2 ? s.value("refineFmPx", 9.0).toDouble() : 9.0);
+    softPx_->setValue(panel2 ? s.value("fade", 5.0).toDouble() : 5.0);
     s.endGroup();
     perfToUi(PerfSettings::load(s));
 }
@@ -1032,20 +1012,12 @@ void MainWindow::saveSettings() {
     s.setValue("dustMargin", dustMargin_);
     s.endGroup();
     s.beginGroup("advanced");
+    s.setValue("panel", 6);
     s.setValue("enabled", advanced_->isChecked());
     s.setValue("depthRes", depthRes_->currentIndex());
-    s.setValue("focusRadius", focusRadius_->value());
-    s.setValue("focusPower", focusPower_->value());
-    s.setValue("depthFmPx", depthFmPx_->value());
-    s.setValue("volAggPx", volAggPx_->value());
     s.setValue("refineR", refineR_->value());
     s.setValue("refineFmPx", refineFmPx_->value());
-    s.setValue("softPx", softPx_->value());
-    s.setValue("haloPrior", haloPrior_->value());
-    s.setValue("darkPrior", darkPrior_->value());
-    s.setValue("darkReach", darkReach_->value());
-    s.setValue("flatBlur", flatBlur_->value());
-    s.setValue("endClaim", endClaim_->isChecked());
+    s.setValue("fade", softPx_->value());
     s.endGroup();
     perfFromUi().save(s);
 }
@@ -1065,11 +1037,8 @@ void MainWindow::resetSettings() {
     cradius_->setValue(32);
     bradius_->setValue(0);
     advanced_->setChecked(false);
-    depthRes_->setCurrentIndex(1);
-    focusRadius_->setValue(6); focusPower_->setValue(4); depthFmPx_->setValue(6); volAggPx_->setValue(32);
-    refineR_->setValue(12); refineFmPx_->setValue(9); softPx_->setValue(3); haloPrior_->setValue(2); darkPrior_->setValue(1);
-    darkReach_->setValue(24); flatBlur_->setValue(256);
-    endClaim_->setChecked(false);
+    depthRes_->setCurrentIndex(0);
+    refineR_->setValue(12); refineFmPx_->setValue(9); softPx_->setValue(5);
     perfToUi(PerfSettings());
     statusBar()->showMessage("Settings reset to the defaults.", 4000);
 }
@@ -2176,7 +2145,7 @@ bool MainWindow::buildJob(JobOptions& jo, bool interactive) {
         jo.stack.po.vol_agg_px = volAggPx_->value();
         jo.stack.refine_r = refineR_->value();
         jo.stack.refine_fm_px = refineFmPx_->value();
-        jo.stack.soft_px = softPx_->value();
+        jo.stack.b_fade = softPx_->value();
         jo.stack.halo_prior = haloPrior_->value();
         jo.stack.dark_prior = darkPrior_->value();
         jo.stack.dark_reach_px = darkReach_->value();

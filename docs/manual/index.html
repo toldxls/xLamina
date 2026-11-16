@@ -477,7 +477,7 @@ li.aside { list-style:none; color:var(--dim); }
   <li>Mark a region a little larger than the fault, so its edge lies where the old and the new image agree.</li>
   <li>Mark regions on the left pane, or on another pane that shows an image of the same size.</li>
   <li>Regions are laid into the retouch result: Retouch switches on with the first region, and the brush can paint over a region afterwards. While a region tool is on, the left button marks regions; switch the tool off to paint.</li>
-  <li>What the strengths change depends on the render's Depth resolution: at 1/2 or Full, how weak a detail may be and still set the depth; at 1/4, how much of the region is treated as featureless background, and how far the fine focus searches.</li>
+  <li>What the strengths change depends on the render's Depth resolution: at 1/2 or Full, how weak a detail may be and still set the depth; at 1/4, how far the fine focus searches (2, 3 and 5 times the Refine range).</li>
   <li>Refine works on the outputs of the last render. After another render, or another folder, press Compare again and mark the regions on the new output.</li>
   <li>The strengths act on the depth map, so they change B most; the pyramid outputs (C, CBn and the others) change where they take from B or follow its depth.</li>
   <li>If a region shows no change at any strength, the fault has another cause: see <a href="#fixing">Fixing image problems</a>, or paint C into B there with <a href="#retouch">Retouch</a>.</li>
@@ -591,7 +591,7 @@ li.aside { list-style:none; color:var(--dim); }
 <p><b>Log</b> holds the engine's messages; when a render fails the reason is here. Tools &gt; Copy log copies it.</p>
 </section>
 
-<section id="developer" data-k="developer controls advanced radius depth resolution focus window power volume aggregation refine soft labels halo prior dark reach flat smoothing developer outputs">
+<section id="developer" data-k="developer controls advanced radius depth resolution refine range window edge fade larger smaller developer outputs">
 <h2>Developer controls <span class="dev">developer</span></h2>
 <p><b>View &gt; Developer controls</b> (also in Preferences &gt; General), on when xLamina is first installed, shows the tuning controls: the outputs beyond B and C, Radius (C), Radius (B), the Advanced group, Tools &gt; Developer outputs, and the <a href="#depth">depth map</a> tab. Turning it off changes nothing about a render except that the extra outputs are not rendered.</p>
 <figure class="shot narrow" data-img="render_panel_developer" data-cursor="row Radius (C)" data-marks="group Outputs;row Radius (C);row Radius (B);group Advanced">
@@ -603,21 +603,13 @@ li.aside { list-style:none; color:var(--dim); }
   </ol>
 </figure>
 <h3>Advanced (depth and composition)</h3>
-<p>Change one value at a time and judge at 1:1; a <a href="#sweep">sweep</a> does this for you. <b>Defaults</b> restores them all.</p>
+<p>Four settings of B. Change one at a time and judge at 1:1; a <a href="#sweep">sweep</a> does this for you. <b>Defaults</b> restores them all.</p>
 <table>
-  <tr><th>Setting</th><th>Default</th><th>What it does</th></tr>
-  <tr><td>Focus window</td><td>6 px</td><td>The window of the focus measure.</td></tr>
-  <tr><td>Focus power</td><td>4</td><td>The exponent on the focus measure when frames compete.</td></tr>
-  <tr><td>Depth resolution</td><td>1/2 of the sensor</td><td>The resolution the depth is solved at. 1/4 is faster but doubles the edges of bright plates; Full is for small stacks only (about 25 GB of GPU memory for 200 frames).</td></tr>
-  <tr><td>Depth window</td><td>6 px</td><td>The focus window inside the depth volume.</td></tr>
-  <tr><td>Volume aggregation</td><td>32 px</td><td>Edge-aware smoothing of the depth volume, against ghost lines beside edges.</td></tr>
-  <tr><td>Refine range</td><td>12 frames</td><td>The fine focus search around the coarse depth, in frames either way. 0 skips it.</td></tr>
-  <tr><td>Refine window</td><td>9 px</td><td>The window of that fine search.</td></tr>
-  <tr><td>Soft labels</td><td>3 px</td><td>How soft the seams between frames are when B is composed. Lower = more fine detail but visible seams.</td></tr>
-  <tr><td>Halo prior</td><td>2</td><td>B's preference for darker frames beside bright objects.</td></tr>
-  <tr><td>Dark prior</td><td>1</td><td>B's preference for darker frames in featureless background.</td></tr>
-  <tr><td>Dark reach</td><td>24 px</td><td>How far from sharp content the dark prior stays off.</td></tr>
-  <tr><td>Flat smoothing</td><td>256 px</td><td>Defocused background: a band this wide beside sharp detail takes that detail's frame; beyond it the background follows its own focus peak with soft transitions. 0 = off.</td></tr>
+  <tr><th>Setting</th><th>Default</th><th>Larger</th><th>Smaller</th></tr>
+  <tr><td>Depth resolution</td><td>1/4 of the sensor</td><td>1/2: fine detail behind crystals is kept, broad faint detail beside them is lost. More time and graphics memory (about 6 GB for 200 full frames). Full is for small stacks only.</td><td>1/4: broad faint detail beside crystals is kept. Fastest.</td></tr>
+  <tr><td>Refine range</td><td>12 frames</td><td>A narrower blurred band beside crystals. It may draw arcs around them, or look through clear crystals to what is behind.</td><td>Fewer arcs, a wider band. 0 = no fine focus. auto = a fifth of the stack (12 to 60).</td></tr>
+  <tr><td>Refine window</td><td>9 px</td><td>Smoother, less noise; fine detail follows its surroundings.</td><td>Fine detail is followed closer; more noise.</td></tr>
+  <tr><td>Edge fade</td><td>5 px</td><td>Softer transitions where neighbouring pixels come from different frames.</td><td>Crisper; the edge of a halo shows as a line.</td></tr>
 </table>
 </section>
 
@@ -690,7 +682,7 @@ li.aside { list-style:none; color:var(--dim); }
 <p>A layer is held and stepped here as in the main window: <b>click</b> on either pane to hold the layer under the cursor, the <b>arrow keys</b> or <kbd>PgUp</kbd> / <kbd>PgDn</kbd> for the next layer, <kbd>Esc</kbd> or a click on the held layer to let go. While a layer is held it takes the place of the Overlay and of the Difference highlight.</p>
 </section>
 
-<section id="sweep" data-k="sweep variants parameter search try settings soft labels refine background compare change">
+<section id="sweep" data-k="sweep variants parameter search try settings refine depth resolution radius compare change">
 <h2>Sweeps: try several settings at once <span class="dev">tuning</span></h2>
 <p><b>Run sweep…</b> at the bottom of the Render panel, or <b>Compare &gt; Run sweep…</b> (<kbd>Ctrl+Shift+R</kbd>), renders B several times, each with one setting changed from the Render panel's, over a single alignment. The compare window then opens with the variants listed by how much they differ from the base, so the first rows are the ones worth looking at.</p>
 <figure class="shot mid" data-img="sweep" data-cursor="Run sweep" data-marks="group Set;@0.5,0.42;Run sweep">
@@ -780,13 +772,13 @@ li.aside { list-style:none; color:var(--dim); }
   <tr><td>A pale or dark outline running beside a strong edge, a few pixels away from it</td><td>A frame slightly out of focus draws a rim beside every bright edge. Taken from frames far from the edge's own depth, the rim looks like an outline.</td><td>Raise <b>Radius (C)</b> (32, then 48 or 64): it also cleans B. CBn or Cx in place of C. An outline inside a bright crystal face stays: Retouch it from the output that does not show it.</td></tr>
   <tr><td>Edges drawn twice</td><td>Frames that moved or were shaken while being read out; or the depth solved too coarsely.</td><td>Keep Correct rolling-shutter warp checked (Preferences). Drop the red and violet frames. Set Depth resolution to 1/2 if it is at 1/4.</td></tr>
   <tr><td>A soft patch, or the whole image a little soft</td><td>Frames blurred during the exposure; or the resampling.</td><td>Drop the amber frames. Output at Full resolution. Interpolation Lanczos 3 or Lanczos 8 (Preferences).</td></tr>
-  <tr><td>B is smooth where C, or the frames, show faint detail: fine needles, texture inside a crystal</td><td>B takes one depth per pixel. Where the focus signal is weak it takes the depth of the surroundings, and faint detail at another depth is blended away.</td><td><a href="#refine">Refine</a> the region. Retouch: paint C into B there. For the whole image: the other Depth resolution (1/2 and 1/4 lose faint detail in different places), Refine range 24, Soft labels 2.</td></tr>
+  <tr><td>B is smooth where C, or the frames, show faint detail: fine needles, texture inside a crystal</td><td>B takes one depth per pixel. Where the focus signal is weak it takes the depth of the surroundings, and faint detail at another depth is blended away.</td><td><a href="#refine">Refine</a> the region. Retouch: paint C into B there. For the whole image: the other Depth resolution (1/2 and 1/4 lose faint detail in different places), Refine range 24, Edge fade 3.</td></tr>
   <tr><td>C is grainy in flat areas</td><td>C takes the strongest detail at every point, and in a flat area the strongest thing is noise.</td><td>Raise <b>Smoothing (C)</b> (2, then 3). Cn or CBn. B.</td></tr>
   <tr><td>A glow or haze around bright highlights in C</td><td>A highlight far out of focus is a large bright disc, and C takes it as coarse detail.</td><td>Cx. Cg, then Cg2. B.</td></tr>
   <tr><td>Glints or specks in C that belong to another depth</td><td>C chose them from a frame far from the surface they lie on.</td><td>CBn. Cd.</td></tr>
-  <tr><td>Rings, steps or blotches in the out-of-focus background of B</td><td>The background has no sharp frame, so its depth wanders through the stack.</td><td>Flat smoothing at its default of 256 (0 switches the treatment off). Volume aggregation at its default of 32: lower values draw blotches.</td></tr>
-  <tr><td>A band of the wrong brightness or sharpness beside a bright crystal in B</td><td>The band takes the depth of the background behind it instead of the crystal's.</td><td>Raise Halo prior (2, then 4). Radius (B) 16 to 32. Neither cures every case: Retouch what is left.</td></tr>
-  <tr><td>Hard steps in B where two areas meet</td><td>Soft labels set too low.</td><td>Soft labels back to 3.</td></tr>
+  <tr><td>Rings, steps or blotches in the out-of-focus background of B</td><td>The background has no sharp frame, so its depth wanders through the stack.</td><td>B blends over a wide area where there is no detail, which hides most of them. Raise Edge fade. Retouch what is left.</td></tr>
+  <tr><td>A blurred band of background beside a sharp crystal in B</td><td>Close to a crystal the background is given the crystal's frame, in which the background is out of focus.</td><td>Refine range 24, then up to 60 (it may draw arcs around crystals). The other Depth resolution. Retouch what is left.</td></tr>
+  <tr><td>Hard steps in B where two areas meet</td><td>Edge fade set too low.</td><td>Raise Edge fade (5, then 8).</td></tr>
   <tr><td>Horizontal bands of brightness</td><td>LED flicker during the sensor's readout.</td><td>Check Correct LED banding (Preferences).</td></tr>
   <tr><td>Short dark trails or specks, the same in every stack</td><td>Dust on the sensor, drawn out by the alignment.</td><td><a href="#dust">Dust map</a>.</td></tr>
   <tr><td>The output is smaller than the frames</td><td>Only the area every frame covers is kept.</td><td>Reference: Middle frame. Lock scale with telecentric optics. Drop frames that shifted far (red).</td></tr>
@@ -795,16 +787,14 @@ li.aside { list-style:none; color:var(--dim); }
 <h3>What each setting is for</h3>
 <p>Radius (C), Radius (B) and the Advanced group are shown with <a href="#developer">Developer controls</a> on. Sizes are in pixels of the sensor: to find one, <a href="#measuring">measure</a> the feature with the unit on px.</p>
 <table>
-  <tr><th>Setting</th><th>Raise it when</th><th>What it costs</th></tr>
-  <tr><td><b>Smoothing (C)</b><br>default 2</td><td>C is grainy in flat areas.</td><td>C's weakest real detail goes with the grain. At 3, C is Cn.</td></tr>
-  <tr><td><b>Radius (C)</b><br>default 32 px</td><td>Outlines run beside strong edges. Set it near the distance from the edge to the outline.</td><td>A small feature close to a stronger edge at another depth is lost. 0 = each point chooses alone.</td></tr>
-  <tr><td><b>Radius (B)</b><br>default 0 = off</td><td>B has a wrong band beside a strong edge that Radius (C) did not clean.</td><td>The same loss as Radius (C), in B's depth.</td></tr>
-  <tr><td><b>Depth resolution</b><br>default 1/2</td><td>From 1/4 to 1/2: bright edges are drawn twice. Full only for small stacks.</td><td>Time and graphics memory. 1/2 and 1/4 smooth faint detail in different places, so one may suit a specimen better than the other.</td></tr>
-  <tr><td><b>Refine range</b><br>default 12 frames</td><td>Fine detail in B sits a few frames from where the smooth depth put it (to 24).</td><td>A longer fine-focus pass; more chance of taking a rim from a frame far away.</td></tr>
-  <tr><td><b>Soft labels</b><br>default 3 px</td><td>Lower it (to 2) for more fine detail in B.</td><td>At 1 the seams between frames show.</td></tr>
-  <tr><td><b>Flat smoothing</b><br>default 256 px</td><td>Leave it. Lower it only if a region with faint detail is being treated as background.</td><td>Rings and blotches return in the real background.</td></tr>
-  <tr><td><b>Halo prior</b><br>default 2</td><td>The band beside a bright object takes the wrong depth.</td><td>Darker frames win more often beside bright objects.</td></tr>
-  <tr><td><b>Dark prior</b>, <b>Dark reach</b><br>defaults 1, 24 px</td><td>Leave them. They steer featureless background to the darker frames.</td><td>With Dark reach lowered, dark frames creep into the gaps between fine detail.</td></tr>
+  <tr><th>Setting</th><th>Larger</th><th>Smaller</th></tr>
+  <tr><td><b>Smoothing (C)</b><br>default 2</td><td>C is cleaner in flat areas; its weakest real detail goes with the grain. At 3, C is Cn.</td><td>More fine detail, more grain. 0 = none.</td></tr>
+  <tr><td><b>Radius (C)</b><br>default 32 px</td><td>Fewer outlines beside strong edges (set it near the distance from the edge to the outline). A small feature close to a stronger edge at another depth is lost.</td><td>Such features are kept; more outlines. 0 = each point chooses alone.</td></tr>
+  <tr><td><b>Radius (B)</b><br>default 0 = off</td><td>A strong edge takes more of what is beside it in B's depth; small features near it lose their depth.</td><td>The reverse.</td></tr>
+  <tr><td><b>Depth resolution</b><br>default 1/4</td><td>1/2: fine detail behind crystals is kept, broad faint detail beside them is lost. More time and graphics memory. Full only for small stacks.</td><td>1/4: broad faint detail beside crystals is kept. Fastest.</td></tr>
+  <tr><td><b>Refine range</b><br>default 12 frames</td><td>A narrower blurred band beside crystals. It may draw arcs around them, or look through clear crystals.</td><td>Fewer arcs, a wider band.</td></tr>
+  <tr><td><b>Refine window</b><br>default 9 px</td><td>Smoother, less noise; fine detail follows its surroundings.</td><td>Fine detail is followed closer; more noise.</td></tr>
+  <tr><td><b>Edge fade</b><br>default 5 px</td><td>Softer transitions between frames in B.</td><td>Crisper; the edge of a halo shows as a line.</td></tr>
 </table>
 <p>After experiments, <b>Defaults</b> in the Advanced group and Render &gt; Reset settings to defaults put everything back.</p>
 </section>

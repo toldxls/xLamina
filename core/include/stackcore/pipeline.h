@@ -109,15 +109,25 @@ struct Pass1Options {
     // running out of memory part-way (run_stack sets it when it may answer with strips)
     bool stop_if_short = false;
     bool host_state = false;                      // also download the merged state into Pass1::merged (the fold command)
-    // the depth volume's resolution as a fraction of the sensor: 1/2 since 0.6.1 (FINDINGS 32: the doubled plate
-    // edges of 1/4 are gone at 1:1); --depth-fraction 0.25 gives the 0.5.x reference B
-    double depth_fraction = 0.5, depth_fm_px = 6.0, vol_agg_px = 32.0;
+    // the depth volume's resolution as a fraction of the sensor. 1/4 again since 1.2.0 (1/2 from 0.6.1, for the
+    // doubled plate edges of 1/4, FINDINGS 32). With one scale, at 1/2 broad weak detail beside strong detail
+    // (striations beside grains) loses its depth to the strong detail, and at 1/4 fine detail does (needles behind a
+    // group of grains): the blurred band of a halo, either way. 1/2 with the measure at two scales
+    // (depth_two_scale) keeps both in the depth map, but its B was judged the poorer one by eye on two stacks:
+    // off, and 1/4
+    // vol_agg_px: the edge-aware aggregation of the volume, sensor px. 0 (off) since 1.2.0: at 32 a crystal's depth
+    // reached 20 to 60 px further into the background than the crystal does (measured against another stacker's
+    // depth map on a group of grains), and that band of background, taken from the crystal's frame, is the halo
+    double depth_fraction = 0.25, depth_fm_px = 6.0, vol_agg_px = 0.0;
+    bool depth_two_scale = false;                 // VolumeParams::two_scale
     // defocused background (FINDINGS 34): in flat regions of the guide (no texture within flat_reach_px) every
     // focus slice is box-blurred over flat_blur_px, and in the depth stage pixels without sharp detail within reach
     // take the nearest sharp detail's frame in a band about flat_blur_px wide, the quieter end of the stack beyond
-    // it (DepthParams::flat, flat_blur_px). 0 = off (the 0.5.x behaviour: the priors decide). 128 from 0.6.4; 256 since
-    // 0.6.22 (FINDINGS 44: a fifth less ring energy in the background, detail untouched; preferred at 1:1)
-    double flat_blur_px = 256.0, flat_reach_px = 24.0;
+    // it (DepthParams::flat, flat_blur_px). 0 = off (the priors decide). 128 from 0.6.4, 256 from 0.6.22; off since
+    // 1.2.0: the band took real detail with it (crystals in haze, a needle group in the background, checked against
+    // the frames), and what it was for, the seams between patches of background, B's wide fade now deals with
+    // (StackOptions::b_steps)
+    double flat_blur_px = 0.0, flat_reach_px = 24.0;
     double flat_min = 0.0;                        // DepthParams::flat_min (least-structure data term in flat regions); 0 = off
     // the flat mask's two texture thresholds, given instead of ranked over this rectangle (flat_hi > flat_lo >= 0): a
     // strip takes the whole frame's, or its mask would follow its own content
@@ -238,6 +248,11 @@ FrameSharpness frame_sharpness(const std::vector<double>& energy, double cutoff 
 struct StackOptions {
     Pass1Options po;
     std::string out;                   // output folder; empty = write nothing
+    // refine_r: how many frames either way of the coarse depth the fine focus may look. -1 = from the stack: 22 % of
+    // its frames, at least 12 and at most 60. A wide range lets the background beside a crystal reach its own frame
+    // where the coarse depth gave it to the crystal, but at 60 on 276 frames it drew arcs around needle tips on a
+    // dark background and lost small grains, and at 120 on 261 it looked through translucent plates to the matrix
+    // behind: 12 stays the default.
     int streams = 2, refine_r = 12;
     // the fine focus's window widens as the stack gets shorter than 192 frames (refine_fm_px x 192 / frames, at most
     // twice): see fuse_from_pass1
@@ -250,6 +265,13 @@ struct StackOptions {
     // stands only where it joins a neighbouring surface; needs the rim check's planes
     bool refine_island = true;
     double refine_fm_px = 9.0, soft_px = 3.0;
+    // B's composition (compose.h compose_frame_steps), since 1.2.0: every pixel from the frame its fine depth names,
+    // with a fade between neighbouring pixels' frames of b_fade (sigma, sensor px; 2 left the edge of a halo as a line) where there is detail and b_wide
+    // where there is none. false = the composition up to 1.1.1: soft labels (soft_px) mixed by confidence with a
+    // second image whose depth slides smoothly through the stack; that one blurred weak detail beside strong detail
+    // and drew a band there.
+    bool b_steps = true;
+    double b_fade = 5.0, b_wide = 24.0;
     double c_smoothing = 0.0;          // C's smoothing (FinalParams::c_smoothing); 0 = the raw selection
     double soft_cutoff = 0.9;          // the soft-frame flag's cutoff (frame_sharpness): a frame under this share of its neighbours' focus energy
     // FINDINGS 51: apply the alignment's per-frame row corrections in every warp (run_job copies them into po):

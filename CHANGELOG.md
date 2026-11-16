@@ -2,6 +2,15 @@
 
 The newest version first. In the program: Help > What's new.
 
+## 1.2.0 (15 November 2026)
+
+- **B** is composed another way: each pixel comes from the frame its depth map names, with a short blend between neighbouring frames. The blurred band beside sharp crystals is narrower, and faint detail near them (striations, small crystals in haze) is kept.
+- B's defaults changed with it: depth resolution 1/4; the smoothing of flat regions and the volume aggregation are off.
+- **Advanced** has four settings in place of thirteen: Depth resolution, Refine range, Refine window, Edge fade. Advanced settings stored by an earlier version are not carried over.
+- The tooltips of the render settings say what a larger and a smaller value does.
+- Refine window moves in steps of 0.5 px.
+- B's composition pass is about a third faster.
+
 ## 1.1.1 (15 November 2026)
 
 - **Live view:** every frame of the stack is shown, in order and at an even pace, in each pass. Before, it showed a third to a half of them at uneven steps.

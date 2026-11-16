@@ -44,7 +44,7 @@ SweepDialog::SweepDialog(const StackOptions& base, const QString& defaultOut, QW
     if (df < 0.99) { add(extraSet_, extraWords, "depth-full", "depth resolution Full (small stacks only)", {{"--depth-fraction", "1"}}); ++extraGroups_; }
     else { add(extraSet_, extraWords, "depth-quarter", "depth resolution 1/4", {{"--depth-fraction", "0.25"}}); ++extraGroups_; }
     // ---- the fine focus: half and double the range, double the window; off, three times and half the window as extras
-    const int r = std::max(1, base.refine_r);
+    const int r = base.refine_r < 0 ? 40 : std::max(1, base.refine_r);   // (-1: from the stack, 12 to 60)
     const int rHalf = std::max(2, r / 2), rDouble = r * 2;
     add(quickSet_, quickWords, QString("fine-range-%1").arg(rHalf), QString("fine focus range %1").arg(rHalf), {{"--refine-r", num(rHalf)}});
     add(quickSet_, quickWords, QString("fine-range-%1").arg(rDouble), QString("%1").arg(rDouble), {{"--refine-r", num(rDouble)}});

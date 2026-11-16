@@ -1792,9 +1792,9 @@ namespace {
 // lowered for the whole image the same setting lets defocus blobs through elsewhere.
 //
 // That holds for a depth volume at 1/2 of the sensor or finer. At 1/4 the ramp changes nothing (the confidence is
-// there already): what smooths faint detail away is the region being taken for featureless background, whose focus
-// slices are blurred wide, and the fine focus's short range. There the strengths are: a shorter reach for "featureless",
-// no such treatment at all, and that with three times the fine focus's range. (At 1/2 the latter draw dark blobs.)
+// there already): what smooths faint detail away, and blurs the background beside a crystal, is the fine focus's
+// short range around a coarse depth that is the neighbour's. There the strengths are 2, 3 and 5 times the render's
+// range. (Over a whole image the wide ranges draw arcs around crystals; at 1/2 they draw dark blobs.)
 struct DetailStrength { const char* name; double factor; };
 const DetailStrength kDetail[3] = {{"low", 0.9}, {"medium", 0.7}, {"high", 0.35}};
 const double kRegionMargin = 512;   // sensor px rendered around a region (run_region's margin)
@@ -1803,9 +1803,9 @@ std::vector<std::pair<std::string, std::string>> detailOptions(int strength, con
     auto num = [](double v) { return QString::number(v, 'g', 4).toStdString(); };
     strength = std::clamp(strength, 0, 2);
     if (so.po.depth_fraction < 0.4) {
-        if (strength == 0) return {{"--flat-reach", num(std::max(2.0, so.po.flat_reach_px / 3))}};
-        if (strength == 1) return {{"--flat-blur", "0"}};
-        return {{"--flat-blur", "0"}, {"--refine-r", num(std::max(36, so.refine_r * 3))}};
+        static const int kTimes[3] = {2, 3, 5};
+        const int r = so.refine_r < 0 ? 24 : std::max(12, so.refine_r);   // (-1: from the stack, 12 to 60)
+        return {{"--refine-r", num(r * kTimes[strength])}};
     }
     const stackcore::DepthParams dflt;   // the render's own ramp, lowered
     const double lo = so.conf_lo > 0 ? so.conf_lo : dflt.c_lo, hi = so.conf_hi > 0 ? so.conf_hi : dflt.c_hi;

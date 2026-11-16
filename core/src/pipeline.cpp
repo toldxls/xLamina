@@ -626,6 +626,7 @@ static VolumeParams volume_params(const Pass1Options& po, const Grid& g) {
     vp.fm_radius = (float)std::max(0.8, po.depth_fm_px * po.depth_fraction);
     vp.agg_r = (int)std::nearbyint(po.vol_agg_px * po.depth_fraction);
     if (po.vol_agg_px * po.depth_fraction < 1.0) vp.agg_r = 0;
+    vp.two_scale = po.depth_two_scale;
     return vp;
 }
 
@@ -1387,12 +1388,14 @@ static void limit_stack_options(StackOptions& so) {
     lim("--flat-reach", po.flat_reach_px, 1024);
     lim("--refine-fm-px", so.refine_fm_px, 128);
     lim("--soft-px", so.soft_px, 64);
+    lim("--b-fade", so.b_fade, 64);
+    lim("--b-wide", so.b_wide, 512);
     lim("--dark-reach", so.dark_reach_px, 1024);
     lim("--end-vote", so.end_vote_px, 1024);
     lim("--strip-overlap", so.strip_overlap_px, 4096);
     if (so.strip_overlap_px < 64) so.strip_overlap_px = 64;
     so.strips = std::clamp(so.strips, 0, 16);
-    so.refine_r = std::clamp(so.refine_r, 0, 1000);
+    so.refine_r = std::clamp(so.refine_r, -1, 1000);
     so.streams = std::clamp(so.streams, 1, 16);
     po.opt.streams_per_gpu = std::clamp(po.opt.streams_per_gpu, 1, 16);
     po.opt.readers = std::clamp(po.opt.readers, 1, 256);
@@ -1427,6 +1430,9 @@ static bool parse_stack_option_raw(const std::string& a, const std::string& v, S
     else if (a == "--refine-island") so.refine_island = atoi(v.c_str()) != 0;
     else if (a == "--refine-fm-px") so.refine_fm_px = atof(v.c_str());
     else if (a == "--soft-px") so.soft_px = atof(v.c_str());
+    else if (a == "--b-fade") so.b_fade = atof(v.c_str());
+    else if (a == "--b-wide") so.b_wide = atof(v.c_str());
+    else if (a == "--b-steps") so.b_steps = atoi(v.c_str()) != 0;
     else if (a == "--smoothing") so.c_smoothing = atof(v.c_str());
     else if (a == "--soft-cutoff") so.soft_cutoff = atof(v.c_str());
     else if (a == "--c-radius") so.po.c_radius_px = atof(v.c_str());
@@ -1471,6 +1477,7 @@ static bool parse_stack_option_raw(const std::string& a, const std::string& v, S
     else if (a == "--depth-fraction") so.po.depth_fraction = atof(v.c_str());
     else if (a == "--depth-fm-px") so.po.depth_fm_px = atof(v.c_str());
     else if (a == "--vol-agg-px") so.po.vol_agg_px = atof(v.c_str());
+    else if (a == "--depth-two-scale") so.po.depth_two_scale = atoi(v.c_str()) != 0;
     else if (a == "--outputs") {
         so.outputs.clear();
         size_t i = 0;
@@ -2055,7 +2062,8 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
     // specks (FINDINGS 57). A shorter range cures that but leaves depth edges soft, where the smooth depth is off by
     // more than the range; a window twice as wide sees the speck itself, whose own frame then wins, and keeps the
     // range. So the window widens as the stack gets shorter than 192 frames, up to twice (--refine-scale 0: as given)
-    const int refine_r = so.refine_r;
+    const int refine_r = so.refine_r < 0 ? std::clamp((int)std::lround(0.22 * K), 12, 60) : so.refine_r;
+    if (so.refine_r < 0) logf("refine: the fine focus looks %d frames either way (from the stack's %d frames)\n", refine_r, K);
     double refine_fm_px = so.refine_fm_px;
     if (so.refine_scale && K < 192 && K >= 2) {
         refine_fm_px = so.refine_fm_px * std::min(2.0, 192.0 / K);
@@ -2311,10 +2319,14 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
     // ---- pass 3: composition over the frames that carry a label
     auto t3 = std::chrono::steady_clock::now();
     std::vector<float> b_img;
+    // B from the fine depth as it stands (compose.h compose_frame_steps), or the composition up to 1.1.1 (--b-steps 0)
+    const bool want_bs = so.b_steps;
     {
         // the smooth-depth blend widened in flat regions (FINDINGS 41): a per-pixel width map from the flat mask
-        const bool wide = so.flat_blend > 1.0 && !P.flat.empty() && po.flat_blur_px > 0;
-        std::vector<int> ks = compose_frames(R.depth_s, Ds, K, wide ? (float)so.flat_blend : 1.f);
+        const bool wide = so.flat_blend > 1.0 && !P.flat.empty() && po.flat_blur_px > 0 && !want_bs;
+        std::vector<int> ks;
+        if (want_bs) steps_frames(R.depth_s, K, ks);
+        else ks = compose_frames(R.depth_s, Ds, K, wide ? (float)so.flat_blend : 1.f);
         std::vector<fs::path> sub;
         for (int k : ks) sub.push_back(P.paths[k]);
         int ndev = 0;
@@ -2343,9 +2355,10 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
         } tidy{cst, csc, d_D, d_Ds, d_W, d_fs, P.devs, prim};
         for (int d : P.devs) {
             CK(cudaSetDevice(d));
-            cst[d].alloc(d, ow, oh);
+            if (want_bs) cst[d].alloc_steps(d, ow, oh);
+            else cst[d].alloc(d, ow, oh);
             csc[d].resize(streams);
-            for (auto& sc : csc[d]) sc.alloc(ow, oh, s1);
+            for (auto& sc : csc[d]) sc.alloc(ow, oh, s1, want_bs ? (float)std::max(0.5, so.b_fade * P.g.scale) : 0.f, (float)(so.b_wide * P.g.scale));
             CK(cudaMalloc(&d_D[d], no * sizeof(float)));
             CK(cudaMalloc(&d_Ds[d], no * sizeof(float)));
             CK(cudaMemcpy(d_D[d], R.depth_s.data(), no * sizeof(float), cudaMemcpyHostToDevice));
@@ -2378,7 +2391,8 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
         const StreamerStats st3 = run_pass(sub, ks, P.T, P.g, po, P.devs, streams, po.opt.readers, po.opt.cache, ctx,
                  [&](int, PassSlot&, int, cudaStream_t) {},
                  [&](int dev, PassSlot& S, int k, cudaStream_t fs) {
-                     compose_frame(cst[dev], k, S.d_warp, d_D[dev], d_Ds[dev], csc[dev][S.index], fs, d_W[dev]);
+                     if (want_bs) compose_frame_steps(cst[dev], k, S.d_warp, d_D[dev], K, csc[dev][S.index], fs);
+                     else compose_frame(cst[dev], k, S.d_warp, d_D[dev], d_Ds[dev], csc[dev][S.index], fs, d_W[dev]);
                      // live view: the first GPU's composition so far, every preview_every frames
                      if (hooks.preview && dev == P.devs[0] && (++composed % std::max(1, hooks.preview_every) == 0) && ctx[dev].bp.tryFlush(hooks) &&
                          ctx[dev].bp.due(hooks.preview_min_ms))
@@ -2397,7 +2411,7 @@ static int fuse_from_pass1(StackOptions& so, Pass1& P, bool release_volume, std:
             d_D[d] = d_Ds[d] = d_W[d] = nullptr;
         }
         CK(cudaSetDevice(prim));
-        b_img = compose_mix(cst[prim], R.conf, ow, oh, P.g.scale, s);
+        b_img = want_bs ? compose_steps(cst[prim], R.conf, ow, oh, P.g.scale, s) : compose_mix(cst[prim], R.conf, ow, oh, P.g.scale, s);
         for (int d : P.devs) cst[d].free();   // leaves the last device selected
         tidy.done = true;
         CK(cudaSetDevice(prim));

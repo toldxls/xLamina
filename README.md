@@ -14,7 +14,7 @@ field of view and step size are known.
 
 | Output | What it does | Use it for |
 |---|---|---|
-| **B** | Depth map. Measures focus per frame, solves one smooth depth per pixel, then takes each pixel from the frame at that depth with soft transitions. | The cleanest tones and backgrounds. |
+| **B** | Depth map. Measures focus per frame, solves one depth per pixel, then takes each pixel from the frame at that depth, with a short blend between neighbouring frames. | The cleanest tones and backgrounds. |
 | **C** | Laplacian pyramid. Takes every detail, at every scale, from the frame where it is strongest. | The most detail and overlapping structures; noisier, and bright highlights can glow. |
 | **Cn** | C where the detail is above the noise, B elsewhere. | C's detail without its grain in flat areas. |
 | **CBn** | Cn that also falls back to B where C's choice disagrees with the depth map. | Fewer artefacts from frames far from the true depth. |
@@ -147,14 +147,12 @@ they differ.
 Run sweep… at the bottom of the Render panel renders B several times, each with one setting
 changed, and opens the variants in the compare window.
 
-Advanced (depth and composition), unticked by default, exposes the parameters of B's depth
-pipeline and of the composition (depth resolution, focus window and power, depth window,
-volume aggregation, refinement range and window, label softness, halo and dark priors, the
-dark prior's reach, flat smoothing, surroundings from the nearest end frame) at their defaults, for one-at-a-time experiments against
-a 1:1 comparison. The defaults in short: depth is estimated at 1/2 of the sensor resolution
-(1/4 left doubled outlines on bright edges); defocused background keeps the nearest sharp
-detail's frame for about 256 px and beyond that follows its own focus peak with soft
-transitions; flat regions blend up to 32 frames so a depth ramp draws no rings. On stacks of
+Advanced (depth and composition), unticked by default, has four settings of B: the depth
+resolution, the fine focus's range and window, and the edge fade (the width of the blend
+where neighbouring pixels come from different frames). Each tooltip says what a larger and a
+smaller value does. The defaults in short: depth is estimated at 1/4 of the sensor
+resolution; every pixel comes from the frame its depth names, blended over 5 px where the
+image has detail and over a wide area where it has none. On stacks of
 fewer than about 190 frames, where the step between frames is large, the fine focus uses a
 wider window and ignores isolated picks far from the smooth depth, which kept flat crystal
 faces from breaking into blobs. The warp's

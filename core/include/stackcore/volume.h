@@ -23,6 +23,10 @@ struct VolumeParams {
     float fm_radius = 1.5f;    // max(0.8, depth_fm_px * depth_full_fraction)
     int agg_r = 8;             // round(vol_agg_px * depth_full_fraction); 0 = no aggregation
     float agg_eps = 1e-4f;
+    // the focus measure at two scales: the grid's own, and half of it (each px the mean of 2 x 2), the larger of the
+    // two taken. Detail of one scale beside strong detail is missed at the other scale, and its place goes to the
+    // strong detail's frame: fine needles behind a group of grains at 1/4 of the sensor, broad striations at 1/2.
+    bool two_scale = false;
 };
 
 // Per-slot temporaries for one frame's slice (built on the current device).
@@ -31,6 +35,11 @@ struct VolumeScratch {
     float *img_d = nullptr, *y = nullptr, *t1 = nullptr, *t2 = nullptr, *t3 = nullptr;
     DevGaussian g08, g_fm, g_norm, g_lum;
     AreaResizer rz;
+    // the half grid of the two-scale measure (dw2 = 0: one scale)
+    int dw2 = 0, dh2 = 0;
+    float *img2 = nullptr, *y2 = nullptr, *u1 = nullptr, *u2 = nullptr, *u3 = nullptr;
+    DevGaussian g_fm2, g_norm2;
+    AreaResizer rz2;
     void alloc(int ow, int oh, const VolumeParams& p);
     void free();
 };

@@ -61,6 +61,8 @@ static int usage() {
             "               [--fov-mm X | --um-per-px X] [--gpus 0,1] [--streams 2] [--align-scale 0.25] [--baselines 1,2,4,8] [--pair-threads 3]\n"
             "               [--smoothing 0] [--c-radius 0] [--dust-map FILE [--dust-darker 3] [--dust-margin 9]]   align the frames in DIR (TIFF, JPEG; all of them, or those starting with --prefix) and fuse them:\n"
             "               report.json + 16-bit TIFFs in DIR_stacker (or --out). Outputs: A B B0 C CB Cn CBn Cx Cd Cg Cg2 H\n"
+            "               B: every pixel from the frame its fine depth names, with a short fade between them (--b-fade 2, px) and\n"
+            "                  a wide one where there is no detail (--b-wide 24). --b-steps 0 --depth-fraction 0.5 --flat-blur 256 --vol-agg-px 32: B as up to 1.1.1\n"
             "               Several DIRs are rendered one after the other (a batch): each into its own DIR_stacker, or --out\\<folder name>\n"
             "               Cx: CBn with the finer level's support in place of the dominance test (against the glow of defocused highlights)\n"
             "               --smoothing S: C takes detail weaker than S x the noise from B (0 = raw selection, 2 = the window's default, 3 = Cn)\n"

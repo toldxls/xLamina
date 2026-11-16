@@ -77,15 +77,21 @@ std::vector<float> smooth_depth(const std::vector<float>& depth_s, const float* 
 struct ComposeState {          // one per GPU
     int dev = -1, w = 0, h = 0;
     double *n1 = nullptr, *d1 = nullptr, *n2 = nullptr, *d2 = nullptr;   // narrow (x3, x1), smooth (x3, x1)
-    void alloc(int dev, int w, int h);
+    double *n3 = nullptr, *d3 = nullptr;   // B by steps: the fine depth's frames with a short fade between them (x3, x1), or null
+    double *n4 = nullptr, *d4 = nullptr;   // the same with a wide fade, at 1/4 size (w4 x h4; x3, x1)
+    int w4 = 0, h4 = 0;
+    void alloc(int dev, int w, int h);         // n1, d1, n2, d2: the composition up to 1.1.1
+    void alloc_steps(int dev, int w, int h);   // n3, d3, n4, d4: B by steps (one or the other)
     void free();
 };
 
 struct ComposeScratch {        // per slot
     int w = 0, h = 0;
     float *lab = nullptr, *wn = nullptr, *tmp = nullptr;
-    DevGaussian g_s1;
-    void alloc(int w, int h, float soft_sigma);
+    float *lab4 = nullptr, *tmp4 = nullptr, *img4 = nullptr;   // B by steps: the frame and its label at 1/4 size
+    int w4 = 0, h4 = 0;
+    DevGaussian g_s1, g_s2, g_s4;   // g_s2, g_s4: the short and wide fades of B by steps, built when fade_sigma > 0
+    void alloc(int w, int h, float soft_sigma, float fade_sigma = 0.f, float wide_sigma = 0.f);
     void free();
 };
 
@@ -111,6 +117,17 @@ void merge_device(ComposeState& a, const ComposeState& b);   // a += b on a's de
 
 // b1 = n1 / d1, b2 = n2 / d2, mixed by fine detail and focus confidence -> B (float RGB, host)
 std::vector<float> compose_mix(const ComposeState& c, const std::vector<float>& conf, int ow, int oh, double scale, cudaStream_t s);   // c on the current device
+
+// B by steps (StackOptions::b_steps): every pixel from the frame the fine depth names (the depth rounded and kept inside the stack), with a fade
+// between neighbouring pixels' frames: short (the scratch's fade_sigma) where the result has fine detail or the depth
+// is sure, wide (wide_sigma) elsewhere, so that a step in depth across featureless background is a gradient and not
+// an edge. No frame between the two sides of a step is used (sliding the depth through those draws the defocus rings
+// of whatever is near as a line along the step). The wide version is made at 1/4 size: it is used only where there
+// is no detail.
+void steps_frames(const std::vector<float>& depth_s, int n, std::vector<int>& ks);   // adds the frames it needs to ks (kept sorted)
+// after compose_frame for the same frame and slot (uses its scratch)
+void compose_frame_steps(ComposeState& st, int k, const float* d_img, const float* d_D, int nframes, ComposeScratch& sc, cudaStream_t s);
+std::vector<float> compose_steps(const ComposeState& c, const std::vector<float>& conf, int ow, int oh, double scale, cudaStream_t s);   // c on the current device
 
 // ---- finalize
 

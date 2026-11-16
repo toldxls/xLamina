@@ -164,6 +164,67 @@ __global__ void k_flat_width(const float* __restrict__ f, float* __restrict__ w,
     size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) w[i] = 1.f + fminf(fmaxf(f[i], 0.f), 1.f) * (wflat - 1.f);
 }
+// B by steps: 1 where the pixel's frame is k (the depth rounded, inside the stack: every pixel has exactly one frame)
+__global__ void k_step_label(const float* __restrict__ D, float* __restrict__ lab, size_t n, int k, int last) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const int f = (int)nearbyintf(fminf(fmaxf(D[i], 0.f), (float)last));
+    lab[i] = f == k ? 1.f : 0.f;
+}
+// (double sums, as the other composition's: single ones depend on the order the frames arrive in by the last bit, and
+// B would differ by a count here and there from run to run)
+__global__ void k_steps_acc(double* __restrict__ n3, double* __restrict__ d3, const float* __restrict__ w, const float* __restrict__ img, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const double a = w[i];
+    if (a <= 0.0) return;
+    const float* p = img + i * 3;
+    n3[i * 3] += a * p[0]; n3[i * 3 + 1] += a * p[1]; n3[i * 3 + 2] += a * p[2];
+    d3[i] += a;
+}
+// out = n3 / d3 (the short fade's result), y = its luma
+__global__ void k_steps_out(const double* __restrict__ n3, const double* __restrict__ d3, float* __restrict__ out, float* __restrict__ y, size_t npx) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= npx) return;
+    const double den = fmax(d3[i], 1e-12);
+    const float r = (float)(n3[i * 3] / den), g = (float)(n3[i * 3 + 1] / den), b = (float)(n3[i * 3 + 2] / den);
+    out[i * 3] = r; out[i * 3 + 1] = g; out[i * 3 + 2] = b;
+    y[i] = r * c_luma[0] + g * c_luma[1] + b * c_luma[2];
+}
+// the mean of each 4 x 4 block (of what there is of it at the right and bottom edges), ch channels
+__global__ void k_down4(const float* __restrict__ in, int w, int h, float* __restrict__ out, int w4, int h4, int ch) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= w4 || y >= h4) return;
+    const int x1 = min(x * 4 + 4, w), y1 = min(y * 4 + 4, h);
+    float acc[3] = {0.f, 0.f, 0.f};
+    for (int yy = y * 4; yy < y1; ++yy)
+        for (int xx = x * 4; xx < x1; ++xx) {
+            const float* p = in + ((size_t)yy * w + xx) * ch;
+            for (int c = 0; c < ch; ++c) acc[c] += p[c];
+        }
+    const float inv = 1.f / (float)((x1 - x * 4) * (y1 - y * 4));
+    for (int c = 0; c < ch; ++c) out[((size_t)y * w4 + x) * ch + c] = acc[c] * inv;
+}
+// out = cm x out + (1 - cm) x the wide fade's result (n4 / d4, sampled between its 1/4 size cells)
+__global__ void k_steps_mix(float* __restrict__ out, const float* __restrict__ cm, const double* __restrict__ n4, const double* __restrict__ d4,
+                            int w, int h, int w4, int h4) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= w || y >= h) return;
+    const size_t i = (size_t)y * w + x;
+    const float c = fminf(fmaxf(cm[i], 0.f), 1.f);
+    if (c >= 1.f) return;
+    const float fx = fminf(fmaxf((x + 0.5f) * 0.25f - 0.5f, 0.f), (float)(w4 - 1)), fy = fminf(fmaxf((y + 0.5f) * 0.25f - 0.5f, 0.f), (float)(h4 - 1));
+    const int xa = (int)fx, ya = (int)fy, xb = min(xa + 1, w4 - 1), yb = min(ya + 1, h4 - 1);
+    const float tx = fx - xa, ty = fy - ya;
+    const float wa = (1.f - tx) * (1.f - ty), wb = tx * (1.f - ty), wc = (1.f - tx) * ty, wd = tx * ty;
+    const size_t ia = (size_t)ya * w4 + xa, ib = (size_t)ya * w4 + xb, ic = (size_t)yb * w4 + xa, id = (size_t)yb * w4 + xb;
+    const double den = wa * d4[ia] + wb * d4[ib] + wc * d4[ic] + wd * d4[id];
+    if (den < 1e-6) return;   // (no wide result here: the short fade's stands)
+    for (int ch = 0; ch < 3; ++ch) {
+        const float v = (float)((wa * n4[ia * 3 + ch] + wb * n4[ib * 3 + ch] + wc * n4[ic * 3 + ch] + wd * n4[id * 3 + ch]) / den);
+        out[i * 3 + ch] = c * out[i * 3 + ch] + (1.f - c) * v;
+    }
+}
 __global__ void k_compose_acc(double* __restrict__ n1, double* __restrict__ d1, double* __restrict__ n2, double* __restrict__ d2,
                               const float* __restrict__ w, const float* __restrict__ wi, const float* __restrict__ img, size_t n) {
     size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
@@ -331,7 +392,7 @@ void compose_preview_kernel(const ComposeState& st, int down, float* d_out, int&
     down = std::max(1, down);
     pw = std::max(1, st.w / down);
     ph = std::max(1, st.h / down);
-    k_compose_preview<<<dim3((pw + 31) / 32, (ph + 7) / 8), dim3(32, 8), 0, s>>>(st.n1, st.d1, st.w, st.h, down, d_out, pw, ph);
+    k_compose_preview<<<dim3((pw + 31) / 32, (ph + 7) / 8), dim3(32, 8), 0, s>>>(st.n1 ? st.n1 : st.n3, st.n1 ? st.d1 : st.d3, st.w, st.h, down, d_out, pw, ph);
 }
 
 // the refined depth so far: the frame index that holds the best fine focus (grey, / (K-1)); -inf = nothing yet -> 0
@@ -525,15 +586,44 @@ void ComposeState::alloc(int dev_, int w_, int h_) {
     CK(cudaMemset(n2, 0, n * 3 * sizeof(double))); CK(cudaMemset(d2, 0, n * sizeof(double)));
     CK(cudaDeviceSynchronize());
 }
-void ComposeState::free() { if (dev >= 0) { cudaSetDevice(dev); cudaFree(n1); cudaFree(d1); cudaFree(n2); cudaFree(d2); dev = -1; } }
+void ComposeState::alloc_steps(int dev_, int w_, int h_) {
+    dev = dev_; w = w_; h = h_;
+    size_t n = (size_t)w * h;
+    CK(cudaSetDevice(dev));
+    n3 = dalloc<double>(n * 3); d3 = dalloc<double>(n);
+    CK(cudaMemset(n3, 0, n * 3 * sizeof(double))); CK(cudaMemset(d3, 0, n * sizeof(double)));
+    w4 = (w + 3) / 4; h4 = (h + 3) / 4;
+    size_t m = (size_t)w4 * h4;
+    n4 = dalloc<double>(m * 3); d4 = dalloc<double>(m);
+    CK(cudaMemset(n4, 0, m * 3 * sizeof(double))); CK(cudaMemset(d4, 0, m * sizeof(double)));
+    CK(cudaDeviceSynchronize());
+}
+void ComposeState::free() {
+    if (dev < 0) return;
+    cudaSetDevice(dev);
+    cudaFree(n1); cudaFree(d1); cudaFree(n2); cudaFree(d2); cudaFree(n3); cudaFree(d3); cudaFree(n4); cudaFree(d4);
+    n1 = d1 = n2 = d2 = n3 = d3 = n4 = d4 = nullptr;
+    dev = -1;
+}
 
-void ComposeScratch::alloc(int w_, int h_, float soft_sigma) {
+void ComposeScratch::alloc(int w_, int h_, float soft_sigma, float fade_sigma, float wide_sigma) {
     w = w_; h = h_;
     size_t n = (size_t)w * h;
     lab = dalloc<float>(n); wn = dalloc<float>(n); tmp = dalloc<float>(n);
     g_s1.build(soft_sigma);
+    if (fade_sigma > 0.f) {
+        g_s2.build(std::max(0.5f, fade_sigma));
+        g_s4.build(std::max(1.f, wide_sigma * 0.25f));
+        w4 = (w + 3) / 4; h4 = (h + 3) / 4;
+        size_t m = (size_t)w4 * h4;
+        lab4 = dalloc<float>(m); tmp4 = dalloc<float>(m); img4 = dalloc<float>(m * 3);
+    }
 }
-void ComposeScratch::free() { cudaFree(lab); cudaFree(wn); cudaFree(tmp); g_s1.free(); }
+void ComposeScratch::free() {
+    cudaFree(lab); cudaFree(wn); cudaFree(tmp); cudaFree(lab4); cudaFree(tmp4); cudaFree(img4);
+    lab4 = tmp4 = img4 = nullptr;
+    g_s1.free(); g_s2.free(); g_s4.free();
+}
 
 std::vector<int> compose_frames(const std::vector<float>& D, const std::vector<float>& Ds, int n, float wmax) {
     std::vector<char> use(n, 0);
@@ -562,6 +652,59 @@ void compose_frame(ComposeState& st, int k, const float* d_img, const float* d_D
     k_compose_acc<<<blocks1(n), 256, 0, s>>>(st.n1, st.d1, st.n2, st.d2, sc.lab, sc.wn, d_img, n);
 }
 
+void steps_frames(const std::vector<float>& D, int n, std::vector<int>& ks) {
+    std::vector<char> use(n, 0);
+    for (int k : ks) if (k >= 0 && k < n) use[k] = 1;
+    const float last = (float)(n - 1);
+    for (float v : D) use[(int)std::nearbyint(std::min(std::max(v, 0.f), last))] = 1;
+    ks.clear();
+    for (int k = 0; k < n; ++k) if (use[k]) ks.push_back(k);
+}
+
+void compose_frame_steps(ComposeState& st, int k, const float* d_img, const float* d_D, int nframes, ComposeScratch& sc, cudaStream_t s) {
+    size_t n = (size_t)st.w * st.h;
+    const dim3 g4((sc.w4 + 31) / 32, (sc.h4 + 7) / 8), b4(32, 8);
+    k_step_label<<<blocks1(n), 256, 0, s>>>(d_D, sc.lab, n, k, nframes - 1);
+    k_down4<<<g4, b4, 0, s>>>(sc.lab, st.w, st.h, sc.lab4, sc.w4, sc.h4, 1);
+    gaussian_blur(sc.lab, sc.lab, sc.tmp, st.w, st.h, sc.g_s2, s);
+    k_steps_acc<<<blocks1(n), 256, 0, s>>>(st.n3, st.d3, sc.lab, d_img, n);
+    // the wide fade, at 1/4 size
+    size_t m = (size_t)sc.w4 * sc.h4;
+    k_down4<<<g4, b4, 0, s>>>(d_img, st.w, st.h, sc.img4, sc.w4, sc.h4, 3);
+    gaussian_blur(sc.lab4, sc.lab4, sc.tmp4, sc.w4, sc.h4, sc.g_s4, s);
+    k_steps_acc<<<blocks1(m), 256, 0, s>>>(st.n4, st.d4, sc.lab4, sc.img4, m);
+}
+
+std::vector<float> compose_steps(const ComposeState& c, const std::vector<float>& conf, int ow, int oh, double scale, cudaStream_t s) {
+    size_t n = (size_t)ow * oh;
+    float* out = dalloc<float>(n * 3);
+    float *y1 = dalloc<float>(n), *t1 = dalloc<float>(n), *t2 = dalloc<float>(n), *t3 = dalloc<float>(n), *t4 = dalloc<float>(n);
+    k_steps_out<<<blocks1(n), 256, 0, s>>>(c.n3, c.d3, out, y1, n);
+    // where the short fade stands: compose_mix's measure (fine detail in the result, or a sure depth), on this result
+    DevGaussian g07, gfs, gc, gm;
+    g07.build(0.7);
+    gfs.build(std::max(1.5, 3.0 * scale));
+    gc.build(std::max(2.0, 6 * scale));
+    gm.build(std::max(2.0, 8 * scale));
+    gaussian_blur(y1, t2, t1, ow, oh, g07, s);
+    laplacian3_abs(t2, t1, ow, oh, s);
+    gaussian_blur(t1, t3, t2, ow, oh, gfs, s);
+    gaussian_blur(y1, t1, t2, ow, oh, gfs, s);
+    k_ftex<<<blocks1(n), 256, 0, s>>>(t3, t1, t4, n);
+    float floor = percentile(t4, t1, n, 20.0, s) + 1e-9f;
+    float* d_conf = upload(conf);
+    gaussian_blur(d_conf, t1, t2, ow, oh, gc, s);
+    k_crisp<<<blocks1(n), 256, 0, s>>>(t4, t1, t2, n, floor, 1.6f, 3.0f);
+    gaussian_blur(t2, t3, t1, ow, oh, gm, s);       // the mask -> t3
+    k_steps_mix<<<dim3((ow + 31) / 32, (oh + 7) / 8), dim3(32, 8), 0, s>>>(out, t3, c.n4, c.d4, ow, oh, c.w4, c.h4);
+    std::vector<float> h(n * 3);
+    CK(cudaMemcpyAsync(h.data(), out, n * 3 * sizeof(float), cudaMemcpyDeviceToHost, s));
+    CK(cudaStreamSynchronize(s));
+    g07.free(); gfs.free(); gc.free(); gm.free();
+    for (void* p : {(void*)y1, (void*)t1, (void*)t2, (void*)t3, (void*)t4, (void*)d_conf, (void*)out}) cudaFree(p);
+    return h;
+}
+
 HostCompose download(const ComposeState& st) {
     CK(cudaSetDevice(st.dev));
     CK(cudaDeviceSynchronize());
@@ -581,8 +724,11 @@ void merge_device(ComposeState& a, const ComposeState& b) {
     size_t n = (size_t)a.w * a.h;
     double* tmp = dalloc<double>(n * 3);
     CrossCopier cc(a.dev, b.dev);
-    struct P { double* dst; const double* src; size_t cnt; } parts[4] = {{a.n1, b.n1, n * 3}, {a.d1, b.d1, n}, {a.n2, b.n2, n * 3}, {a.d2, b.d2, n}};
+    const size_t m = (size_t)a.w4 * a.h4;
+    struct P { double* dst; const double* src; size_t cnt; } parts[8] = {{a.n1, b.n1, n * 3}, {a.d1, b.d1, n}, {a.n2, b.n2, n * 3}, {a.d2, b.d2, n},
+                                                                      {a.n3, b.n3, n * 3}, {a.d3, b.d3, n}, {a.n4, b.n4, m * 3}, {a.d4, b.d4, m}};
     for (auto& p : parts) {
+        if (!p.dst || !p.src) continue;   // (the sums of the composition that is not in use)
         cc.copy(tmp, p.src, p.cnt * sizeof(double));
         add_f64(p.dst, tmp, p.cnt, 0);
         CK(cudaDeviceSynchronize());
